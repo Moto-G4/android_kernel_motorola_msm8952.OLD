@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -19,6 +19,7 @@
 #include <linux/err.h>
 #include <linux/clk.h>
 #include <linux/io.h>
+#include <linux/sched.h>
 #include <soc/qcom/clock-pll.h>
 #include <soc/qcom/msm-clock-controller.h>
 
@@ -31,6 +32,8 @@
 
 #define PLL_EN_REG(x)		(*(x)->base + (unsigned long) (x)->en_reg)
 #define PLL_STATUS_REG(x)	(*(x)->base + (unsigned long) (x)->status_reg)
+#define PLL_ALT_STATUS_REG(x)	(*(x)->base + (unsigned long) \
+							(x)->alt_status_reg)
 #define PLL_MODE_REG(x)		(*(x)->base + (unsigned long) (x)->mode_reg)
 #define PLL_L_REG(x)		(*(x)->base + (unsigned long) (x)->l_reg)
 #define PLL_M_REG(x)		(*(x)->base + (unsigned long) (x)->m_reg)
@@ -43,10 +46,14 @@
 							(x)->config_ctl_reg)
 #define PLL_TEST_CTL_LO_REG(x)	(*(x)->base + (unsigned long) \
 							(x)->test_ctl_lo_reg)
+#define PLL_TEST_CTL_HI_REG(x)	(*(x)->base + (unsigned long) \
+							(x)->test_ctl_hi_reg)
 static DEFINE_SPINLOCK(pll_reg_lock);
 
 #define ENABLE_WAIT_MAX_LOOPS 200
 #define PLL_LOCKED_BIT BIT(16)
+
+#define SPM_FORCE_EVENT   0x4
 
 static int pll_vote_clk_enable(struct clk *c)
 {
@@ -130,6 +137,54 @@ struct clk_ops clk_ops_pll_vote = {
 	.list_registers = pll_vote_clk_list_registers,
 };
 
+/*
+ *  spm_event() -- Set/Clear SPM events
+ *  PLL off sequence -- enable (1)
+ *    Set L2_SPM_FORCE_EVENT_EN[bit] register to 1
+ *    Set L2_SPM_FORCE_EVENT[bit] register to 1
+ *  PLL on sequence -- enable (0)
+ *   Clear L2_SPM_FORCE_EVENT[bit] register to 0
+ *   Clear L2_SPM_FORCE_EVENT_EN[bit] register to 0
+ */
+static void spm_event(void __iomem *base, u32 offset, u32 bit,
+							bool enable)
+{
+	uint32_t val;
+
+	if (!base)
+		return;
+
+	if (enable) {
+		/* L2_SPM_FORCE_EVENT_EN */
+		val = readl_relaxed(base + offset);
+		val |= BIT(bit);
+		writel_relaxed(val, (base + offset));
+		/* Ensure that the write above goes through. */
+		mb();
+
+		/* L2_SPM_FORCE_EVENT */
+		val = readl_relaxed(base + offset + SPM_FORCE_EVENT);
+		val |= BIT(bit);
+		writel_relaxed(val, (base + offset + SPM_FORCE_EVENT));
+		/* Ensure that the write above goes through. */
+		mb();
+	} else {
+		/* L2_SPM_FORCE_EVENT */
+		val = readl_relaxed(base + offset + SPM_FORCE_EVENT);
+		val &= ~BIT(bit);
+		writel_relaxed(val, (base + offset + SPM_FORCE_EVENT));
+		/* Ensure that the write above goes through. */
+		mb();
+
+		/* L2_SPM_FORCE_EVENT_EN */
+		val = readl_relaxed(base + offset);
+		val &= ~BIT(bit);
+		writel_relaxed(val, (base + offset));
+		/* Ensure that the write above goes through. */
+		mb();
+	}
+}
+
 static void __pll_config_reg(void __iomem *pll_config, struct pll_freq_tbl *f,
 			struct pll_config_masks *masks)
 {
@@ -168,6 +223,9 @@ static int sr2_pll_clk_enable(struct clk *c)
 
 	spin_lock_irqsave(&pll_reg_lock, flags);
 
+	spm_event(pll->spm_ctrl.spm_base, pll->spm_ctrl.offset,
+				pll->spm_ctrl.event_bit, false);
+
 	/* Disable PLL bypass mode. */
 	mode |= PLL_BYPASSNL;
 	writel_relaxed(mode, PLL_MODE_REG(pll));
@@ -201,6 +259,114 @@ static int sr2_pll_clk_enable(struct clk *c)
 	mb();
 
 	spin_unlock_irqrestore(&pll_reg_lock, flags);
+	return ret;
+}
+
+static void __hf_pll_init(struct clk *c)
+{
+	struct pll_clk *pll = to_pll_clk(c);
+	u32 regval;
+
+	regval = readl_relaxed(PLL_CONFIG_REG(pll));
+
+	if (pll->masks.post_div_mask) {
+		regval &= ~pll->masks.post_div_mask;
+		regval |= pll->vals.post_div_masked;
+	}
+
+	if (pll->masks.pre_div_mask) {
+		regval &= ~pll->masks.pre_div_mask;
+		regval |= pll->vals.pre_div_masked;
+	}
+
+	if (pll->masks.vco_mask) {
+		regval &= ~pll->masks.vco_mask;
+		regval |= pll->vals.vco_mode_masked;
+	}
+
+	if (pll->masks.main_output_mask)
+		regval |= pll->masks.main_output_mask;
+
+	if (pll->masks.early_output_mask)
+		regval |= pll->masks.early_output_mask;
+
+	if (pll->vals.enable_mn)
+		regval |= pll->masks.mn_en_mask;
+	else
+		regval &= ~pll->masks.mn_en_mask;
+
+	writel_relaxed(regval, PLL_CONFIG_REG(pll));
+
+	writel_relaxed(pll->vals.config_ctl_val, PLL_CFG_CTL_REG(pll));
+
+	pll->inited = true;
+}
+
+static int hf_pll_clk_enable(struct clk *c)
+{
+	unsigned long flags;
+	struct pll_clk *pll = to_pll_clk(c);
+	int ret = 0, count;
+	u32 mode;
+	u32 lockmask = pll->masks.lock_mask ?: PLL_LOCKED_BIT;
+
+	spin_lock_irqsave(&pll_reg_lock, flags);
+
+	if (unlikely(!to_pll_clk(c)->inited))
+		__hf_pll_init(c);
+
+	/* Remove SPM HW event */
+	spm_event(pll->spm_ctrl.spm_base, pll->spm_ctrl.offset,
+				pll->spm_ctrl.event_bit, false);
+
+	mode = readl_relaxed(PLL_MODE_REG(pll));
+
+	/* Disable PLL bypass mode. */
+	mode |= PLL_BYPASSNL;
+	writel_relaxed(mode, PLL_MODE_REG(pll));
+
+	/*
+	 * H/W requires a 5us delay between disabling the bypass and
+	 * de-asserting the reset. Use 10us to be sure.
+	 */
+	mb();
+	udelay(10);
+
+	/* De-assert active-low PLL reset. */
+	mode |= PLL_RESET_N;
+	writel_relaxed(mode, PLL_MODE_REG(pll));
+
+	/* A 50us delay required before locking the PLL. */
+	mb();
+	udelay(50);
+
+	/* Wait for pll to lock. */
+	for (count = ENABLE_WAIT_MAX_LOOPS; count > 0; count--) {
+		if (readl_relaxed(PLL_STATUS_REG(pll)) & lockmask) {
+			udelay(1);
+			/*
+			 * Check again to be sure. This is to avoid
+			 * breaking too early if there is a "transient"
+			 * lock.
+			 */
+			if ((readl_relaxed(PLL_STATUS_REG(pll)) & lockmask))
+				break;
+		}
+		udelay(1);
+	}
+
+	if (!(readl_relaxed(PLL_STATUS_REG(pll)) & lockmask))
+		panic("PLL %s didn't lock after enabling it!\n", c->dbg_name);
+
+	/* Enable PLL output. */
+	mode |= PLL_OUTCTRL;
+	writel_relaxed(mode, PLL_MODE_REG(pll));
+
+	/* Ensure that the write above goes through before returning. */
+	mb();
+
+	spin_unlock_irqrestore(&pll_reg_lock, flags);
+
 	return ret;
 }
 
@@ -241,6 +407,12 @@ static void __variable_rate_pll_init(struct clk *c)
 
 	writel_relaxed(pll->vals.alpha_val, PLL_ALPHA_REG(pll));
 	writel_relaxed(pll->vals.config_ctl_val, PLL_CFG_CTL_REG(pll));
+	if (pll->init_test_ctl) {
+		writel_relaxed(pll->vals.test_ctl_lo_val,
+				PLL_TEST_CTL_LO_REG(pll));
+		writel_relaxed(pll->vals.test_ctl_hi_val,
+				PLL_TEST_CTL_HI_REG(pll));
+	}
 
 	pll->inited = true;
 }
@@ -250,8 +422,11 @@ static int variable_rate_pll_clk_enable(struct clk *c)
 	unsigned long flags;
 	struct pll_clk *pll = to_pll_clk(c);
 	int ret = 0, count;
-	u32 mode;
+	u32 mode, testlo;
 	u32 lockmask = pll->masks.lock_mask ?: PLL_LOCKED_BIT;
+	u32 mode_lock;
+	u64 time;
+	bool early_lock = false;
 
 	spin_lock_irqsave(&pll_reg_lock, flags);
 
@@ -261,9 +436,21 @@ static int variable_rate_pll_clk_enable(struct clk *c)
 	mode = readl_relaxed(PLL_MODE_REG(pll));
 
 	/* Set test control bits as required by HW doc */
-	if (pll->test_ctl_lo_reg && pll->vals.test_ctl_lo_val)
+	if (pll->test_ctl_lo_reg && pll->vals.test_ctl_lo_val &&
+		pll->pgm_test_ctl_enable)
 		writel_relaxed(pll->vals.test_ctl_lo_val,
 				PLL_TEST_CTL_LO_REG(pll));
+
+	/* Enable test_ctl debug */
+	mode |= BIT(3);
+	writel_relaxed(mode, PLL_MODE_REG(pll));
+
+	testlo = readl_relaxed(PLL_TEST_CTL_LO_REG(pll));
+	testlo &= ~BM(7, 6);
+	testlo |= 0xC0;
+	writel_relaxed(testlo, PLL_TEST_CTL_LO_REG(pll));
+	/* Wait for the write to complete */
+	mb();
 
 	/* Disable PLL bypass mode. */
 	mode |= PLL_BYPASSNL;
@@ -280,23 +467,101 @@ static int variable_rate_pll_clk_enable(struct clk *c)
 	mode |= PLL_RESET_N;
 	writel_relaxed(mode, PLL_MODE_REG(pll));
 
-	/* 5us delay mandated by HPG. Use 10 to be sure. */
+	/*
+	 * 5us delay mandated by HPG. However, put in a 200us delay here.
+	 * This is to address possible locking issues with the PLL exhibit
+	 * early "transient" locks about 16us from this point. With this
+	 * higher delay, we avoid running into those transients.
+	 */
 	mb();
-	udelay(10);
+	udelay(200);
 
 	/* Clear test control bits */
-	if (pll->test_ctl_lo_reg && pll->vals.test_ctl_lo_val)
+	if (pll->test_ctl_lo_reg && pll->vals.test_ctl_lo_val &&
+		pll->pgm_test_ctl_enable)
 		writel_relaxed(0x0, PLL_TEST_CTL_LO_REG(pll));
 
+
+	time = sched_clock();
 	/* Wait for pll to lock. */
 	for (count = ENABLE_WAIT_MAX_LOOPS; count > 0; count--) {
-		if (readl_relaxed(PLL_STATUS_REG(pll)) & lockmask)
-			break;
+		if (readl_relaxed(PLL_STATUS_REG(pll)) & lockmask) {
+			udelay(1);
+			/*
+			 * Check again to be sure. This is to avoid
+			 * breaking too early if there is a "transient"
+			 * lock.
+			 */
+			if ((readl_relaxed(PLL_STATUS_REG(pll)) & lockmask))
+				break;
+			else
+				early_lock = true;
+		}
 		udelay(1);
 	}
+	time = sched_clock() - time;
 
-	if (!(readl_relaxed(PLL_STATUS_REG(pll)) & lockmask))
-		pr_err("PLL %s didn't lock after enabling it!\n", c->dbg_name);
+	mode_lock = readl_relaxed(PLL_STATUS_REG(pll));
+
+	if (!(mode_lock & lockmask)) {
+		pr_err("PLL lock bit detection total wait time: %lld ns", time);
+		pr_err("PLL %s didn't lock after enabling for L value 0x%x!\n",
+			c->dbg_name, readl_relaxed(PLL_L_REG(pll)));
+		pr_err("mode register is 0x%x\n",
+			readl_relaxed(PLL_STATUS_REG(pll)));
+		pr_err("user control register is 0x%x\n",
+			readl_relaxed(PLL_CONFIG_REG(pll)));
+		pr_err("config control register is 0x%x\n",
+			readl_relaxed(PLL_CFG_CTL_REG(pll)));
+		pr_err("test control high register is 0x%x\n",
+			readl_relaxed(PLL_TEST_CTL_HI_REG(pll)));
+		pr_err("test control low register is 0x%x\n",
+			readl_relaxed(PLL_TEST_CTL_LO_REG(pll)));
+		pr_err("early lock? %s\n", early_lock ? "yes" : "no");
+
+		testlo = readl_relaxed(PLL_TEST_CTL_LO_REG(pll));
+		testlo &= ~BM(7, 6);
+		writel_relaxed(testlo, PLL_TEST_CTL_LO_REG(pll));
+		/* Wait for the write to complete */
+		mb();
+
+		pr_err("test_ctl_lo = 0x%x, pll status is: 0x%x\n",
+			readl_relaxed(PLL_TEST_CTL_LO_REG(pll)),
+			readl_relaxed(PLL_ALT_STATUS_REG(pll)));
+
+		testlo = readl_relaxed(PLL_TEST_CTL_LO_REG(pll));
+		testlo &= ~BM(7, 6);
+		testlo |= 0x40;
+		writel_relaxed(testlo, PLL_TEST_CTL_LO_REG(pll));
+		/* Wait for the write to complete */
+		mb();
+		pr_err("test_ctl_lo = 0x%x, pll status is: 0x%x\n",
+			readl_relaxed(PLL_TEST_CTL_LO_REG(pll)),
+			readl_relaxed(PLL_ALT_STATUS_REG(pll)));
+
+		testlo = readl_relaxed(PLL_TEST_CTL_LO_REG(pll));
+		testlo &= ~BM(7, 6);
+		testlo |= 0x80;
+		writel_relaxed(testlo, PLL_TEST_CTL_LO_REG(pll));
+		/* Wait for the write to complete */
+		mb();
+
+		pr_err("test_ctl_lo = 0x%x, pll status is: 0x%x\n",
+			readl_relaxed(PLL_TEST_CTL_LO_REG(pll)),
+			readl_relaxed(PLL_ALT_STATUS_REG(pll)));
+
+		testlo = readl_relaxed(PLL_TEST_CTL_LO_REG(pll));
+		testlo &= ~BM(7, 6);
+		testlo |= 0xC0;
+		writel_relaxed(testlo, PLL_TEST_CTL_LO_REG(pll));
+		/* Wait for the write to complete */
+		mb();
+
+		pr_err("test_ctl_lo = 0x%x, pll status is: 0x%x\n",
+			readl_relaxed(PLL_TEST_CTL_LO_REG(pll)),
+			readl_relaxed(PLL_ALT_STATUS_REG(pll)));
+		panic("failed to lock %s PLL\n", c->dbg_name);
+	}
 
 	/* Enable PLL output. */
 	mode |= PLL_OUTCTRL;
@@ -369,6 +634,8 @@ static void local_pll_clk_disable(struct clk *c)
 	 * the bypass mode, and assert the reset.
 	 */
 	spin_lock_irqsave(&pll_reg_lock, flags);
+	spm_event(pll->spm_ctrl.spm_base, pll->spm_ctrl.offset,
+				pll->spm_ctrl.event_bit, true);
 	__pll_clk_disable_reg(PLL_MODE_REG(pll));
 	spin_unlock_irqrestore(&pll_reg_lock, flags);
 }
@@ -486,6 +753,9 @@ static long variable_rate_pll_round_rate(struct clk *c, unsigned long rate)
 	if (!pll->src_rate)
 		return 0;
 
+	if (pll->no_prepared_reconfig && c->prepare_count)
+		return -EINVAL;
+
 	if (rate < pll->min_rate)
 		rate = pll->min_rate;
 	if (rate > pll->max_rate)
@@ -503,7 +773,7 @@ static int variable_rate_pll_set_rate(struct clk *c, unsigned long rate)
 {
 	struct pll_clk *pll = to_pll_clk(c);
 	unsigned long flags;
-	u32 l_val;
+	u32 l_val, regval;
 
 	if (rate != variable_rate_pll_round_rate(c, rate))
 		return -EINVAL;
@@ -514,6 +784,23 @@ static int variable_rate_pll_set_rate(struct clk *c, unsigned long rate)
 
 	if (c->count)
 		c->ops->disable(c);
+
+	/* Set any vco data if present */
+	if (pll->data.vco_val) {
+		regval = readl_relaxed(PLL_CONFIG_REG(pll));
+		if ((rate >= pll->data.min_freq) &&
+				(rate <= pll->data.max_freq)) {
+			regval |= pll->data.vco_val;
+			writel_relaxed(pll->data.config_ctl_val,
+					PLL_CFG_CTL_REG(pll));
+		} else {
+			regval &= ~pll->data.vco_val;
+			writel_relaxed(pll->vals.config_ctl_val,
+					PLL_CFG_CTL_REG(pll));
+		}
+
+		writel_relaxed(regval, PLL_CONFIG_REG(pll));
+	}
 
 	writel_relaxed(l_val, PLL_L_REG(pll));
 
@@ -528,10 +815,21 @@ static int variable_rate_pll_set_rate(struct clk *c, unsigned long rate)
 int sr_pll_clk_enable(struct clk *c)
 {
 	u32 mode;
+	int count;
 	unsigned long flags;
 	struct pll_clk *pll = to_pll_clk(c);
+	u32 lockmask = pll->masks.lock_mask ?: PLL_LOCKED_BIT;
 
 	spin_lock_irqsave(&pll_reg_lock, flags);
+
+	if (unlikely(!to_pll_clk(c)->inited))
+		/* PLL initilazation is similar to HF PLL */
+		__hf_pll_init(c);
+
+	/* Remove SPM HW event */
+	spm_event(pll->spm_ctrl.spm_base, pll->spm_ctrl.offset,
+				pll->spm_ctrl.event_bit, false);
+
 	mode = readl_relaxed(PLL_MODE_REG(pll));
 	/* De-assert active-low PLL reset. */
 	mode |= PLL_RESET_N;
@@ -548,9 +846,19 @@ int sr_pll_clk_enable(struct clk *c)
 	mode |= PLL_BYPASSNL;
 	writel_relaxed(mode, PLL_MODE_REG(pll));
 
-	/* Wait until PLL is locked. */
+	/* A 60us delay required before locking the PLL */
 	mb();
 	udelay(60);
+
+	/* Wait for the PLL to lock */
+	for (count = ENABLE_WAIT_MAX_LOOPS; count > 0; count--) {
+		if (readl_relaxed(PLL_STATUS_REG(pll)) & lockmask)
+			break;
+		udelay(1);
+	}
+
+	if (!(readl_relaxed(PLL_STATUS_REG(pll)) & lockmask))
+		panic("PLL %s didn't lock after enabling it!\n", c->dbg_name);
 
 	/* Enable PLL output. */
 	mode |= PLL_OUTCTRL;
@@ -670,6 +978,24 @@ struct clk_ops clk_ops_variable_rate_pll = {
 	.round_rate = variable_rate_pll_round_rate,
 	.handoff = variable_rate_pll_handoff,
 	.list_registers = variable_rate_pll_list_registers,
+};
+
+struct clk_ops clk_ops_sr_pll = {
+	.enable = sr_pll_clk_enable,
+	.disable = local_pll_clk_disable,
+	.set_rate = variable_rate_pll_set_rate,
+	.round_rate = variable_rate_pll_round_rate,
+	.handoff = variable_rate_pll_handoff,
+	.list_registers = local_pll_clk_list_registers,
+};
+
+struct clk_ops clk_ops_hf_pll = {
+	.enable = hf_pll_clk_enable,
+	.disable = local_pll_clk_disable,
+	.set_rate = variable_rate_pll_set_rate,
+	.round_rate = variable_rate_pll_round_rate,
+	.handoff = variable_rate_pll_handoff,
+	.list_registers = local_pll_clk_list_registers,
 };
 
 static DEFINE_SPINLOCK(soft_vote_lock);

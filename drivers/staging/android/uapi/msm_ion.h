@@ -6,6 +6,7 @@
 enum msm_ion_heap_types {
 	ION_HEAP_TYPE_MSM_START = ION_HEAP_TYPE_CUSTOM + 1,
 	ION_HEAP_TYPE_SECURE_DMA = ION_HEAP_TYPE_MSM_START,
+	ION_HEAP_TYPE_SYSTEM_SECURE,
 	ION_HEAP_TYPE_REMOVED,
 	/*
 	 * if you add a heap type here you should also add it to
@@ -25,7 +26,9 @@ enum msm_ion_heap_types {
 enum ion_heap_ids {
 	INVALID_HEAP_ID = -1,
 	ION_CP_MM_HEAP_ID = 8,
+	ION_SECURE_HEAP_ID = 9,
 	ION_CP_MFC_HEAP_ID = 12,
+	ION_FBMEM_HEAP_ID = 13,
 	ION_CP_WB_HEAP_ID = 16, /* 8660 only */
 	ION_CAMERA_HEAP_ID = 20, /* 8660 only */
 	ION_SYSTEM_CONTIG_HEAP_ID = 21,
@@ -67,6 +70,24 @@ enum cp_mem_usage {
 };
 
 /**
+ * Flags to be used when allocating from the secure heap for
+ * content protection
+ */
+#define ION_FLAG_CP_TOUCH (1 << 17)
+#define ION_FLAG_CP_BITSTREAM (1 << 18)
+#define ION_FLAG_CP_PIXEL  (1 << 19)
+#define ION_FLAG_CP_NON_PIXEL (1 << 20)
+#define ION_FLAG_CP_CAMERA (1 << 21)
+#define ION_FLAG_CP_HLOS (1 << 22)
+#define ION_FLAG_CP_HLOS_FREE (1 << 23)
+
+/**
+ * Flag to allow non continguous allocation of memory from secure
+ * heap
+ */
+#define ION_FLAG_ALLOW_NON_CONTIG (1 << 24)
+
+/**
  * Flag to use when allocating to indicate that a heap is secure.
  */
 #define ION_FLAG_SECURE (1 << ION_HEAP_ID_RESERVED)
@@ -95,6 +116,7 @@ enum cp_mem_usage {
  */
 #define ION_HEAP(bit) (1 << (bit))
 
+#define ION_FBMEM_HEAP_NAME	"fbmem"
 #define ION_ADSP_HEAP_NAME	"adsp"
 #define ION_SYSTEM_HEAP_NAME	"system"
 #define ION_VMALLOC_HEAP_NAME	ION_SYSTEM_HEAP_NAME
@@ -110,6 +132,7 @@ enum cp_mem_usage {
 #define ION_PIL1_HEAP_NAME  "pil_1"
 #define ION_PIL2_HEAP_NAME  "pil_2"
 #define ION_QSECOM_HEAP_NAME	"qsecom"
+#define ION_SECURE_HEAP_NAME	"secure_heap"
 
 #define ION_SET_CACHED(__cache)		(__cache | ION_FLAG_CACHED)
 #define ION_SET_UNCACHED(__cache)	(__cache & ~ION_FLAG_CACHED)
@@ -142,6 +165,11 @@ struct ion_prefetch_data {
 	unsigned long len;
 };
 
+struct ion_client_name_data {
+        size_t len;
+        const char *name;
+};
+
 #define ION_IOC_MSM_MAGIC 'M'
 
 /**
@@ -171,5 +199,8 @@ struct ion_prefetch_data {
 
 #define ION_IOC_DRAIN			_IOWR(ION_IOC_MSM_MAGIC, 4, \
 						struct ion_prefetch_data)
+
+#define ION_IOC_CLIENT_DEBUG_NAME       _IOWR(ION_IOC_MSM_MAGIC, 5, \
+                                                struct ion_client_name_data)
 
 #endif

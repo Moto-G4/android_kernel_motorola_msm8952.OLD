@@ -77,9 +77,11 @@ obj-$(CONFIG_SND_SOC_CPE) += snd-soc-cpe.o
 snd-soc-mdm9630-objs := mdm9630.o
 obj-$(CONFIG_SND_SOC_MDM9630) += snd-soc-mdm9630.o
 
-# for MSM 8x16 sound card driver
-snd-soc-msm8x16-objs := msm8x16.o msm8939-slimbus.o
+# for MSM 8x16/8952 sound card driver
+snd-soc-msm8x16-objs := msm8x16.o msm8939-slimbus.o msm-audio-pinctrl.o msm8952.o
+snd-soc-msm8x16-objs += msm8952-slimbus.o msm8952-dai-links.o
 obj-$(CONFIG_SND_SOC_MSM8X16) += snd-soc-msm8x16.o
+obj-$(CONFIG_SND_SOC_MSM8X16) += htc_acoustic_alsa.o
 
 # for MSM 8909 sound card driver
 snd-soc-msm8909-objs := msm8x16.o
@@ -89,6 +91,6 @@ obj-$(CONFIG_SND_SOC_MSM8909) += snd-soc-msm8909.o
 snd-soc-msm8994-objs := msm8994.o
 obj-$(CONFIG_SND_SOC_MSM8994) += snd-soc-msm8994.o
 
-# for MSMZIRC sound card driver
-snd-soc-msmzirc-objs := msmzirc.o
-obj-$(CONFIG_SND_SOC_MSMZIRC) += snd-soc-msmzirc.o
+# for MDM9640 sound card driver
+snd-soc-mdm9640-objs := mdm9640.o
+obj-$(CONFIG_SND_SOC_MDM9640) += snd-soc-mdm9640.o

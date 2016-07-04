@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2011-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -22,20 +22,14 @@
 #include <linux/string.h>
 #include <linux/types.h>
 #include <linux/uaccess.h>
-#ifdef CONFIG_MSM_TZ_LOG_WDOG_DUMP
-#include <linux/of.h>
-#include <linux/of_address.h>
-#include <linux/ctype.h>
-#include <linux/dma-contiguous.h>
-#include <linux/dma-mapping.h>
-#include <linux/pstore_ram.h>
-#include <soc/qcom/memory_dump.h>
-#include <soc/qcom/bootinfo.h>
-#endif /* CONFIG_MSM_TZ_LOG_WDOG_DUMP */
+#include <linux/of_device.h>
 #include <soc/qcom/scm.h>
 #include <soc/qcom/qseecomi.h>
 
-#define DEBUG_MAX_RW_BUF 4096
+
+#ifdef HTC_TZ_LOG
+#undef HTC_TZ_LOG
+#endif
 
 /* QSEE_LOG_BUF_SIZE = 32K */
 #define QSEE_LOG_BUF_SIZE 0x8000
@@ -46,7 +40,7 @@
 /*
  * Preprocessor Definitions and Constants
  */
-#define TZBSP_CPU_COUNT 0x02
+#define TZBSP_MAX_CPU_COUNT 0x08
 /*
  * Number of VMID Tables
  */
@@ -80,15 +74,6 @@ struct tzdbg_boot_info_t {
 	uint32_t pc_exit_cnt;	/* Power Collapse exit CPU counter */
 	uint32_t warm_jmp_addr;	/* Last Warmboot Jump Address */
 	uint32_t spare;	/* Reserved for future use. */
-};
-
-struct tzdbg_boot_info2_t {
-	uint32_t wb_entry_cnt;	/* Warmboot entry CPU Counter */
-	uint32_t wb_exit_cnt;	/* Warmboot exit CPU Counter */
-	uint32_t pc_entry_cnt;	/* Power Collapse entry CPU Counter */
-	uint32_t pc_exit_cnt;	/* Power Collapse exit CPU counter */
-	uint64_t warm_jmp_addr;	/* Last Warmboot Jump Address */
-	uint32_t warm_jmp_instr;/* Last Warmboot Jump Address Instruction */
 };
 /*
  * Reset Info Table
@@ -124,7 +109,7 @@ struct tzdbg_int_t {
 	 * Any additional characters are truncated.
 	 */
 	uint8_t int_desc[TZBSP_MAX_INT_DESC];
-	uint64_t int_count[TZBSP_CPU_COUNT]; /* # of times seen per CPU */
+	uint64_t int_count[TZBSP_MAX_CPU_COUNT]; /* # of times seen per CPU */
 };
 
 /*
@@ -146,6 +131,9 @@ struct tzdbg_log_t {
 
 /*
  * Diagnostic Table
+ * Note: This is the reference data structure for tz diagnostic table
+ * supporting TZBSP_MAX_CPU_COUNT, the real diagnostic data is directly
+ * copied into buffer from i/o memory.
  */
 struct tzdbg_t {
 	uint32_t magic_num;
@@ -185,11 +173,11 @@ struct tzdbg_t {
 	/*
 	 * Boot Info
 	 */
-	struct tzdbg_boot_info_t  boot_info[TZBSP_CPU_COUNT];
+	struct tzdbg_boot_info_t  boot_info[TZBSP_MAX_CPU_COUNT];
 	/*
 	 * Reset Info
 	 */
-	struct tzdbg_reset_info_t reset_info[TZBSP_CPU_COUNT];
+	struct tzdbg_reset_info_t reset_info[TZBSP_MAX_CPU_COUNT];
 	uint32_t num_interrupts;
 	struct tzdbg_int_t  int_info[TZBSP_DIAG_INT_NUM];
 	/*
@@ -209,6 +197,9 @@ enum tzdbg_stats_type {
 	TZDBG_GENERAL,
 	TZDBG_LOG,
 	TZDBG_QSEE_LOG,
+#ifdef CONFIG_HTC_TZ_LOG
+	TZDBG_HTCLOG,
+#endif
 	TZDBG_STATS_MAX
 };
 
@@ -220,7 +211,6 @@ struct tzdbg_stat {
 struct tzdbg {
 	void __iomem *virt_iobase;
 	struct tzdbg_t *diag_buf;
-	size_t diag_size;
 	char *disp_buf;
 	int debug_tz[TZDBG_STATS_MAX];
 	struct tzdbg_stat stat[TZDBG_STATS_MAX];
@@ -235,9 +225,38 @@ static struct tzdbg tzdbg = {
 	.stat[TZDBG_GENERAL].name = "general",
 	.stat[TZDBG_LOG].name = "log",
 	.stat[TZDBG_QSEE_LOG].name = "qsee_log",
+#ifdef CONFIG_HTC_TZ_LOG
+	.stat[TZDBG_HTCLOG].name = "htclog",
+#endif
 };
 
+#ifdef CONFIG_HTC_TZ_LOG
+#ifndef MSM_TZLOG_PHYS
+#define MSM_TZLOG_PHYS		0x842D0000
+#endif
+
+#ifndef MSM_TZLOG_SIZE
+#define MSM_TZLOG_SIZE		(64 * 1024)
+#endif
+
+#define TZ_SCM_LOG_PHYS     MSM_TZLOG_PHYS
+#define TZ_SCM_LOG_SIZE     MSM_TZLOG_SIZE
+
+#define INT_SIZE		4
+
+struct htc_tzlog_dev {
+	char *buffer;
+	char *tmp_buf;
+	uint32_t *pw_cursor;
+	uint32_t *pr_cursor;
+	uint32_t tz_scm_log_phys;
+	uint32_t tz_scm_log_size;
+};
+
+static struct htc_tzlog_dev *htc_tzlog;
+#endif
 static struct tzdbg_log_t *g_qsee_log;
+static uint32_t debug_rw_buf_size;
 
 /*
  * Debugfs data structure and functions
@@ -247,7 +266,7 @@ static int _disp_tz_general_stats(void)
 {
 	int len = 0;
 
-	len += snprintf(tzdbg.disp_buf + len, tzdbg.diag_size - 1,
+	len += snprintf(tzdbg.disp_buf + len, debug_rw_buf_size - 1,
 			"   Version        : 0x%x\n"
 			"   Magic Number   : 0x%x\n"
 			"   Number of CPU  : %d\n",
@@ -273,11 +292,11 @@ static int _disp_tz_vmid_stats(void)
 	for (i = 0; i < num_vmid; i++) {
 		if (ptr->vmid < 0xFF) {
 			len += snprintf(tzdbg.disp_buf + len,
-				(tzdbg.diag_size - 1) - len,
+				(debug_rw_buf_size - 1) - len,
 				"   0x%x        %s\n",
 				(uint32_t)ptr->vmid, (uint8_t *)ptr->desc);
 		}
-		if (len > (tzdbg.diag_size - 1)) {
+		if (len > (debug_rw_buf_size - 1)) {
 			pr_warn("%s: Cannot fit all info into the buffer\n",
 								__func__);
 			break;
@@ -294,39 +313,29 @@ static int _disp_tz_boot_stats(void)
 	int i;
 	int len = 0;
 	struct tzdbg_boot_info_t *ptr;
-	struct tzdbg_boot_info2_t *ptr2;
-	int v2 = 0;
 
-	if ((tzdbg.diag_buf->reset_info_off - tzdbg.diag_buf->boot_info_off) ==
-			(sizeof(*ptr2) * tzdbg.diag_buf->cpu_count))
-		v2 = 1;
 	ptr = (struct tzdbg_boot_info_t *)((unsigned char *)tzdbg.diag_buf +
 					tzdbg.diag_buf->boot_info_off);
-	ptr2 = (struct tzdbg_boot_info2_t *)ptr;
 
 	for (i = 0; i < tzdbg.diag_buf->cpu_count; i++) {
 		len += snprintf(tzdbg.disp_buf + len,
-				(tzdbg.diag_size - 1) - len,
+				(debug_rw_buf_size - 1) - len,
 				"  CPU #: %d\n"
-				"     Warmboot jump address     : 0x%lx\n"
+				"     Warmboot jump address     : 0x%x\n"
 				"     Warmboot entry CPU counter: 0x%x\n"
 				"     Warmboot exit CPU counter : 0x%x\n"
 				"     Power Collapse entry CPU counter: 0x%x\n"
 				"     Power Collapse exit CPU counter : 0x%x\n",
-				i, (unsigned long)(v2 ? ptr2->warm_jmp_addr :
-						ptr->warm_jmp_addr),
-				(v2 ? ptr2->wb_entry_cnt : ptr->wb_entry_cnt),
-				(v2 ? ptr2->wb_exit_cnt : ptr->wb_exit_cnt),
-				(v2 ? ptr2->pc_entry_cnt : ptr->pc_entry_cnt),
-				(v2 ? ptr2->pc_exit_cnt : ptr->pc_exit_cnt));
+				i, ptr->warm_jmp_addr, ptr->wb_entry_cnt,
+				ptr->wb_exit_cnt, ptr->pc_entry_cnt,
+				ptr->pc_exit_cnt);
 
-		if (len > (tzdbg.diag_size - 1)) {
+		if (len > (debug_rw_buf_size - 1)) {
 			pr_warn("%s: Cannot fit all info into the buffer\n",
 								__func__);
 			break;
 		}
 		ptr++;
-		ptr2++;
 	}
 	tzdbg.stat[TZDBG_BOOT].data = tzdbg.disp_buf;
 	return len;
@@ -343,13 +352,13 @@ static int _disp_tz_reset_stats(void)
 
 	for (i = 0; i < tzdbg.diag_buf->cpu_count; i++) {
 		len += snprintf(tzdbg.disp_buf + len,
-				(tzdbg.diag_size - 1) - len,
+				(debug_rw_buf_size - 1) - len,
 				"  CPU #: %d\n"
 				"     Reset Type (reason)       : 0x%x\n"
 				"     Reset counter             : 0x%x\n",
 				i, ptr->reset_type, ptr->reset_cnt);
 
-		if (len > (tzdbg.diag_size - 1)) {
+		if (len > (debug_rw_buf_size - 1)) {
 			pr_warn("%s: Cannot fit all info into the buffer\n",
 								__func__);
 			break;
@@ -373,14 +382,13 @@ static int _disp_tz_interrupt_stats(void)
 			(tzdbg.diag_buf->int_info_off - sizeof(uint32_t)));
 	ptr = ((unsigned char *)tzdbg.diag_buf +
 					tzdbg.diag_buf->int_info_off);
-	if (*num_int)
-		int_info_size = ((tzdbg.diag_buf->ring_off -
+	int_info_size = ((tzdbg.diag_buf->ring_off -
 				tzdbg.diag_buf->int_info_off)/(*num_int));
 
 	for (i = 0; i < (*num_int); i++) {
 		tzdbg_ptr = (struct tzdbg_int_t *)ptr;
 		len += snprintf(tzdbg.disp_buf + len,
-				(tzdbg.diag_size - 1) - len,
+				(debug_rw_buf_size - 1) - len,
 				"     Interrupt Number          : 0x%x\n"
 				"     Type of Interrupt         : 0x%x\n"
 				"     Description of interrupt  : %s\n",
@@ -389,15 +397,15 @@ static int _disp_tz_interrupt_stats(void)
 				(uint8_t *)tzdbg_ptr->int_desc);
 		for (j = 0; j < tzdbg.diag_buf->cpu_count; j++) {
 			len += snprintf(tzdbg.disp_buf + len,
-				(tzdbg.diag_size - 1) - len,
+				(debug_rw_buf_size - 1) - len,
 				"     int_count on CPU # %d      : %u\n",
 				(uint32_t)j,
 				(uint32_t)tzdbg_ptr->int_count[j]);
 		}
-		len += snprintf(tzdbg.disp_buf + len,
-				(tzdbg.diag_size - 1) - len, "\n");
+		len += snprintf(tzdbg.disp_buf + len, debug_rw_buf_size - 1,
+									"\n");
 
-		if (len > (tzdbg.diag_size - 1)) {
+		if (len > (debug_rw_buf_size - 1)) {
 			pr_warn("%s: Cannot fit all info into the buffer\n",
 								__func__);
 			break;
@@ -416,7 +424,7 @@ static int _disp_tz_log_stats_legacy(void)
 
 	ptr = (unsigned char *)tzdbg.diag_buf +
 					tzdbg.diag_buf->ring_off;
-	len += snprintf(tzdbg.disp_buf, (tzdbg.diag_size - 1) - len,
+	len += snprintf(tzdbg.disp_buf, (debug_rw_buf_size - 1) - len,
 							"%s\n", ptr);
 
 	tzdbg.stat[TZDBG_LOG].data = tzdbg.disp_buf;
@@ -469,11 +477,11 @@ static int _disp_log_stats(struct tzdbg_log_t *log,
 
 		if (buf_idx == TZDBG_LOG)
 			memcpy_fromio((void *)tzdbg.diag_buf, tzdbg.virt_iobase,
-						tzdbg.diag_size);
+						debug_rw_buf_size);
 
 	}
 
-	max_len = (count > tzdbg.diag_size) ? tzdbg.diag_size : count;
+	max_len = (count > debug_rw_buf_size) ? debug_rw_buf_size : count;
 
 	/*
 	 *  Read from ring buff while there is data and space in return buff
@@ -505,6 +513,74 @@ static int _disp_tz_log_stats(size_t count)
 				tzdbg.diag_buf->ring_len, count, TZDBG_LOG);
 }
 
+#ifdef CONFIG_HTC_TZ_LOG
+static int _disp_tz_htc_log_stats(char __user *ubuf, size_t count, loff_t *offp)
+{
+	char *buf = htc_tzlog->buffer;
+	uint32_t *pw_cursor = htc_tzlog->pw_cursor;
+	uint32_t *pr_cursor = htc_tzlog->pr_cursor;
+	uint32_t tz_scm_log_size = htc_tzlog->tz_scm_log_size;
+	uint32_t r_cursor, w_cursor;
+	int ret;
+
+	if (buf != 0 && (count < MSM_TZLOG_SIZE)) {
+		
+		r_cursor = readl_relaxed(pr_cursor);
+		w_cursor = readl_relaxed(pw_cursor);
+
+		if (r_cursor < w_cursor) {
+			if ((w_cursor - r_cursor) > count) {
+				memcpy_fromio(htc_tzlog->tmp_buf, buf + r_cursor, count);
+				ret = copy_to_user(ubuf, htc_tzlog->tmp_buf, count);
+				if (ret == count)
+					return -EFAULT;
+
+				writel_relaxed(r_cursor + count, pr_cursor);
+				return count;
+			} else {
+				memcpy_fromio(htc_tzlog->tmp_buf, buf + r_cursor, (w_cursor - r_cursor));
+				ret = copy_to_user(ubuf, htc_tzlog->tmp_buf, (w_cursor - r_cursor));
+				if (ret == (w_cursor - r_cursor))
+					return -EFAULT;
+
+				writel_relaxed(w_cursor, pr_cursor);
+				return (w_cursor - r_cursor);
+			}
+		}
+
+		if (r_cursor > w_cursor) {
+			uint32_t buf_end = tz_scm_log_size - 2*INT_SIZE - 1;
+			uint32_t left_len = buf_end - r_cursor;
+
+			if (left_len > count) {
+				memcpy_fromio(htc_tzlog->tmp_buf, buf + r_cursor, count);
+				ret = copy_to_user(ubuf, htc_tzlog->tmp_buf, count);
+				if (ret == count)
+					return -EFAULT;
+
+				writel_relaxed(r_cursor + count, pr_cursor);
+				return count;
+			} else {
+				memcpy_fromio(htc_tzlog->tmp_buf, buf + r_cursor, left_len);
+				ret = copy_to_user(ubuf, htc_tzlog->tmp_buf, left_len);
+				if (ret == left_len)
+					return -EFAULT;
+
+				writel_relaxed(0, pr_cursor);
+				return left_len;
+			}
+		}
+
+		if (r_cursor == w_cursor) {
+			pr_info("No New Trust Zone log\n");
+			return 0;
+		}
+	}
+
+	return 0;
+}
+#endif
+
 static int _disp_qsee_log_stats(size_t count)
 {
 	static struct tzdbg_log_pos_t log_start = {0};
@@ -521,7 +597,7 @@ static ssize_t tzdbgfs_read(struct file *file, char __user *buf,
 	int *tz_id =  file->private_data;
 
 	memcpy_fromio((void *)tzdbg.diag_buf, tzdbg.virt_iobase,
-						tzdbg.diag_size);
+						debug_rw_buf_size);
 	switch (*tz_id) {
 	case TZDBG_BOOT:
 		len = _disp_tz_boot_stats();
@@ -551,6 +627,10 @@ static ssize_t tzdbgfs_read(struct file *file, char __user *buf,
 		len = _disp_qsee_log_stats(count);
 		*offp = 0;
 		break;
+#ifdef CONFIG_HTC_TZ_LOG
+	case TZDBG_HTCLOG:
+		return _disp_tz_htc_log_stats(buf, count, offp);
+#endif
 	default:
 		break;
 	}
@@ -687,7 +767,7 @@ static int  tzdbgfs_init(struct platform_device *pdev)
 			goto err;
 		}
 	}
-	tzdbg.disp_buf = kzalloc(tzdbg.diag_size, GFP_KERNEL);
+	tzdbg.disp_buf = kzalloc(debug_rw_buf_size, GFP_KERNEL);
 	if (tzdbg.disp_buf == NULL) {
 		pr_err("%s: Can't Allocate memory for tzdbg.disp_buf\n",
 			__func__);
@@ -718,190 +798,6 @@ static void tzdbgfs_exit(struct platform_device *pdev)
 }
 }
 
-#ifdef CONFIG_MSM_TZ_LOG_WDOG_DUMP
-
-#define MSMWDTD(fmt, args...) persistent_ram_annotation_append(fmt, ##args)
-
-#define MSMWDT_ERR(fmt, args...) do { \
-	pr_err("TzLog: "fmt, ##args); \
-	MSMWDTD("TzLog: "fmt, ##args); \
-} while (0)
-
-#define MSMWDTD_IFWDOG(fmt, args...) do { \
-	if (bi_powerup_reason() == PU_REASON_WDOG_AP_RESET) \
-		MSMWDTD(fmt, ##args); \
-} while (0)
-
-static void tzlog_bck_show_boot_info(struct tzdbg_t *diag_buf)
-{
-	int cpu;
-	struct tzdbg_boot_info_t *ptr;
-	struct tzdbg_boot_info2_t *ptr2;
-	int v2 = 0;
-
-	if ((tzdbg.diag_buf->reset_info_off - tzdbg.diag_buf->boot_info_off) ==
-			(sizeof(*ptr2) * tzdbg.diag_buf->cpu_count))
-		v2 = 1;
-	ptr = (struct tzdbg_boot_info_t *)((u8 *)diag_buf +
-			diag_buf->boot_info_off);
-	ptr2 = (struct tzdbg_boot_info2_t *)ptr;
-	MSMWDTD("\n--- TZ Power Collapse Counters\n");
-	MSMWDTD("     | WarmEntry : WarmExit :  PCEntry :");
-	MSMWDTD("   PCExit : JumpAddr |\n");
-	for (cpu = 0; cpu < tzdbg.diag_buf->cpu_count; cpu++) {
-		int power_collapsed;
-		if (v2)
-			power_collapsed = ptr2->wb_entry_cnt +
-				ptr2->pc_exit_cnt - ptr2->pc_entry_cnt;
-		else
-			power_collapsed = ptr->wb_entry_cnt +
-				ptr->pc_exit_cnt - ptr->pc_entry_cnt;
-		if (cpu)
-			power_collapsed--;
-		MSMWDTD("CPU%d |  %8x : %8x : %8x : %8x : %8lx | %sPC\n",
-			cpu, (v2 ? ptr2->wb_entry_cnt : ptr->wb_entry_cnt),
-			(v2 ? ptr2->wb_exit_cnt : ptr->wb_exit_cnt),
-			(v2 ? ptr2->pc_entry_cnt : ptr->pc_entry_cnt),
-			(v2 ? ptr2->pc_exit_cnt : ptr->pc_exit_cnt),
-			(unsigned long)(v2 ? ptr2->warm_jmp_addr :
-					ptr->warm_jmp_addr),
-			power_collapsed ? "IN-" : "NOT-");
-		ptr++;
-		ptr2++;
-	}
-}
-
-static void tzlog_bck_show_log(struct tzdbg_t *diag_buf)
-{
-	struct tzdbg_log_t *log_ptr;
-	const char *log_buf, *p, *start;
-
-	if (TZBSP_DIAG_MAJOR_VERSION_LEGACY >=
-				(tzdbg.diag_buf->version >> 16))
-		return;
-
-	log_buf = (const char *)diag_buf + diag_buf->ring_off;
-	log_ptr = (struct tzdbg_log_t *)(log_buf -
-				offsetof(struct tzdbg_log_t, log_buf));
-
-	if (log_ptr->log_pos.offset >= diag_buf->ring_len)
-		return;
-	MSMWDTD("--- TZ Log start ---\n");
-	if (log_ptr->log_pos.wrap) {
-		for (start = log_buf + log_ptr->log_pos.offset, p = start;
-				p < (log_buf + diag_buf->ring_len); p++) {
-			if (isprint(*p))
-				MSMWDTD("%c", *p);
-			else if ((p > start) && isprint(*(p-1)))
-				MSMWDTD("\n");
-		}
-	}
-	for (start = log_buf, p = start;
-			p < (log_buf + log_ptr->log_pos.offset); p++) {
-		if (isprint(*p))
-			MSMWDTD("%c", *p);
-		else if ((p > start) && isprint(*(p-1)))
-			MSMWDTD("\n");
-	}
-	MSMWDTD("\n--- TZ Log end ---\n");
-}
-
-static void tzlog_bck_show(struct tzdbg_t *diag_buf)
-{
-	memcpy_fromio((void *)tzdbg.diag_buf, tzdbg.virt_iobase,
-						DEBUG_MAX_RW_BUF);
-	if (memcmp(diag_buf, tzdbg.diag_buf, tzdbg.diag_buf->vmid_info_off)) {
-		MSMWDTD_IFWDOG("TzLog: No valid backup.\n");
-		goto reset;
-	}
-	tzlog_bck_show_boot_info(diag_buf);
-	tzlog_bck_show_log(diag_buf);
-reset:
-	memset_io(diag_buf, 0, tzdbg.diag_size);
-}
-
-static void tzlog_bck_check(struct platform_device *pdev)
-{
-	struct device_node *pnode;
-	struct tzdbg_t *diag_bck_vaddr;
-	phys_addr_t diag_bck_paddr;
-	size_t diag_bck_size;
-
-	pnode = of_parse_phandle(pdev->dev.of_node,
-			"linux,contiguous-region", 0);
-	if (!pnode) {
-		MSMWDT_ERR("Unable to find contiguous-region\n");
-		goto no_reservation;
-	}
-	if (!of_get_address(pnode, 0, NULL, NULL)) {
-		of_node_put(pnode);
-		MSMWDT_ERR("Addr not found for contiguous-region\n");
-		goto no_reservation;
-	}
-	of_node_put(pnode);
-
-	diag_bck_paddr = cma_get_base(&pdev->dev);
-	diag_bck_size = cma_get_size(&pdev->dev);
-
-	if (diag_bck_size < tzdbg.diag_size) {
-		MSMWDT_ERR("Mem reserve too small %zx/%zx\n",
-				diag_bck_size, tzdbg.diag_size);
-		goto no_reservation;
-	}
-
-	diag_bck_size = tzdbg.diag_size;
-	diag_bck_vaddr = dma_remap(&pdev->dev, NULL, diag_bck_paddr,
-					diag_bck_size, NULL);
-	if (diag_bck_vaddr) {
-		tzlog_bck_show(diag_bck_vaddr);
-		dma_unremap(&pdev->dev, diag_bck_vaddr, diag_bck_size);
-	} else {
-		MSMWDT_ERR("Cannot remap buffer %pa size %zx\n",
-					&diag_bck_paddr, diag_bck_size);
-	}
-
-	if (MSM_DUMP_MAJOR(msm_dump_table_version()) == 1) {
-		struct msm_client_dump dump_entry;
-
-		dump_entry.id = MSM_TZ_LOG;
-		dump_entry.start_addr = diag_bck_paddr;
-		dump_entry.end_addr = diag_bck_paddr + diag_bck_size;
-		if (msm_dump_tbl_register(&dump_entry))
-			MSMWDT_ERR("Cannot register buffer: %pa\n",
-					&diag_bck_paddr);
-	} else {
-		struct msm_dump_entry dump_entry;
-		struct msm_dump_data *tz_dump_data;
-		int ret;
-
-		tz_dump_data = kzalloc(sizeof(struct msm_dump_data),
-						GFP_KERNEL);
-		if (!tz_dump_data) {
-			MSMWDT_ERR("Cannot alloc dump data structure.\n");
-			return;
-		}
-		tz_dump_data->addr = diag_bck_paddr;
-		tz_dump_data->len = diag_bck_size;
-		dump_entry.id = MSM_DUMP_DATA_TZ_LOG;
-		dump_entry.addr = virt_to_phys(tz_dump_data);
-		ret = msm_dump_data_register(MSM_DUMP_TABLE_APPS, &dump_entry);
-		if (ret) {
-			MSMWDT_ERR("Registering dump data failed.\n");
-			kfree(tz_dump_data);
-		}
-	}
-no_reservation:
-	return;
-}
-
-#else
-
-static inline void tzlog_bck_check(struct platform_device *pdev)
-{
-}
-
-#endif /* CONFIG_MSM_TZ_LOG_WDOG_DUMP */
-
 /*
  * Driver functions
  */
@@ -911,10 +807,13 @@ static int tz_log_probe(struct platform_device *pdev)
 	void __iomem *virt_iobase;
 	phys_addr_t tzdiag_phy_iobase;
 	uint32_t *ptr = NULL;
+#ifdef CONFIG_HTC_TZ_LOG
+	struct device_node *node = pdev->dev.of_node;
+	uint32_t tz_scm_log_phys, tz_scm_log_size;
+#endif
 
 	/*
-	 * Get address that stores the physical location of 4KB
-	 * diagnostic data
+	 * Get address that stores the physical location diagnostic data
 	 */
 	resource = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!resource) {
@@ -922,54 +821,44 @@ static int tz_log_probe(struct platform_device *pdev)
 				"%s: ERROR Missing MEM resource\n", __func__);
 		return -ENXIO;
 	};
+
 	/*
-	 * Map address that stores the physical location of 4KB
-	 * diagnostic data
+	 * Get the debug buffer size
+	 */
+	debug_rw_buf_size = resource->end - resource->start + 1;
+
+	/*
+	 * Map address that stores the physical location diagnostic data
 	 */
 	virt_iobase = devm_ioremap_nocache(&pdev->dev, resource->start,
-				resource->end - resource->start + 1);
+				debug_rw_buf_size);
 	if (!virt_iobase) {
 		dev_err(&pdev->dev,
 			"%s: ERROR could not ioremap: start=%pr, len=%u\n",
 			__func__, &resource->start,
-			(unsigned int)(resource->end - resource->start + 1));
+			(unsigned int)(debug_rw_buf_size));
 		return -ENXIO;
 	}
 	/*
-	 * Retrieve the address of 4KB diagnostic data
+	 * Retrieve the address of diagnostic data
 	 */
 	tzdiag_phy_iobase = readl_relaxed(virt_iobase);
 
 	/*
-	 * Map the 4KB diagnostic information area
+	 * Map the diagnostic information area
 	 */
 	tzdbg.virt_iobase = devm_ioremap_nocache(&pdev->dev,
-				tzdiag_phy_iobase, DEBUG_MAX_RW_BUF);
+				tzdiag_phy_iobase, debug_rw_buf_size);
 
 	if (!tzdbg.virt_iobase) {
 		dev_err(&pdev->dev,
 			"%s: ERROR could not ioremap: start=%pr, len=%u\n",
 			__func__, &tzdiag_phy_iobase,
-			DEBUG_MAX_RW_BUF);
+			debug_rw_buf_size);
 		return -ENXIO;
 	}
-	tzdbg.diag_size = readl_relaxed(tzdbg.virt_iobase +
-				offsetof(struct tzdbg_t, ring_off)) +
-			readl_relaxed(tzdbg.virt_iobase +
-				offsetof(struct tzdbg_t, ring_len));
-	if (tzdbg.diag_size > DEBUG_MAX_RW_BUF) {
-		devm_iounmap(&pdev->dev, tzdbg.virt_iobase);
-		tzdbg.virt_iobase = devm_ioremap_nocache(&pdev->dev,
-				tzdiag_phy_iobase, tzdbg.diag_size);
-		if (!tzdbg.virt_iobase) {
-			dev_err(&pdev->dev,
-				"ERROR could not ioremap: start=%pr, len=%zu\n",
-					&tzdiag_phy_iobase, tzdbg.diag_size);
-			return -ENXIO;
-		}
-	}
 
-	ptr = kzalloc(tzdbg.diag_size, GFP_KERNEL);
+	ptr = kzalloc(debug_rw_buf_size, GFP_KERNEL);
 	if (ptr == NULL) {
 		pr_err("%s: Can't Allocate memory: ptr\n",
 			__func__);
@@ -978,11 +867,51 @@ static int tz_log_probe(struct platform_device *pdev)
 
 	tzdbg.diag_buf = (struct tzdbg_t *)ptr;
 
+#ifdef CONFIG_HTC_TZ_LOG
+	htc_tzlog = kzalloc(sizeof(struct htc_tzlog_dev), GFP_KERNEL);
+	if (!htc_tzlog) {
+		pr_err("%s: Can't Allocate memory: scm_dev\n", __func__);
+		return -ENOMEM;
+	}
+
+	htc_tzlog->tmp_buf = kzalloc(MSM_TZLOG_SIZE, GFP_KERNEL);
+	if (!htc_tzlog->tmp_buf) {
+		pr_err("%s: Can't Allocate memory: scm_dev\n", __func__);
+		kfree(htc_tzlog);
+		return -ENOMEM;
+	}
+
+	if (of_property_read_u32(node, "htc,tz_scm_log_phys", &tz_scm_log_phys))
+		tz_scm_log_phys = TZ_SCM_LOG_PHYS;
+	if (of_property_read_u32(node, "htc,tz_scm_log_size", &tz_scm_log_size))
+		tz_scm_log_size = TZ_SCM_LOG_SIZE;
+
+	htc_tzlog->tz_scm_log_phys = tz_scm_log_phys;
+	htc_tzlog->tz_scm_log_size = tz_scm_log_size;
+
+	htc_tzlog->buffer = devm_ioremap_nocache(&pdev->dev,
+		tz_scm_log_phys, tz_scm_log_size);
+	if (htc_tzlog->buffer == NULL) {
+		pr_err("%s: ioremap fail...\n", __func__);
+		kfree(htc_tzlog->tmp_buf);
+		kfree(htc_tzlog);
+		return -EFAULT;
+	}
+
+	pr_info("[TZLOG] buffer address:%x size:%x\n",
+		tz_scm_log_phys, tz_scm_log_size);
+
+	htc_tzlog->pr_cursor = (uint32_t *)(htc_tzlog->buffer +	tz_scm_log_size - 2*4);
+	htc_tzlog->pw_cursor = (uint32_t *)(htc_tzlog->buffer +	tz_scm_log_size - 4);
+
+	
+	
+#endif
+
 	if (tzdbgfs_init(pdev))
 		goto err;
 
 	tzdbg_register_qsee_log_buf();
-	tzlog_bck_check(pdev);
 	return 0;
 err:
 	kfree(tzdbg.diag_buf);

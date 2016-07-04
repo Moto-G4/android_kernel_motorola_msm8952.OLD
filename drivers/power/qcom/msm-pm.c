@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2010-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -21,10 +21,10 @@
 #include <linux/ktime.h>
 #include <linux/smp.h>
 #include <linux/tick.h>
+#include <linux/console.h>
 #include <linux/delay.h>
 #include <linux/platform_device.h>
 #include <linux/of_platform.h>
-#include <linux/cpu_pm.h>
 #include <linux/msm-bus.h>
 #include <linux/uaccess.h>
 #include <linux/dma-mapping.h>
@@ -40,10 +40,34 @@
 #ifdef CONFIG_VFP
 #include <asm/vfp.h>
 #endif
-#include <soc/qcom/jtag.h>
 #include "idle.h"
 #include "pm-boot.h"
-#include "../../../arch/arm/mach-msm/clock.h"
+
+#ifdef CONFIG_HTC_POWER_DEBUG
+#include <soc/qcom/htc_util.h>
+#include <linux/seq_file.h>
+#include <linux/qpnp/pin.h>
+#include <soc/qcom/rpm_stats.h>
+#include "../../../kernel/sched/sched.h"
+#ifdef CONFIG_PINCTRL_MSM_TLMM_V3
+#include <mach/gpio.h>
+#elif defined(CONFIG_PINCTRL_MSM_TLMM)
+#include <linux/pinctrl/pinctrl.h>
+#endif
+extern int htc_vregs_dump(char *vreg_buffer, int curr_len);
+#endif
+
+#if defined(CONFIG_HTC_DEBUG_WATCHDOG)
+extern int msm_watchdog_suspend_deferred(void);
+extern int msm_watchdog_resume_deferred(void);
+#else
+static inline int msm_watchdog_suspend_deferred(void) { return 0; }
+static inline int msm_watchdog_resume_deferred(void) { return 0; }
+#endif
+
+#ifdef CONFIG_HTC_DEBUG_FOOTPRINT
+#include <htc_mnemosyne/htc_footprint.h>
+#endif
 
 #define SCM_CMD_TERMINATE_PC	(0x2)
 #define SCM_CMD_CORE_HOTPLUGGED (0x10)
@@ -53,22 +77,33 @@
 
 #define MAX_BUF_SIZE  1024
 
-static int msm_pm_debug_mask = 1;
-module_param_named(
-	debug_mask, msm_pm_debug_mask, int, S_IRUGO | S_IWUSR | S_IWGRP
-);
-
 enum {
 	MSM_PM_DEBUG_SUSPEND = BIT(0),
 	MSM_PM_DEBUG_POWER_COLLAPSE = BIT(1),
 	MSM_PM_DEBUG_SUSPEND_LIMITS = BIT(2),
 	MSM_PM_DEBUG_CLOCK = BIT(3),
 	MSM_PM_DEBUG_RESET_VECTOR = BIT(4),
-	MSM_PM_DEBUG_IDLE_CLK = BIT(5),
-	MSM_PM_DEBUG_IDLE = BIT(6),
-	MSM_PM_DEBUG_IDLE_LIMITS = BIT(7),
-	MSM_PM_DEBUG_HOTPLUG = BIT(8),
+	MSM_PM_DEBUG_IDLE = BIT(5),
+	MSM_PM_DEBUG_IDLE_LIMITS = BIT(6),
+	MSM_PM_DEBUG_HOTPLUG = BIT(7),
+#ifdef CONFIG_HTC_POWER_DEBUG
+	MSM_PM_DEBUG_GPIO = BIT(9),
+	MSM_PM_DEBUG_BLOCK_XO_CLOCK = BIT(10),
+	MSM_PM_DEBUG_RPM_STAT = BIT(12),
+	MSM_PM_DEBUG_VREG = BIT(13),
+	MSM_PM_DEBUG_REGISTER = BIT(14),
+#endif
 };
+
+#ifdef CONFIG_HTC_POWER_DEBUG
+static int msm_pm_debug_mask = MSM_PM_DEBUG_SUSPEND | MSM_PM_DEBUG_RPM_STAT | MSM_PM_DEBUG_BLOCK_XO_CLOCK;
+#else
+static int msm_pm_debug_mask = 1;
+#endif
+
+module_param_named(
+        debug_mask, msm_pm_debug_mask, int, S_IRUGO | S_IWUSR | S_IWGRP
+);
 
 enum msm_pc_count_offsets {
 	MSM_PC_ENTRY_COUNTER,
@@ -80,6 +115,7 @@ enum msm_pc_count_offsets {
 
 static bool msm_pm_ldo_retention_enabled = true;
 static bool msm_pm_tz_flushes_cache;
+static bool msm_pm_ret_no_pll_switch;
 static bool msm_no_ramp_down_pc;
 static struct msm_pm_sleep_status_data *msm_pm_slp_sts;
 DEFINE_PER_CPU(struct clk *, cpu_clks);
@@ -117,9 +153,39 @@ static bool msm_pm_is_L1_writeback(void)
 #endif
 }
 
+static void htc_lpm_pre_action(bool from_idle)
+{
+	int is_last_core_for_suspend = (!from_idle && cpu_online(smp_processor_id()));
+
+	if (is_last_core_for_suspend) {
+		if (suspend_console_deferred)
+			suspend_console();
+
+		msm_watchdog_suspend_deferred();
+	}
+}
+
+static void htc_lpm_post_action(bool from_idle)
+{
+	int is_last_core_for_suspend = (!from_idle && cpu_online(smp_processor_id()));
+
+	if (is_last_core_for_suspend) {
+		msm_watchdog_resume_deferred();
+
+		if (suspend_console_deferred)
+			resume_console();
+	}
+}
+
 static bool msm_pm_swfi(bool from_idle)
 {
+
+	htc_lpm_pre_action(from_idle);
+
 	msm_arch_idle();
+
+	htc_lpm_post_action(from_idle);
+
 	return true;
 }
 
@@ -137,18 +203,24 @@ static bool msm_pm_retention(bool from_idle)
 	cpumask_set_cpu(cpu, &retention_cpus);
 	spin_unlock(&retention_lock);
 
-	clk_disable(cpu_clk);
+	if (!msm_pm_ret_no_pll_switch)
+		clk_disable(cpu_clk);
 
 	ret = msm_spm_set_low_power_mode(MSM_SPM_MODE_RETENTION, false);
 	WARN_ON(ret);
 
+	htc_lpm_pre_action(from_idle);
+
 	msm_arch_idle();
+
+	htc_lpm_post_action(from_idle);
 
 	ret = msm_spm_set_low_power_mode(MSM_SPM_MODE_CLOCK_GATING, false);
 	WARN_ON(ret);
 
-	if (clk_enable(cpu_clk))
-		pr_err("%s(): Error restore cpu clk\n", __func__);
+	if (!msm_pm_ret_no_pll_switch)
+		if (clk_enable(cpu_clk))
+			pr_err("%s(): Error restore cpu clk\n", __func__);
 
 	spin_lock(&retention_lock);
 	cpumask_clear_cpu(cpu, &retention_cpus);
@@ -184,6 +256,10 @@ static bool msm_pm_pc_hotplug(void)
 
 	flag = lpm_cpu_pre_pc_cb(cpu);
 
+#ifdef CONFIG_HTC_DEBUG_FOOTPRINT
+	set_reset_vector(cpu);
+#endif
+
 	if (!msm_pm_tz_flushes_cache) {
 		if (flag == MSM_SCM_L2_OFF)
 			flush_cache_all();
@@ -192,6 +268,10 @@ static bool msm_pm_pc_hotplug(void)
 	}
 
 	msm_pc_inc_debug_count(cpu, MSM_PC_ENTRY_COUNTER);
+
+#ifdef CONFIG_HTC_DEBUG_FOOTPRINT
+	set_cpu_foot_print(cpu, 0x1);
+#endif
 
 	if (is_scm_armv8()) {
 		desc.args[0] = SCM_CMD_CORE_HOTPLUGGED |
@@ -215,6 +295,10 @@ int msm_pm_collapse(unsigned long unused)
 	enum msm_pm_l2_scm_flag flag;
 	struct scm_desc desc;
 
+#ifdef CONFIG_HTC_DEBUG_FOOTPRINT
+	set_reset_vector(cpu);
+#endif
+
 	flag = lpm_cpu_pre_pc_cb(cpu);
 
 	if (!msm_pm_tz_flushes_cache) {
@@ -224,6 +308,10 @@ int msm_pm_collapse(unsigned long unused)
 			flush_cache_louis();
 	}
 	msm_pc_inc_debug_count(cpu, MSM_PC_ENTRY_COUNTER);
+
+#ifdef CONFIG_HTC_DEBUG_FOOTPRINT
+	set_cpu_foot_print(cpu, 0x1);
+#endif
 
 	if (is_scm_armv8()) {
 		desc.args[0] = flag;
@@ -240,6 +328,73 @@ int msm_pm_collapse(unsigned long unused)
 }
 EXPORT_SYMBOL(msm_pm_collapse);
 
+#ifdef CONFIG_HTC_POWER_DEBUG
+static char *gpio_sleep_status_info;
+
+int print_gpio_buffer(struct seq_file *m)
+{
+	if (gpio_sleep_status_info)
+		seq_printf(m, gpio_sleep_status_info);
+	else
+		seq_printf(m, "Device haven't suspended yet!\n");
+	return 0;
+}
+EXPORT_SYMBOL(print_gpio_buffer);
+
+int free_gpio_buffer(void)
+{
+	kfree(gpio_sleep_status_info);
+	gpio_sleep_status_info = NULL;
+
+	return 0;
+}
+EXPORT_SYMBOL(free_gpio_buffer);
+
+static char *vreg_sleep_status_info;
+
+int print_vreg_buffer(struct seq_file *m)
+{
+	if (vreg_sleep_status_info)
+		seq_printf(m, vreg_sleep_status_info);
+	else
+		seq_printf(m, "Device haven't suspended yet!\n");
+
+	return 0;
+}
+EXPORT_SYMBOL(print_vreg_buffer);
+
+int free_vreg_buffer(void)
+{
+	kfree(vreg_sleep_status_info);
+	vreg_sleep_status_info = NULL;
+
+	return 0;
+}
+EXPORT_SYMBOL(free_vreg_buffer);
+
+static char *pmic_reg_sleep_status_info;
+
+int print_pmic_reg_buffer(struct seq_file *m)
+{
+	if (pmic_reg_sleep_status_info)
+		seq_printf(m, pmic_reg_sleep_status_info);
+	else
+		seq_printf(m, "Device haven't suspended yet!\n");
+
+	return 0;
+}
+EXPORT_SYMBOL(print_pmic_reg_buffer);
+
+int free_pmic_reg_buffer(void)
+{
+	kfree(pmic_reg_sleep_status_info);
+	pmic_reg_sleep_status_info = NULL;
+
+	return 0;
+}
+EXPORT_SYMBOL(free_pmic_reg_buffer);
+#endif
+
 static bool __ref msm_pm_spm_power_collapse(
 	unsigned int cpu, bool from_idle, bool notify_rpm)
 {
@@ -248,12 +403,14 @@ static bool __ref msm_pm_spm_power_collapse(
 	int ret;
 	bool save_cpu_regs = (cpu_online(cpu) || from_idle);
 
+#ifdef CONFIG_HTC_POWER_DEBUG
+        int curr_len = 0;
+	int is_last_core_for_suspend = (!from_idle && cpu_online(cpu));
+#endif
+
 	if (MSM_PM_DEBUG_POWER_COLLAPSE & msm_pm_debug_mask)
 		pr_info("CPU%u: %s: notify_rpm %d\n",
 			cpu, __func__, (int) notify_rpm);
-
-	if (from_idle)
-		cpu_pm_enter();
 
 	ret = msm_spm_set_low_power_mode(
 			MSM_SPM_MODE_POWER_COLLAPSE, notify_rpm);
@@ -267,25 +424,75 @@ static bool __ref msm_pm_spm_power_collapse(
 		pr_info("CPU%u: %s: program vector to %p\n",
 			cpu, __func__, entry);
 
-	msm_jtag_save_state();
-
-#ifdef CONFIG_CPU_V7
-	collapsed = save_cpu_regs ?
-		!cpu_suspend(0, msm_pm_collapse) : msm_pm_pc_hotplug();
-#else
-	collapsed = save_cpu_regs ?
-		!cpu_suspend(0) : msm_pm_pc_hotplug();
+#ifdef CONFIG_HTC_DEBUG_FOOTPRINT
+	init_cpu_foot_print(cpu, from_idle, notify_rpm);
 #endif
 
-	msm_jtag_restore_state();
+#ifdef CONFIG_HTC_POWER_DEBUG
+	if (is_last_core_for_suspend) {
+		if (MSM_PM_DEBUG_GPIO & msm_pm_debug_mask) {
+			if (gpio_sleep_status_info) {
+				memset(gpio_sleep_status_info, 0,
+					sizeof(*gpio_sleep_status_info));
+			} else {
+				gpio_sleep_status_info = kmalloc(25000, GFP_ATOMIC);
+				if (!gpio_sleep_status_info) {
+					pr_err("[PM] kmalloc memory failed in %s\n",
+					__func__);
+
+				}
+			}
+
+			curr_len = msm_dump_gpios(NULL, curr_len,
+						gpio_sleep_status_info);
+			curr_len = qpnp_pin_dump(NULL, curr_len,
+						gpio_sleep_status_info);
+
+		}
+
+		if (MSM_PM_DEBUG_VREG & msm_pm_debug_mask) {
+			curr_len = 0;
+			if (vreg_sleep_status_info) {
+				memset(vreg_sleep_status_info, 0,
+					sizeof(*vreg_sleep_status_info));
+			} else {
+				vreg_sleep_status_info = kmalloc(25000, GFP_ATOMIC);
+				if (!vreg_sleep_status_info) {
+					pr_err("kmalloc memory failed in %s\n",
+						__func__);
+
+				}
+			}
+			curr_len = htc_vregs_dump(vreg_sleep_status_info, curr_len);
+		}
+		pr_info("[R] suspend end\n");
+	}
+#endif
+
+	htc_lpm_pre_action(from_idle);
+
+	collapsed = save_cpu_regs ?
+		!__cpu_suspend(0, msm_pm_collapse) : msm_pm_pc_hotplug();
+
+#ifdef CONFIG_HTC_DEBUG_FOOTPRINT
+	set_cpu_foot_print(cpu, 0xa);
+	clean_reset_vector_debug_info(cpu);
+#endif
+
+#ifdef CONFIG_HTC_DEBUG_FOOTPRINT
+	set_cpu_foot_print(cpu, 0xb);
+#endif
+
+	htc_lpm_post_action(from_idle);
+
+	if ((!from_idle && cpu_online(smp_processor_id()))) {
+		pr_info("[R] resume start\n");
+	}
 
 	if (collapsed)
 		local_fiq_enable();
 
 	msm_pm_boot_config_after_pc(cpu);
-
-	if (from_idle)
-		cpu_pm_exit();
 
 	if (MSM_PM_DEBUG_POWER_COLLAPSE & msm_pm_debug_mask)
 		pr_info("CPU%u: %s: msm_pm_collapse returned, collapsed %d\n",
@@ -300,15 +507,39 @@ static bool msm_pm_power_collapse_standalone(
 		bool from_idle)
 {
 	unsigned int cpu = smp_processor_id();
+	unsigned long saved_acpuclk_rate = 0;
 	unsigned int avsdscr;
 	unsigned int avscsr;
 	bool collapsed;
+
+#ifdef CONFIG_HTC_POWER_DEBUG
+	if (cpu_online(cpu)) {
+		if ((!from_idle) && (MSM_PM_DEBUG_RPM_STAT & msm_pm_debug_mask)){
+			msm_rpm_dump_stat();
+		}
+	}
+#endif
 
 	avsdscr = avs_get_avsdscr();
 	avscsr = avs_get_avscsr();
 	avs_set_avscsr(0); /* Disable AVS */
 
+#ifdef CONFIG_HTC_POWER_DEBUG
+	if ((!from_idle) && (MSM_PM_DEBUG_CLOCK & msm_pm_debug_mask))
+#else
+	if (MSM_PM_DEBUG_CLOCK & msm_pm_debug_mask)
+#endif
+		pr_info("CPU%u: %s: change clock rate (old rate = %lu)\n",
+			cpu, __func__, saved_acpuclk_rate);
+
 	collapsed = msm_pm_spm_power_collapse(cpu, from_idle, false);
+
+#ifdef CONFIG_HTC_POWER_DEBUG
+	if (cpu_online(cpu)) {
+		if ((!from_idle) && (MSM_PM_DEBUG_RPM_STAT & msm_pm_debug_mask))
+			msm_rpm_dump_stat();
+	}
+#endif
 
 	avs_set_avsdscr(avsdscr);
 	avs_set_avscsr(avscsr);
@@ -361,17 +592,18 @@ static bool msm_pm_power_collapse(bool from_idle)
 	if (MSM_PM_DEBUG_POWER_COLLAPSE & msm_pm_debug_mask)
 		pr_info("CPU%u: %s: idle %d\n",
 			cpu, __func__, (int)from_idle);
+#ifdef CONFIG_HTC_POWER_DEBUG
+	if (cpu_online(cpu)) {
+		if ((!from_idle) && (MSM_PM_DEBUG_RPM_STAT & msm_pm_debug_mask)){
+			msm_rpm_dump_stat();
+		}
+	}
+#endif
 
 	if (MSM_PM_DEBUG_POWER_COLLAPSE & msm_pm_debug_mask)
 		pr_info("CPU%u: %s: pre power down\n", cpu, __func__);
 
-	/* This spews a lot of messages when a core is hotplugged. This
-	 * information is most useful from last core going down during
-	 * power collapse
-	 */
-	if ((!from_idle && cpu_online(cpu))
-			|| (MSM_PM_DEBUG_IDLE_CLK & msm_pm_debug_mask))
-		clock_debug_print_enabled();
+
 
 	avsdscr = avs_get_avsdscr();
 	avscsr = avs_get_avscsr();
@@ -382,8 +614,22 @@ static bool msm_pm_power_collapse(bool from_idle)
 
 	collapsed = msm_pm_spm_power_collapse(cpu, from_idle, true);
 
-	if (cpu_online(cpu) && !msm_no_ramp_down_pc)
-		ramp_up_first_cpu(cpu, saved_acpuclk_rate);
+	if (cpu_online(cpu)) {
+#ifdef CONFIG_HTC_POWER_DEBUG
+		if ((!from_idle) && (MSM_PM_DEBUG_RPM_STAT & msm_pm_debug_mask))
+			msm_rpm_dump_stat();
+		if ((!from_idle) && (MSM_PM_DEBUG_CLOCK & msm_pm_debug_mask))
+#else
+		if (MSM_PM_DEBUG_CLOCK & msm_pm_debug_mask)
+#endif
+			pr_info("CPU%u: %s: restore clock rate to %lu\n",
+				cpu, __func__, saved_acpuclk_rate);
+		if (!msm_no_ramp_down_pc &&
+			ramp_up_first_cpu(cpu, saved_acpuclk_rate)
+				< 0)
+			pr_err("CPU%u: %s: failed to restore clock rate(%lu)\n",
+				cpu, __func__, saved_acpuclk_rate);
+	}
 
 	avs_set_avsdscr(avsdscr);
 	avs_set_avscsr(avscsr);
@@ -426,6 +672,7 @@ static bool (*execute[MSM_PM_SLEEP_MODE_NR])(bool idle) = {
  */
 bool msm_cpu_pm_enter_sleep(enum msm_pm_sleep_mode mode, bool from_idle)
 {
+	int64_t time;
 	bool exit_stat = false;
 	unsigned int cpu = smp_processor_id();
 
@@ -434,8 +681,23 @@ bool msm_cpu_pm_enter_sleep(enum msm_pm_sleep_mode mode, bool from_idle)
 		pr_info("CPU%u:%s mode:%d during %s\n", cpu, __func__,
 				mode, from_idle ? "idle" : "suspend");
 
+        time = sched_clock();
 	if (execute[mode])
 		exit_stat = execute[mode](from_idle);
+        time = sched_clock() - time;
+        if (!from_idle)
+                exit_stat = MSM_PM_STAT_SUSPEND;
+        if (exit_stat >= 0)
+                msm_pm_add_stat(exit_stat, time);
+        do_div(time, 1000);
+
+#ifdef CONFIG_HTC_POWER_DEBUG
+        if(from_idle){
+                
+                        htc_idle_stat_add(mode, (u32)time);
+                
+        }
+#endif
 
 	return exit_stat;
 }
@@ -776,6 +1038,31 @@ static const struct file_operations msm_pc_debug_counters_fops = {
 	.llseek = no_llseek,
 };
 
+static int msm_pm_htc_footprint_init(void)
+{
+#ifdef CONFIG_HTC_DEBUG_FOOTPRINT
+	store_pm_boot_entry_addr();
+	pr_info("%s: msm_pm_boot_vector 0x%p", __func__, (void *)&msm_pm_boot_vector);
+	store_pm_boot_vector_addr((u64)&msm_pm_boot_vector);
+
+	clean_reset_vector_debug_info(0);
+	init_cpu_foot_print(0, false, true);
+	set_cpu_foot_print(0, 0xb);
+	set_reset_vector_address_after_pc(0);
+	set_reset_vector_value_after_pc(0);
+#endif
+	return 0;
+}
+
+static int msm_pm_htc_init(void)
+{
+	msm_pm_htc_footprint_init();
+
+	suspend_console_deferred = 1;
+
+	return 0;
+}
+
 static int msm_pm_clk_init(struct platform_device *pdev)
 {
 	bool synced_clocks;
@@ -783,18 +1070,22 @@ static int msm_pm_clk_init(struct platform_device *pdev)
 	char clk_name[] = "cpu??_clk";
 	char *key;
 
+	key = "qcom,saw-turns-off-pll";
+	if (of_property_read_bool(pdev->dev.of_node, key))
+		return 0;
+
 	key = "qcom,synced-clocks";
 	synced_clocks = of_property_read_bool(pdev->dev.of_node, key);
 
 	for_each_possible_cpu(cpu) {
 		struct clk *clk;
 		snprintf(clk_name, sizeof(clk_name), "cpu%d_clk", cpu);
-		clk = devm_clk_get(&pdev->dev, clk_name);
+		clk = clk_get(&pdev->dev, clk_name);
 		if (IS_ERR(clk)) {
 			if (cpu && synced_clocks)
 				return 0;
 			else
-				return PTR_ERR(clk);
+				clk = NULL;
 		}
 		per_cpu(cpu_clks, cpu) = clk;
 	}
@@ -802,7 +1093,7 @@ static int msm_pm_clk_init(struct platform_device *pdev)
 	if (synced_clocks)
 		return 0;
 
-	l2_clk = devm_clk_get(&pdev->dev, "l2_clk");
+	l2_clk = clk_get(&pdev->dev, "l2_clk");
 	if (IS_ERR(l2_clk))
 		pr_warn("%s: Could not get l2_clk (-%ld)\n", __func__,
 			PTR_ERR(l2_clk));
@@ -854,12 +1145,18 @@ skip_save_imem:
 		msm_pm_tz_flushes_cache =
 				of_property_read_bool(pdev->dev.of_node, key);
 
+		key = "qcom,no-pll-switch-for-retention";
+		msm_pm_ret_no_pll_switch =
+				of_property_read_bool(pdev->dev.of_node, key);
+
 		ret = msm_pm_clk_init(pdev);
 		if (ret) {
 			pr_info("msm_pm_clk_init returned error\n");
 			return ret;
 		}
 	}
+
+	msm_pm_htc_init();
 
 	if (pdev->dev.of_node)
 		of_platform_populate(pdev->dev.of_node, NULL, NULL, &pdev->dev);
@@ -889,15 +1186,25 @@ static int __init msm_pm_drv_init(void)
 
 	rc = platform_driver_register(&msm_cpu_pm_snoc_client_driver);
 
-	if (rc) {
+	if (rc)
 		pr_err("%s(): failed to register driver %s\n", __func__,
 				msm_cpu_pm_snoc_client_driver.driver.name);
-		return rc;
-	}
-
-	return platform_driver_register(&msm_cpu_pm_driver);
+	return rc;
 }
 late_initcall(msm_pm_drv_init);
+
+static int __init msm_pm_debug_counters_init(void)
+{
+	int rc;
+
+	rc = platform_driver_register(&msm_cpu_pm_driver);
+
+	if (rc)
+		pr_err("%s(): failed to register driver %s\n", __func__,
+				msm_cpu_pm_driver.driver.name);
+	return rc;
+}
+fs_initcall(msm_pm_debug_counters_init);
 
 int __init msm_pm_sleep_status_init(void)
 {
@@ -918,4 +1225,14 @@ static int idle_initialize(void)
 	return 0;
 }
 early_initcall(idle_initialize);
+#endif
+
+#ifdef CONFIG_HTC_POWER_DEBUG
+static int __init htc_cpu_monitor_init(void)
+{
+	htc_monitor_init();
+	return 0;
+}
+late_initcall(htc_cpu_monitor_init);
+
 #endif

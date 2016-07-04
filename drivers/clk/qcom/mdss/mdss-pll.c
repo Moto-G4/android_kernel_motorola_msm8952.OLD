@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -45,7 +45,6 @@ int mdss_pll_resource_enable(struct mdss_pll_resources *pll_res, bool enable)
 		return rc;
 	}
 
-	mutex_lock(&pll_res->res_lock);
 	if (enable) {
 		if (pll_res->resource_ref_cnt == 0)
 			changed++;
@@ -68,7 +67,6 @@ int mdss_pll_resource_enable(struct mdss_pll_resources *pll_res, bool enable)
 			pll_res->resource_enable = enable;
 	}
 
-	mutex_unlock(&pll_res->res_lock);
 	return rc;
 }
 
@@ -138,17 +136,28 @@ static int mdss_pll_resource_parse(struct platform_device *pdev,
 	} else if (!strcmp(compatible_stream, "qcom,mdss_dsi_pll_8909")) {
 		pll_res->pll_interface_type = MDSS_DSI_PLL_LPM;
 		pll_res->target_id = MDSS_PLL_TARGET_8909;
+	} else if (!strcmp(compatible_stream, "qcom,mdss_dsi_pll_8952")) {
+		pll_res->pll_interface_type = MDSS_DSI_PLL_LPM;
+		pll_res->target_id = MDSS_PLL_TARGET_8952;
 	} else if (!strcmp(compatible_stream, "qcom,mdss_dsi_pll_8974")) {
 		pll_res->pll_interface_type = MDSS_DSI_PLL_HPM;
 		pll_res->target_id = MDSS_PLL_TARGET_8974;
+	} else if (!strcmp(compatible_stream, "qcom,mdss_dsi_pll_8976")) {
+		pll_res->pll_interface_type = MDSS_DSI_PLL_HPM;
+		pll_res->target_id = MDSS_PLL_TARGET_8976;
 	} else if (!strcmp(compatible_stream, "qcom,mdss_dsi_pll_8994")) {
 		pll_res->pll_interface_type = MDSS_DSI_PLL_20NM;
 		pll_res->target_id = MDSS_PLL_TARGET_8994;
+	} else if (!strcmp(compatible_stream, "qcom,mdss_dsi_pll_8992")) {
+		pll_res->pll_interface_type = MDSS_DSI_PLL_20NM;
+		pll_res->target_id = MDSS_PLL_TARGET_8992;
 	} else if (!strcmp(compatible_stream, "qcom,mdss_edp_pll")) {
 		pll_res->pll_interface_type = MDSS_EDP_PLL;
 	} else if (!strcmp(compatible_stream, "qcom,mdss_hdmi_pll")) {
 		pll_res->pll_interface_type = MDSS_HDMI_PLL;
 	} else if (!strcmp(compatible_stream, "qcom,mdss_hdmi_pll_8994")) {
+		pll_res->pll_interface_type = MDSS_HDMI_PLL_20NM;
+	} else if (!strcmp(compatible_stream, "qcom,mdss_hdmi_pll_8992")) {
 		pll_res->pll_interface_type = MDSS_HDMI_PLL_20NM;
 	} else {
 		goto err;
@@ -262,25 +271,6 @@ static int mdss_pll_probe(struct platform_device *pdev)
 		goto res_parse_error;
 	}
 
-	/*
-	 * DSI PLL 1 is leaking current whenever MDSS GDSC is toggled. Need to
-	 * map PLL1 registers along with the PLl0 so that we can manually turn
-	 * off PLL1.
-	 */
-	if (pll_res->pll_interface_type == MDSS_DSI_PLL_20NM) {
-		struct resource *pll_1_base_reg;
-		pll_1_base_reg = platform_get_resource_byname(pdev,
-				IORESOURCE_MEM, "pll_1_base");
-		if (pll_1_base_reg) {
-			pll_res->pll_1_base = ioremap(pll_1_base_reg->start,
-					resource_size(pll_1_base_reg));
-			if (!pll_res->pll_1_base)
-				pr_err("Unable to remap pll 1 base resources\n");
-		} else {
-			pr_err("Unable to get the pll 1 base resource\n");
-		}
-	}
-
 	phy_base_reg = platform_get_resource_byname(pdev,
 						IORESOURCE_MEM, "phy_base");
 	if (!phy_base_reg) {
@@ -327,6 +317,11 @@ static int mdss_pll_probe(struct platform_device *pdev)
 		goto gdsc_io_error;
 	}
 
+	pll_res->pll_en_90_phase = of_property_read_bool(pdev->dev.of_node,
+						"qcom,mdss-en-pll-90-phase");
+	if (pll_res->pll_en_90_phase)
+		pr_debug("%s: PLL configured to enable 90-Phase", __func__);
+
 	rc = mdss_pll_resource_init(pdev, pll_res);
 	if (rc) {
 		pr_err("Pll resource init failed rc=%d\n", rc);
@@ -353,8 +348,6 @@ dyn_pll_io_error:
 	if (pll_res->phy_base)
 		iounmap(pll_res->phy_base);
 phy_io_error:
-	if (pll_res->pll_1_base)
-		iounmap(pll_res->pll_1_base);
 	mdss_pll_resource_release(pdev, pll_res);
 res_parse_error:
 	iounmap(pll_res->pll_base);
@@ -389,9 +382,13 @@ static const struct of_device_id mdss_pll_dt_match[] = {
 	{.compatible = "qcom,mdss_dsi_pll_8974"},
 	{.compatible = "qcom,mdss_dsi_pll_8994"},
 	{.compatible = "qcom,mdss_hdmi_pll_8994"},
+	{.compatible = "qcom,mdss_dsi_pll_8992"},
+	{.compatible = "qcom,mdss_hdmi_pll_8992"},
 	{.compatible = "qcom,mdss_dsi_pll_8916"},
 	{.compatible = "qcom,mdss_dsi_pll_8939"},
 	{.compatible = "qcom,mdss_dsi_pll_8909"},
+	{.compatible = "qcom,mdss_dsi_pll_8952"},
+	{.compatible = "qcom,mdss_dsi_pll_8976"},
 	{.compatible = "qcom,mdss_edp_pll"},
 	{.compatible = "qcom,mdss_hdmi_pll"},
 	{}

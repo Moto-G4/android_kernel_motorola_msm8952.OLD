@@ -442,6 +442,9 @@ void __init bootmem_init(void)
 
 	arm_bootmem_init(min, max_low);
 
+	early_memtest((phys_addr_t)min << PAGE_SHIFT,
+		      (phys_addr_t)max_low << PAGE_SHIFT);
+
 	/*
 	 * Sparsemem tries to allocate bootmem in memory_present(),
 	 * so must be done after the fixed reservations
@@ -631,47 +634,45 @@ static void __init free_highpages(void)
 #define MLK_ROUNDUP(b, t) b, t, DIV_ROUND_UP(((t) - (b)), SZ_1K)
 
 #ifdef CONFIG_ENABLE_VMALLOC_SAVING
-static void print_vmalloc_lowmem_range(unsigned long *va_start,
-		unsigned long *va_end, int vmalloc)
-{
-	char *str = vmalloc ? "vmalloc" : "lowmem ";
-	unsigned long size = *va_end - *va_start;
-	if (size >= SZ_1M)
-		pr_notice("    %s : 0x%08lx - 0x%08lx   (%4ld MB)\n",
-			str, MLM(*va_start, *va_end));
-	else if (size >= PAGE_SIZE)
-		pr_notice("    %s : 0x%08lx - 0x%08lx   (%4ld KB)\n",
-			str, MLK(*va_start, *va_end));
-	*va_end = PAGE_ALIGN(*va_start);
-}
-
 static void print_vmalloc_lowmem_info(void)
 {
 	struct memblock_region *reg, *prev_reg = NULL;
-	unsigned long va_start, va_end;
+
+	pr_notice(
+		"	   vmalloc : 0x%08lx - 0x%08lx   (%4ld MB)\n",
+		MLM((unsigned long)high_memory, VMALLOC_END));
 
 	for_each_memblock_rev(memory, reg) {
 		phys_addr_t start_phys = reg->base;
 		phys_addr_t end_phys = reg->base + reg->size;
 
-		if (prev_reg == NULL) {
-			va_end = VMALLOC_END;
-			va_start = (unsigned long)high_memory;
-			print_vmalloc_lowmem_range(&va_start, &va_end, 1);
-		} else if (end_phys < arm_lowmem_limit) {
-			va_start = (unsigned long)__va(end_phys);
-			if (prev_reg->base < MAX_HOLE_ADDRESS)
-				print_vmalloc_lowmem_range(&va_start,
-						&va_end, 1);
-			else
-				va_end = va_start;
-		}
-		prev_reg = reg;
+		if (start_phys > arm_lowmem_limit)
+			continue;
 
-		if (start_phys < arm_lowmem_limit) {
-			va_start = (unsigned long)__va(start_phys);
-			print_vmalloc_lowmem_range(&va_start, &va_end, 0);
+		if (end_phys > arm_lowmem_limit)
+			end_phys = arm_lowmem_limit;
+
+		if (prev_reg == NULL) {
+			prev_reg = reg;
+
+			pr_notice(
+			"	   lowmem  : 0x%08lx - 0x%08lx   (%4ld MB)\n",
+			MLM((unsigned long)__va(start_phys),
+			(unsigned long)__va(end_phys)));
+
+			continue;
 		}
+
+		pr_notice(
+		"	   vmalloc : 0x%08lx - 0x%08lx   (%4ld MB)\n",
+		MLM((unsigned long)__va(end_phys),
+		(unsigned long)__va(prev_reg->base)));
+
+
+		pr_notice(
+		"	   lowmem  : 0x%08lx - 0x%08lx   (%4ld MB)\n",
+		MLM((unsigned long)__va(start_phys),
+		(unsigned long)__va(end_phys)));
 	}
 }
 #endif
@@ -844,4 +845,15 @@ static int __init msm_krait_wfe_init(void)
 	return 0;
 }
 pure_initcall(msm_krait_wfe_init);
+#endif
+
+#ifdef CONFIG_KERNEL_TEXT_RDONLY
+void set_kernel_text_ro(void)
+{
+	unsigned long start = PFN_ALIGN(_stext);
+	unsigned long end = PFN_ALIGN(_etext);
+
+	/* Set the kernel identity mapping for text RO. */
+	set_memory_ro(start, (end - start) >> PAGE_SHIFT);
+}
 #endif

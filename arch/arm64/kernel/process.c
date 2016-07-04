@@ -52,6 +52,12 @@
 #include <asm/processor.h>
 #include <asm/stacktrace.h>
 
+#ifdef CONFIG_CC_STACKPROTECTOR
+#include <linux/stackprotector.h>
+unsigned long __stack_chk_guard __read_mostly;
+EXPORT_SYMBOL(__stack_chk_guard);
+#endif
+
 static void setup_restart(void)
 {
 	/*
@@ -180,9 +186,13 @@ void machine_power_off(void)
  */
 void machine_restart(char *cmd)
 {
+	extern char *saved_command_line;
+
 	/* Disable interrupts first */
 	local_irq_disable();
 	smp_send_stop();
+
+	pr_emerg("Kernel command line: %s\n", saved_command_line);
 
 	/* Now call the architecture specific reboot code. */
 	if (arm_pm_restart)
@@ -297,9 +307,27 @@ void exit_thread(void)
 {
 }
 
+static void tls_thread_flush(void)
+{
+	asm ("msr tpidr_el0, xzr");
+
+	if (is_compat_task()) {
+		current->thread.tp_value = 0;
+
+		/*
+		 * We need to ensure ordering between the shadow state and the
+		 * hardware state, so that we don't corrupt the hardware state
+		 * with a stale shadow state during context switch.
+		 */
+		barrier();
+		asm ("msr tpidrro_el0, xzr");
+	}
+}
+
 void flush_thread(void)
 {
 	fpsimd_flush_thread();
+	tls_thread_flush();
 	flush_ptrace_hw_breakpoint(current);
 }
 

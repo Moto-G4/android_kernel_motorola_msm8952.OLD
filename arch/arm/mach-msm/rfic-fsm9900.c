@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -96,8 +96,14 @@
 #define MSM_MAX_GPIO    32
 
 #define RF_MAX_WF_SIZE  0xA00000
+#define RF_MAX_I2C_SIZE  8192
 
+#define I2C_B_FIELD     21
+#define I2C_V_FIELD     23
+
+uint16_t slave_address = 0x52;
 uint8_t rfbid;
+uint8_t rf_eeprom = 0;
 void __iomem *grfc_base;
 void __iomem *pdm_base;
 void __iomem *wf_base;
@@ -128,6 +134,34 @@ static int n_dev;
 /*
  * File interface
  */
+
+static int ftr_i2c_read(
+	uint16_t i_offset,
+	u8 *i_buf,
+	size_t i_len)
+{
+	uint8_t i2c_data[] =  {i_offset >> 8, i_offset & 0xFF};
+	int ret;
+
+	struct i2c_msg msgs[] = {
+		[0] = {
+			.addr = slave_address,
+			.flags = 0,
+			.len = ARRAY_SIZE(i2c_data),
+			.buf = (void *)i2c_data,
+		},
+		[1] = {
+			.addr = slave_address,
+			.flags = I2C_M_RD,
+			.len = i_len,
+			.buf = (void *)i_buf,
+		},
+	};
+
+	ret = i2c_transfer(i2c_get_adapter(1), msgs, ARRAY_SIZE(msgs));
+
+	return (ret == 2) ? 0 : ret;
+}
 
 static int ftr_find_id(int minor);
 
@@ -663,6 +697,25 @@ static long ftr_ioctl(struct file *file,
 uint8_t rf_interface_id(void)
 {
 	uint8_t tempid = 0;
+	uint8_t variant = 0;
+
+	if (ftr_i2c_read(I2C_B_FIELD, &rfbid, 1) == 0) {
+		if (ftr_i2c_read(I2C_V_FIELD, &variant, 1) == 0) {
+			if (rfbid > 0xF) {
+				pr_err("%s:Incorrect Board field\n", __func__);
+				return 0;
+			}
+			rfbid = rfbid << 4;
+			if (variant > 0xF) {
+				pr_err("%s:Incorrect variant\n", __func__);
+				return 0;
+			}
+			rfbid += variant;
+			rf_eeprom = 1;
+			pr_info("%s: I2C Board Id 0x%x\n", __func__, rfbid);
+			return rfbid;
+		}
+	}
 
 	tempid = gpio_get_value(FTR1_LB_NL_SEL);
 	rfbid = tempid << 7;
@@ -914,7 +967,6 @@ void rfic_pvc_enable(void __iomem *pvc_addr, int rfic)
 	}
 }
 
-
 static int ftr_probe(struct platform_device *pdev)
 {
 	struct device_node *np = pdev->dev.of_node;
@@ -922,7 +974,7 @@ static int ftr_probe(struct platform_device *pdev)
 	struct resource *mem_res;
 	struct clk *pdm_clk;
 	int ret;
-	u8 version = 0;
+	u8 ftr_ver = 0;
 
 	pr_debug("%s: me = %p, parent = %p\n",
 		__func__, pdev, pdev->dev.parent);
@@ -937,7 +989,7 @@ static int ftr_probe(struct platform_device *pdev)
 
 	if (!n_dev) {
 		rfbid = rf_interface_id();
-		if ((rfbid != 0xff) && (rfbid != 0))
+		if ((rfbid != 0xff) && (rfbid != 0) && rf_eeprom == 0)
 			rfbid = rfbid & RF_TYPE_48;
 
 		switch (rfbid) {
@@ -947,12 +999,9 @@ static int ftr_probe(struct platform_device *pdev)
 		case RF_TYPE_32:
 			glu_regulator_init(pdev);
 			break;
-		case RF_TYPE_48:
+		default:
 			mtr_regulator_init(pdev);
 			break;
-		default:
-			pr_warn("%s:Regulators not turned ON %d\n",
-					__func__, rfbid);
 		}
 
 		rfbid = rf_interface_id();
@@ -978,9 +1027,6 @@ static int ftr_probe(struct platform_device *pdev)
 			mutex_unlock(&rficlock);
 			return PTR_ERR(pdm_base);
 		}
-
-		ret = device_create_file(&pdev->dev, &dev_attr_rfboard_id);
-		WARN_ON(ret);
 
 		pdm_clk = clk_get(&pdev->dev, "ahb_clk");
 		if (IS_ERR(pdm_clk)) {
@@ -1020,6 +1066,9 @@ static int ftr_probe(struct platform_device *pdev)
 					__func__, rfbid);
 		}
 
+		ret = device_create_file(&pdev->dev, &dev_attr_rfboard_id);
+		WARN_ON(ret);
+
 	}
 
 	ptr = ftr_dev_info + n_dev;
@@ -1053,9 +1102,9 @@ static int ftr_probe(struct platform_device *pdev)
 	}
 
 	if ((rfbid > RF_TYPE_16) && (rfbid < RF_TYPE_48) && (n_dev == 1)) {
-		ssbi_write(pdev->dev.parent, 0xff, &version, 1);
-		ssbi_read(pdev->dev.parent, 0x2, &version, 1);
-		pr_info("%s: FTR1 Version = %02x\n", __func__, version);
+		ssbi_write(pdev->dev.parent, 0xff, &ftr_ver, 1);
+		ssbi_read(pdev->dev.parent, 0x2, &ftr_ver, 1);
+		pr_info("%s: FTR1 Version = %02x\n", __func__, ftr_ver);
 
 		ptr->grfcctrladdr = grfc_base + 0x10; /* grp 4 */
 		ptr->grfcmaskaddr = grfc_base + 0x30;
@@ -1067,9 +1116,9 @@ static int ftr_probe(struct platform_device *pdev)
 		ptr->busselect[RX_BUS] = 0x00001800;
 	} else if ((rfbid > RF_TYPE_16) && (rfbid < RF_TYPE_48) &&
 		(n_dev == 2)) {
-		ssbi_write(pdev->dev.parent, 0xff, &version, 1);
-		ssbi_read(pdev->dev.parent, 0x2, &version, 1);
-		pr_info("%s: FTR2 Version = %02x\n", __func__, version);
+		ssbi_write(pdev->dev.parent, 0xff, &ftr_ver, 1);
+		ssbi_read(pdev->dev.parent, 0x2, &ftr_ver, 1);
+		pr_info("%s: FTR2 Version = %02x\n", __func__, ftr_ver);
 
 		ptr->grfcctrladdr = grfc_base + 0x14; /* grp 5*/
 		ptr->grfcmaskaddr = grfc_base + 0x34;
@@ -1124,7 +1173,7 @@ static int ftr_remove(struct platform_device *pdev)
 }
 
 static struct of_device_id rfic_match_table[] = {
-	{ .compatible = "qcom,rfic" },
+	{ .compatible = "qcom,rfic-fsm9900" },
 	{}
 };
 MODULE_DEVICE_TABLE(of, rfic_match_table);
@@ -1133,7 +1182,7 @@ static struct platform_driver ftr_driver = {
 	.probe          = ftr_probe,
 	.remove         = ftr_remove,
 	.driver         = {
-			.name   = "rfic",
+			.name   = "rfic-fsm9900",
 			.owner   = THIS_MODULE,
 			.of_match_table = rfic_match_table,
 	},

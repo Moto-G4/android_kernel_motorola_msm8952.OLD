@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -44,6 +44,9 @@
 #define MIN_SUPPORTED_WIDTH 32
 #define MIN_SUPPORTED_HEIGHT 32
 
+/* Maintains the number of FTB's between each FBD over a window */
+#define DCVS_FTB_WINDOW 32
+
 #define V4L2_EVENT_VIDC_BASE  10
 
 #define SYS_MSG_START VIDC_EVENT_CHANGE
@@ -62,21 +65,6 @@
 
 #define NUM_MBS_PER_FRAME(__height, __width) \
 	((ALIGN(__height, 16) / 16) * (ALIGN(__width, 16) / 16))
-
-/* Minimum number of display buffers */
-#define DCVS_MIN_DISPLAY_BUFF 4
-/* Default threshold to reduce the core frequency */
-#define DCVS_NOMINAL_THRESHOLD 8
-/* Default threshold to increase the core frequency */
-#define DCVS_TURBO_THRESHOLD 4
-/* Instance max load above which DCVS kicks in */
-#define DCVS_NOMINAL_LOAD NUM_MBS_PER_SEC(1088, 1920, 60)
-/* Considering one safeguard buffer */
-#define DCVS_BUFFER_SAFEGUARD 1
-/* Maintains the number of FTB's between each FBD over a window */
-#define DCVS_FTB_WINDOW 32
-/* Supported DCVS MBs per frame */
-#define DCVS_MIN_SUPPORTED_MBPERFRAME NUM_MBS_PER_FRAME(2160, 3840)
 
 enum vidc_ports {
 	OUTPUT_PORT,
@@ -159,6 +147,7 @@ struct msm_vidc_drv {
 	int num_cores;
 	struct dentry *debugfs_root;
 	int thermal_level;
+	u32 version;
 };
 
 struct msm_video_device {
@@ -209,6 +198,9 @@ struct dcvs_stats {
 	int min_threshold;
 	int max_threshold;
 	bool is_clock_scaled;
+	int etb_counter;
+	bool is_power_save_mode;
+	bool is_additional_buff_added;
 };
 
 struct profile_data {
@@ -230,22 +222,9 @@ enum msm_vidc_modes {
 	VIDC_SECURE = 1 << 0,
 	VIDC_TURBO = 1 << 1,
 	VIDC_THUMBNAIL = 1 << 2,
-};
-
-struct msm_vidc_core_capability {
-	struct hal_capability_supported width;
-	struct hal_capability_supported height;
-	struct hal_capability_supported frame_rate;
-	u32 pixelprocess_capabilities;
-	struct hal_capability_supported scale_x;
-	struct hal_capability_supported scale_y;
-	struct hal_capability_supported hier_p;
-	struct hal_capability_supported ltr_count;
-	struct hal_capability_supported mbs_per_frame;
-	struct hal_capability_supported secure_output2_threshold;
-	u32 capability_set;
-	enum buffer_mode_type buffer_mode[MAX_PORT_NUM];
-	u32 buffer_size_limit;
+	VIDC_POWER_SAVE = 1 << 3,
+	VIDC_LOW_LATENCY = 1 << 4,
+	VIDC_REALTIME = 1 << 5,
 };
 
 struct msm_vidc_idle_stats {
@@ -274,6 +253,8 @@ struct msm_vidc_core {
 	struct msm_vidc_platform_resources resources;
 	u32 enc_codec_supported;
 	u32 dec_codec_supported;
+	u32 codec_count;
+	struct msm_vidc_capability *capabilities;
 	struct msm_vidc_idle_stats idle_stats;
 	struct delayed_work fw_unload_work;
 };
@@ -289,7 +270,7 @@ struct msm_vidc_inst {
 	struct msm_vidc_format *fmts[MAX_PORT_NUM];
 	struct buf_queue bufq[MAX_PORT_NUM];
 	struct msm_vidc_list pendingq;
-	struct msm_vidc_list internalbufs;
+	struct msm_vidc_list scratchbufs;
 	struct msm_vidc_list persistbufs;
 	struct msm_vidc_list pending_getpropq;
 	struct msm_vidc_list outputbufs;
@@ -312,12 +293,14 @@ struct msm_vidc_inst {
 	struct buf_count count;
 	struct dcvs_stats dcvs;
 	enum msm_vidc_modes flags;
-	struct msm_vidc_core_capability capability;
+	struct msm_vidc_capability capability;
+	u32 buffer_size_limit;
 	enum buffer_mode_type buffer_mode_set[MAX_PORT_NUM];
 	bool map_output_buffer;
 	atomic_t seq_hdr_reqs;
 	struct v4l2_ctrl **ctrls;
 	bool dcvs_mode;
+	u32 operating_rate;
 };
 
 extern struct msm_vidc_drv *vidc_driver;

@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -26,13 +26,24 @@
 #define POLLING_MIN_SLEEP_TX 400
 #define POLLING_MAX_SLEEP_TX 500
 /* 8K less 1 nominal MTU (1500 bytes) rounded to units of KB */
+#define IPA_MTU 1500
 #define IPA_GENERIC_AGGR_BYTE_LIMIT 6
 #define IPA_GENERIC_AGGR_TIME_LIMIT 1
 #define IPA_GENERIC_AGGR_PKT_LIMIT 0
-#define IPA_GENERIC_RX_POOL_SZ 32
-/* 8K less the headroom (NET_SKB_PAD) and skb_shared_info which are implicitly
- * part of the data buffer */
-#define IPA_LAN_RX_BUFF_SZ 7936
+
+#define IPA_GENERIC_RX_BUFF_BASE_SZ 8192
+#define IPA_REAL_GENERIC_RX_BUFF_SZ(X) (SKB_DATA_ALIGN(\
+		(X) + NET_SKB_PAD) +\
+		SKB_DATA_ALIGN(sizeof(struct skb_shared_info)))
+#define IPA_GENERIC_RX_BUFF_SZ(X) ((X) -\
+		(IPA_REAL_GENERIC_RX_BUFF_SZ(X) - (X)))
+#define IPA_GENERIC_RX_BUFF_LIMIT (\
+		IPA_REAL_GENERIC_RX_BUFF_SZ(\
+		IPA_GENERIC_RX_BUFF_BASE_SZ) -\
+		IPA_GENERIC_RX_BUFF_BASE_SZ)
+
+/* less 1 nominal MTU (1500 bytes) rounded to units of KB */
+#define IPA_ADJUST_AGGR_BYTE_LIMIT(X) (((X) - IPA_MTU)/1000)
 
 #define IPA_WLAN_RX_POOL_SZ 100
 #define IPA_WLAN_RX_POOL_SZ_LOW_WM 5
@@ -41,7 +52,7 @@
 #define IPA_WLAN_COMM_RX_POOL_HIGH 900
 
 #define IPA_ODU_RX_BUFF_SZ 2048
-#define IPA_ODU_RX_POOL_SZ 32
+#define IPA_ODU_RX_POOL_SZ 64
 #define IPA_SIZE_DL_CSUM_META_TRAILER 8
 
 static struct sk_buff *ipa_get_skb_ipa_rx(unsigned int len, gfp_t flags);
@@ -60,6 +71,10 @@ static void ipa_wq_rx_avail(struct work_struct *work);
 static void ipa_alloc_wlan_rx_common_cache(u32 size);
 static void ipa_cleanup_wlan_rx_common_cache(void);
 static void ipa_wq_repl_rx(struct work_struct *work);
+static void ipa_dma_memcpy_notify(struct ipa_sys_context *sys,
+		struct sps_iovec *iovec);
+
+static u32 ipa_adjust_ra_buff_base_sz(u32 aggr_byte_limit);
 
 static void ipa_wq_write_done_common(struct ipa_sys_context *sys, u32 cnt)
 {
@@ -110,7 +125,7 @@ static void ipa_wq_write_done_status(int src_pipe)
 	struct ipa_sys_context *sys;
 	u32 cnt;
 
-	WARN_ON(src_pipe >= IPA_NUM_PIPES);
+	WARN_ON(src_pipe >= ipa_ctx->ipa_num_pipes);
 
 	if (!ipa_ctx->ep[src_pipe].status.status_en)
 		return;
@@ -260,9 +275,6 @@ static void ipa_wq_handle_tx(struct work_struct *work)
  * @in_atomic:  whether caller is in atomic context
  *
  * - Allocate tx_packet wrapper
- * - Allocate a bounce buffer due to HW constrains
- *   (This buffer will be used for the DMA command)
- * - Copy the data (desc->pyld) to the bounce buffer
  * - transfer data to the IPA
  * - after the transfer was done the SPS will
  *   notify the sending user via ipa_sps_irq_comp_tx()
@@ -289,29 +301,8 @@ int ipa_send_one(struct ipa_sys_context *sys, struct ipa_desc *desc,
 	}
 
 	if (!desc->dma_address_valid) {
-		if (unlikely(ipa_ctx->ipa_hw_type == IPA_HW_v1_0)) {
-			WARN_ON(desc->len > 512);
-
-			/*
-			 * Due to a HW limitation, we need to make sure that
-			 * the packet does not cross a 1KB boundary
-			 */
-			tx_pkt->bounce = dma_pool_alloc(
-				ipa_ctx->dma_pool,
-				mem_flag, &dma_address);
-			if (!tx_pkt->bounce) {
-				dma_address = 0;
-			} else {
-				WARN_ON(!ipa_straddle_boundary
-					((u32)dma_address,
-					(u32)dma_address + desc->len - 1,
-					1024));
-				memcpy(tx_pkt->bounce, desc->pyld, desc->len);
-			}
-		} else {
-			dma_address = dma_map_single(ipa_ctx->pdev, desc->pyld,
-				desc->len, DMA_TO_DEVICE);
-		}
+		dma_address = dma_map_single(ipa_ctx->pdev, desc->pyld,
+			desc->len, DMA_TO_DEVICE);
 	} else {
 		dma_address = desc->dma_address;
 		tx_pkt->no_unmap_dma = true;
@@ -365,12 +356,7 @@ int ipa_send_one(struct ipa_sys_context *sys, struct ipa_desc *desc,
 fail_sps_send:
 	list_del(&tx_pkt->link);
 	spin_unlock_bh(&sys->spinlock);
-	if (unlikely(ipa_ctx->ipa_hw_type == IPA_HW_v1_0))
-		dma_pool_free(ipa_ctx->dma_pool, tx_pkt->bounce,
-				dma_address);
-	else
-		dma_unmap_single(ipa_ctx->pdev, dma_address, desc->len,
-				DMA_TO_DEVICE);
+	dma_unmap_single(ipa_ctx->pdev, dma_address, desc->len, DMA_TO_DEVICE);
 fail_dma_map:
 	kmem_cache_free(ipa_ctx->tx_pkt_wrapper_cache, tx_pkt);
 fail_mem_alloc:
@@ -387,8 +373,6 @@ fail_mem_alloc:
  * This function is used for system-to-bam connection.
  * - SPS driver expect struct sps_transfer which will contain all the data
  *   for a transaction
- * - The sps_transfer struct will be pointing to bounce buffers for
- *   its DMA command (immediate command and data)
  * - ipa_tx_pkt_wrapper will be used for each ipa
  *   descriptor (allocated from wrappers cache)
  * - The wrapper struct will be configured for each ipa-desc payload and will
@@ -475,35 +459,11 @@ int ipa_send(struct ipa_sys_context *sys, u32 num_desc, struct ipa_desc *desc,
 		tx_pkt->mem.size = desc[i].len;
 
 		if (!desc->dma_address_valid) {
-			if (unlikely(ipa_ctx->ipa_hw_type == IPA_HW_v1_0)) {
-				WARN_ON(tx_pkt->mem.size > 512);
-
-				/*
-				 * Due to a HW limitation, we need to make sure
-				 * that the packet does not cross a
-				 * 1KB boundary
-				 */
-				tx_pkt->bounce =
-				dma_pool_alloc(ipa_ctx->dma_pool,
-					       mem_flag,
-					       &tx_pkt->mem.phys_base);
-				if (!tx_pkt->bounce) {
-					tx_pkt->mem.phys_base = 0;
-				} else {
-					WARN_ON(!ipa_straddle_boundary(
-						(u32)tx_pkt->mem.phys_base,
-						(u32)tx_pkt->mem.phys_base +
-						tx_pkt->mem.size - 1, 1024));
-					memcpy(tx_pkt->bounce, tx_pkt->mem.base,
-						tx_pkt->mem.size);
-				}
-			} else {
-				tx_pkt->mem.phys_base =
-					dma_map_single(ipa_ctx->pdev,
-					tx_pkt->mem.base,
-					tx_pkt->mem.size,
-					DMA_TO_DEVICE);
-			}
+			tx_pkt->mem.phys_base =
+				dma_map_single(ipa_ctx->pdev,
+				tx_pkt->mem.base,
+				tx_pkt->mem.size,
+				DMA_TO_DEVICE);
 		} else {
 			tx_pkt->mem.phys_base = desc->dma_address;
 			tx_pkt->no_unmap_dma = true;
@@ -521,7 +481,7 @@ int ipa_send(struct ipa_sys_context *sys, u32 num_desc, struct ipa_desc *desc,
 		tx_pkt->user2 = desc[i].user2;
 
 		/*
-		 * Point the iovec to the bounce buffer and
+		 * Point the iovec to the buffer and
 		 * add this packet to system pipe context.
 		 */
 		iovec->addr = tx_pkt->mem.phys_base;
@@ -561,14 +521,9 @@ failure:
 	for (j = 0; j < i; j++) {
 		next_pkt = list_next_entry(tx_pkt, link);
 		list_del(&tx_pkt->link);
-		if (unlikely(ipa_ctx->ipa_hw_type == IPA_HW_v1_0))
-			dma_pool_free(ipa_ctx->dma_pool,
-					tx_pkt->bounce,
-					tx_pkt->mem.phys_base);
-		else
-			dma_unmap_single(ipa_ctx->pdev, tx_pkt->mem.phys_base,
-					tx_pkt->mem.size,
-					DMA_TO_DEVICE);
+		dma_unmap_single(ipa_ctx->pdev, tx_pkt->mem.phys_base,
+				tx_pkt->mem.size,
+				DMA_TO_DEVICE);
 		kmem_cache_free(ipa_ctx->tx_pkt_wrapper_cache, tx_pkt);
 		tx_pkt = next_pkt;
 	}
@@ -632,6 +587,11 @@ int ipa_send_cmd(u16 num_desc, struct ipa_desc *descr)
 	IPADBG("sending command\n");
 
 	ep_idx = ipa_get_ep_mapping(IPA_CLIENT_APPS_CMD_PROD);
+	if (-1 == ep_idx) {
+		IPAERR("Client %u is not mapped\n",
+			IPA_CLIENT_APPS_CMD_PROD);
+		return -EFAULT;
+	}
 	sys = ipa_ctx->ep[ep_idx].sys;
 
 	ipa_inc_client_enable_clks();
@@ -772,8 +732,9 @@ static int ipa_handle_rx_core(struct ipa_sys_context *sys, bool process_all,
 
 		if (iov.addr == 0)
 			break;
-
-		if (IPA_CLIENT_IS_WLAN_CONS(sys->ep->client))
+		if (IPA_CLIENT_IS_MEMCPY_DMA_CONS(sys->ep->client))
+			ipa_dma_memcpy_notify(sys, &iov);
+		else if (IPA_CLIENT_IS_WLAN_CONS(sys->ep->client))
 			ipa_wlan_wq_rx_common(sys, iov.size);
 		else
 			ipa_wq_rx_common(sys, iov.size);
@@ -939,6 +900,12 @@ int ipa_setup_sys_pipe(struct ipa_sys_connect_params *sys_in, u32 *clnt_hdl)
 	int result = -EINVAL;
 	dma_addr_t dma_addr;
 	char buff[IPA_RESOURCE_NAME_MAX];
+	struct iommu_domain *smmu_domain;
+
+	if (unlikely(!ipa_ctx)) {
+		IPAERR("IPA driver was not initialized\n");
+		return -EINVAL;
+	}
 
 	if (sys_in == NULL || clnt_hdl == NULL) {
 		IPAERR("NULL args\n");
@@ -1086,6 +1053,12 @@ int ipa_setup_sys_pipe(struct ipa_sys_connect_params *sys_in, u32 *clnt_hdl)
 		ep->connect.source = ipa_ctx->bam_handle;
 		ep->connect.dest_pipe_index = ipa_ctx->a5_pipe_index++;
 		ep->connect.src_pipe_index = ipa_ep_idx;
+		/*
+		 * Determine how many buffers/descriptors remaining will
+		 * cause to drop below the yellow WM bar.
+		 */
+		ep->rx_replenish_threshold = ipa_get_sys_yellow_wm()
+						/ ep->sys->rx_buff_sz;
 	} else {
 		ep->connect.mode = SPS_MODE_DEST;
 		ep->connect.source = SPS_DEV_HANDLE_MEM;
@@ -1105,7 +1078,16 @@ int ipa_setup_sys_pipe(struct ipa_sys_connect_params *sys_in, u32 *clnt_hdl)
 	ep->connect.desc.size = sys_in->desc_fifo_sz;
 	ep->connect.desc.base = dma_alloc_coherent(ipa_ctx->pdev,
 			ep->connect.desc.size, &dma_addr, 0);
-	ep->connect.desc.phys_base = dma_addr;
+	if (!ipa_ctx->smmu_present) {
+		ep->connect.desc.phys_base = dma_addr;
+	} else {
+		ep->connect.desc.iova = dma_addr;
+		smmu_domain = ipa_get_smmu_domain();
+		if (smmu_domain != NULL) {
+			ep->connect.desc.phys_base =
+				iommu_iova_to_phys(smmu_domain, dma_addr);
+		}
+	}
 	if (ep->connect.desc.base == NULL) {
 		IPAERR("fail to get DMA desc memory.\n");
 		goto fail_sps_cfg;
@@ -1158,8 +1140,13 @@ int ipa_setup_sys_pipe(struct ipa_sys_connect_params *sys_in, u32 *clnt_hdl)
 	}
 
 	ipa_ctx->skip_ep_cfg_shadow[ipa_ep_idx] = ep->skip_ep_cfg;
-	if (!ep->skip_ep_cfg && IPA_CLIENT_IS_PROD(sys_in->client))
-		ipa_install_dflt_flt_rules(ipa_ep_idx);
+	if (!ep->skip_ep_cfg && IPA_CLIENT_IS_PROD(sys_in->client)) {
+		if (ipa_ctx->modem_cfg_emb_pipe_flt &&
+			sys_in->client == IPA_CLIENT_APPS_LAN_WAN_PROD)
+			IPADBG("modem cfg emb pipe flt\n");
+		else
+			ipa_install_dflt_flt_rules(ipa_ep_idx);
+	}
 
 	if (!ep->keep_ipa_awake)
 		ipa_dec_client_disable_clks();
@@ -1174,6 +1161,7 @@ fail_register_event:
 fail_sps_connect:
 	dma_free_coherent(ipa_ctx->pdev, ep->connect.desc.size,
 			  ep->connect.desc.base,
+			  ipa_ctx->smmu_present ? ep->connect.desc.iova :
 			  ep->connect.desc.phys_base);
 fail_sps_cfg:
 	sps_free_endpoint(ep->ep_hdl);
@@ -1202,7 +1190,13 @@ int ipa_teardown_sys_pipe(u32 clnt_hdl)
 	struct ipa_ep_context *ep;
 	int empty;
 
-	if (clnt_hdl >= IPA_NUM_PIPES || ipa_ctx->ep[clnt_hdl].valid == 0) {
+	if (unlikely(!ipa_ctx)) {
+		IPAERR("IPA driver was not initialized\n");
+		return -EINVAL;
+	}
+
+	if (clnt_hdl >= ipa_ctx->ipa_num_pipes ||
+	    ipa_ctx->ep[clnt_hdl].valid == 0) {
 		IPAERR("bad parm.\n");
 		return -EINVAL;
 	}
@@ -1231,12 +1225,19 @@ int ipa_teardown_sys_pipe(u32 clnt_hdl)
 	sps_disconnect(ep->ep_hdl);
 	dma_free_coherent(ipa_ctx->pdev, ep->connect.desc.size,
 			  ep->connect.desc.base,
+			  ipa_ctx->smmu_present ? ep->connect.desc.iova :
 			  ep->connect.desc.phys_base);
 	sps_free_endpoint(ep->ep_hdl);
+	if (ep->sys->repl_wq)
+		flush_workqueue(ep->sys->repl_wq);
 	if (IPA_CLIENT_IS_CONS(ep->client))
 		ipa_cleanup_rx(ep->sys);
 
-	ipa_delete_dflt_flt_rules(clnt_hdl);
+	if (ipa_ctx->modem_cfg_emb_pipe_flt &&
+		ep->client == IPA_CLIENT_APPS_LAN_WAN_PROD)
+		IPADBG("modem cfg emb pipe flt\n");
+	else
+		ipa_delete_dflt_flt_rules(clnt_hdl);
 
 	if (IPA_CLIENT_IS_WLAN_CONS(ep->client))
 		atomic_dec(&ipa_ctx->wc_memb.active_clnt_cnt);
@@ -1321,7 +1322,17 @@ int ipa_tx_dp(enum ipa_client_type dst, struct sk_buff *skb,
 	struct ipa_sys_context *sys;
 	int src_ep_idx;
 
+	if (unlikely(!ipa_ctx)) {
+		IPAERR("IPA driver was not initialized\n");
+		return -EINVAL;
+	}
+
 	memset(desc, 0, 2 * sizeof(struct ipa_desc));
+
+	if (skb->len == 0) {
+		IPAERR("packet size is 0\n");
+		return -EINVAL;
+	}
 
 	/*
 	 * USB_CONS: PKT_INIT ep_idx = dst pipe
@@ -1334,9 +1345,18 @@ int ipa_tx_dp(enum ipa_client_type dst, struct sk_buff *skb,
 	 */
 	if (IPA_CLIENT_IS_CONS(dst)) {
 		src_ep_idx = ipa_get_ep_mapping(IPA_CLIENT_APPS_LAN_WAN_PROD);
+		if (-1 == src_ep_idx) {
+			IPAERR("Client %u is not mapped\n",
+				IPA_CLIENT_APPS_LAN_WAN_PROD);
+			return -EFAULT;
+		}
 		dst_ep_idx = ipa_get_ep_mapping(dst);
 	} else {
 		src_ep_idx = ipa_get_ep_mapping(dst);
+		if (-1 == src_ep_idx) {
+			IPAERR("Client %u is not mapped\n", dst);
+			return -EFAULT;
+		}
 		if (meta && meta->pkt_init_dst_ep_valid)
 			dst_ep_idx = meta->pkt_init_dst_ep;
 		else
@@ -1428,7 +1448,7 @@ static void ipa_wq_repl_rx(struct work_struct *work)
 	struct ipa_sys_context *sys;
 	void *ptr;
 	struct ipa_rx_pkt_wrapper *rx_pkt;
-	gfp_t flag = GFP_NOWAIT | __GFP_NOWARN;
+	gfp_t flag = GFP_KERNEL;
 	u32 next;
 	u32 curr;
 
@@ -1444,7 +1464,8 @@ begin:
 		rx_pkt = kmem_cache_zalloc(ipa_ctx->rx_pkt_wrapper_cache,
 					   flag);
 		if (!rx_pkt) {
-			IPAERR("failed to alloc rx wrapper\n");
+			pr_err_ratelimited("%s fail alloc rx wrapper sys=%p\n",
+					__func__, sys);
 			goto fail_kmem_cache_alloc;
 		}
 
@@ -1454,7 +1475,8 @@ begin:
 
 		rx_pkt->data.skb = sys->get_skb(sys->rx_buff_sz, flag);
 		if (rx_pkt->data.skb == NULL) {
-			IPAERR("failed to alloc skb\n");
+			pr_err_ratelimited("%s fail alloc skb sys=%p\n",
+					__func__, sys);
 			goto fail_skb_alloc;
 		}
 		ptr = skb_put(rx_pkt->data.skb, sys->rx_buff_sz);
@@ -1463,13 +1485,15 @@ begin:
 						     DMA_FROM_DEVICE);
 		if (rx_pkt->data.dma_addr == 0 ||
 				rx_pkt->data.dma_addr == ~0) {
-			IPAERR("dma_map_single failure %p for %p\n",
-			       (void *)rx_pkt->data.dma_addr, ptr);
+			pr_err_ratelimited("%s dma map fail %p for %p sys=%p\n",
+			       __func__, (void *)rx_pkt->data.dma_addr,
+			       ptr, sys);
 			goto fail_dma_mapping;
 		}
 
 		sys->repl.cache[curr] = rx_pkt;
 		curr = next;
+		/* ensure write is done before setting tail index */
 		mb();
 		atomic_set(&sys->repl.tail_idx, next);
 	}
@@ -1489,6 +1513,8 @@ fail_kmem_cache_alloc:
 			IPA_STATS_INC_CNT(ipa_ctx->stats.lan_repl_rx_empty);
 		else
 			WARN_ON(1);
+		pr_err_ratelimited("%s sys=%p repl ring empty\n",
+				__func__, sys);
 		goto begin;
 	}
 }
@@ -1715,7 +1741,7 @@ fail_skb_alloc:
 fail_kmem_cache_alloc:
 	if (rx_len_cached == 0)
 		queue_delayed_work(sys->wq, &sys->replenish_rx_work,
-				msecs_to_jiffies(10));
+				msecs_to_jiffies(1));
 }
 
 static void ipa_fast_replenish_rx_cache(struct ipa_sys_context *sys)
@@ -1745,21 +1771,24 @@ static void ipa_fast_replenish_rx_cache(struct ipa_sys_context *sys)
 		}
 		rx_len_cached = ++sys->len;
 		curr = (curr + 1) % sys->repl.capacity;
+		/* ensure write is done before setting head index */
 		mb();
 		atomic_set(&sys->repl.head_idx, curr);
 	}
 
 	queue_work(sys->repl_wq, &sys->repl_work);
 
-	if (rx_len_cached == 0) {
-		if (sys->ep->client == IPA_CLIENT_APPS_WAN_CONS)
-			IPA_STATS_INC_CNT(ipa_ctx->stats.wan_rx_empty);
-		else if (sys->ep->client == IPA_CLIENT_APPS_LAN_CONS)
-			IPA_STATS_INC_CNT(ipa_ctx->stats.lan_rx_empty);
-		else
-			WARN_ON(1);
+	if (rx_len_cached <= sys->ep->rx_replenish_threshold) {
+		if (rx_len_cached == 0) {
+			if (sys->ep->client == IPA_CLIENT_APPS_WAN_CONS)
+				IPA_STATS_INC_CNT(ipa_ctx->stats.wan_rx_empty);
+			else if (sys->ep->client == IPA_CLIENT_APPS_LAN_CONS)
+				IPA_STATS_INC_CNT(ipa_ctx->stats.lan_rx_empty);
+			else
+				WARN_ON(1);
+		}
 		queue_delayed_work(sys->wq, &sys->replenish_rx_work,
-				msecs_to_jiffies(1));
+			msecs_to_jiffies(1));
 	}
 
 	return;
@@ -1771,7 +1800,9 @@ static void replenish_rx_work_func(struct work_struct *work)
 	struct ipa_sys_context *sys;
 	dwork = container_of(work, struct delayed_work, work);
 	sys = container_of(dwork, struct ipa_sys_context, replenish_rx_work);
+	ipa_inc_client_enable_clks();
 	sys->repl_hdlr(sys);
+	ipa_dec_client_disable_clks();
 }
 
 /**
@@ -1782,6 +1813,8 @@ static void ipa_cleanup_rx(struct ipa_sys_context *sys)
 {
 	struct ipa_rx_pkt_wrapper *rx_pkt;
 	struct ipa_rx_pkt_wrapper *r;
+	u32 head;
+	u32 tail;
 
 	list_for_each_entry_safe(rx_pkt, r,
 				 &sys->head_desc_list, link) {
@@ -1790,6 +1823,20 @@ static void ipa_cleanup_rx(struct ipa_sys_context *sys)
 			sys->rx_buff_sz, DMA_FROM_DEVICE);
 		sys->free_skb(rx_pkt->data.skb);
 		kmem_cache_free(ipa_ctx->rx_pkt_wrapper_cache, rx_pkt);
+	}
+
+	if (sys->repl.cache) {
+		head = atomic_read(&sys->repl.head_idx);
+		tail = atomic_read(&sys->repl.tail_idx);
+		while (head != tail) {
+			rx_pkt = sys->repl.cache[head];
+			dma_unmap_single(ipa_ctx->pdev, rx_pkt->data.dma_addr,
+					sys->rx_buff_sz, DMA_FROM_DEVICE);
+			sys->free_skb(rx_pkt->data.skb);
+			kmem_cache_free(ipa_ctx->rx_pkt_wrapper_cache, rx_pkt);
+			head = (head + 1) % sys->repl.capacity;
+		}
+		kfree(sys->repl.cache);
 	}
 }
 
@@ -1805,6 +1852,9 @@ static int ipa_lan_rx_pyld_hdlr(struct sk_buff *skb,
 	unsigned char *buf;
 	bool drop_packet;
 	int src_pipe;
+	unsigned int used = *(unsigned int *)skb->cb;
+	unsigned int used_align = ALIGN(used, 32);
+	unsigned long unused = IPA_GENERIC_RX_BUFF_BASE_SZ - used;
 
 	IPA_DUMP_BUFF(skb->data, 0, skb->len);
 
@@ -1837,6 +1887,8 @@ static int ipa_lan_rx_pyld_hdlr(struct sk_buff *skb,
 						skb->data, sys->len_rem);
 					skb_trim(skb2,
 						skb2->len - sys->len_pad);
+					skb2->truesize = skb2->len +
+						sizeof(struct sk_buff);
 					sys->ep->client_notify(sys->ep->priv,
 						IPA_RECEIVE,
 						(unsigned long)(skb2));
@@ -1885,12 +1937,15 @@ begin:
 		IPADBG("STATUS opcode=%d src=%d dst=%d len=%d\n",
 				status->status_opcode, status->endp_src_idx,
 				status->endp_dest_idx, status->pkt_len);
+
 		if (status->status_opcode !=
 			IPA_HW_STATUS_OPCODE_DROPPED_PACKET &&
 			status->status_opcode !=
 			IPA_HW_STATUS_OPCODE_PACKET &&
 			status->status_opcode !=
-			IPA_HW_STATUS_OPCODE_SUSPENDED_PACKET) {
+			IPA_HW_STATUS_OPCODE_SUSPENDED_PACKET &&
+			status->status_opcode !=
+			IPA_HW_STATUS_OPCODE_XLAT_PACKET) {
 			IPAERR("unsupported opcode(%d)\n",
 				status->status_opcode);
 			skb_pull(skb, IPA_PKT_STATUS_SIZE);
@@ -1898,8 +1953,8 @@ begin:
 		}
 		IPA_STATS_EXCP_CNT(status->exception,
 				ipa_ctx->stats.rx_excp_pkts);
-		if (status->endp_dest_idx >= IPA_NUM_PIPES ||
-			status->endp_src_idx >= IPA_NUM_PIPES ||
+		if (status->endp_dest_idx >= ipa_ctx->ipa_num_pipes ||
+			status->endp_src_idx >= ipa_ctx->ipa_num_pipes ||
 			status->pkt_len > IPA_GENERIC_AGGR_BYTE_LIMIT * 1024) {
 			IPAERR("status fields invalid\n");
 			WARN_ON(1);
@@ -1986,6 +2041,11 @@ begin:
 					if (drop_packet)
 						dev_kfree_skb_any(skb2);
 					else {
+					skb2->truesize = skb2->len +
+						sizeof(struct sk_buff) +
+						(ALIGN(len +
+						IPA_PKT_STATUS_SIZE, 32) *
+						unused / used_align);
 						sys->ep->client_notify(
 							sys->ep->priv,
 							IPA_RECEIVE,
@@ -2058,6 +2118,8 @@ static void wan_rx_handle_splt_pyld(struct sk_buff *skb,
 				IPADBG(
 					"removing Status element from skb and sending to WAN client");
 				skb_pull(skb2, IPA_PKT_STATUS_SIZE);
+				skb2->truesize = skb2->len +
+					sizeof(struct sk_buff);
 				sys->ep->client_notify(sys->ep->priv,
 					IPA_RECEIVE,
 					(unsigned long)(skb2));
@@ -2088,11 +2150,20 @@ static int ipa_wan_rx_pyld_hdlr(struct sk_buff *skb,
 	int checksum_trailer_exists;
 	int frame_len;
 	int ep_idx;
+	unsigned int used = *(unsigned int *)skb->cb;
+	unsigned int used_align = ALIGN(used, 32);
+	unsigned long unused = IPA_GENERIC_RX_BUFF_BASE_SZ - used;
 
 	IPA_DUMP_BUFF(skb->data, 0, skb->len);
 	if (skb->len == 0) {
 		IPAERR("ZLT\n");
 		goto bail;
+	}
+
+	if (ipa_ctx->ipa_client_apps_wan_cons_agg_gro) {
+		sys->ep->client_notify(sys->ep->priv,
+					IPA_RECEIVE, (unsigned long)(skb));
+		return rc;
 	}
 	/*
 	 * payload splits across 2 buff or more,
@@ -2100,6 +2171,7 @@ static int ipa_wan_rx_pyld_hdlr(struct sk_buff *skb,
 	 */
 	if (sys->len_rem)
 		wan_rx_handle_splt_pyld(skb, sys);
+
 
 	while (skb->len) {
 		IPADBG("LEN_REM %d\n", skb->len);
@@ -2115,14 +2187,16 @@ static int ipa_wan_rx_pyld_hdlr(struct sk_buff *skb,
 		if (status->status_opcode !=
 			IPA_HW_STATUS_OPCODE_DROPPED_PACKET &&
 			status->status_opcode !=
-			IPA_HW_STATUS_OPCODE_PACKET) {
+			IPA_HW_STATUS_OPCODE_PACKET &&
+			status->status_opcode !=
+			IPA_HW_STATUS_OPCODE_XLAT_PACKET) {
 			IPAERR("unsupported opcode\n");
 			skb_pull(skb, IPA_PKT_STATUS_SIZE);
 			continue;
 		}
 		IPA_STATS_INC_CNT(ipa_ctx->stats.rx_pkts);
-		if (status->endp_dest_idx >= IPA_NUM_PIPES ||
-			status->endp_src_idx >= IPA_NUM_PIPES ||
+		if (status->endp_dest_idx >= ipa_ctx->ipa_num_pipes ||
+			status->endp_src_idx >= ipa_ctx->ipa_num_pipes ||
 			status->pkt_len > IPA_GENERIC_AGGR_BYTE_LIMIT * 1024) {
 			IPAERR("status fields invalid\n");
 			WARN_ON(1);
@@ -2189,6 +2263,10 @@ static int ipa_wan_rx_pyld_hdlr(struct sk_buff *skb,
 				IPADBG(
 					"removing Status element from skb and sending to WAN client");
 				skb_pull(skb2, IPA_PKT_STATUS_SIZE);
+				skb2->truesize = skb2->len +
+					sizeof(struct sk_buff) +
+					(ALIGN(frame_len, 32) *
+					 unused / used_align);
 				sys->ep->client_notify(sys->ep->priv,
 					IPA_RECEIVE, (unsigned long)(skb2));
 				skb_pull(skb, frame_len);
@@ -2238,11 +2316,13 @@ static int ipa_rx_pyld_hdlr(struct sk_buff *rx_skb, struct ipa_sys_context *sys)
 		src_pipe = WLAN_PROD_TX_EP;
 
 	ep = &ipa_ctx->ep[src_pipe];
-	if (unlikely(src_pipe >= IPA_NUM_PIPES ||
+	spin_lock(&ipa_ctx->lan_rx_clnt_notify_lock);
+	if (unlikely(src_pipe >= ipa_ctx->ipa_num_pipes ||
 		!ep->valid || !ep->client_notify)) {
 		IPAERR("drop pipe=%d ep_valid=%d client_notify=%p\n",
 		  src_pipe, ep->valid, ep->client_notify);
 		dev_kfree_skb_any(rx_skb);
+		spin_unlock(&ipa_ctx->lan_rx_clnt_notify_lock);
 		return 0;
 	}
 
@@ -2261,6 +2341,7 @@ static int ipa_rx_pyld_hdlr(struct sk_buff *rx_skb, struct ipa_sys_context *sys)
 	skb_pull(rx_skb, pull_len);
 	ep->client_notify(ep->priv, IPA_RECEIVE,
 			(unsigned long)(rx_skb));
+	spin_unlock(&ipa_ctx->lan_rx_clnt_notify_lock);
 	return 0;
 }
 
@@ -2286,7 +2367,7 @@ void ipa_lan_rx_cb(void *priv, enum ipa_dp_evt_type evt, unsigned long data)
 	src_pipe = status->endp_src_idx;
 	metadata = status->metadata;
 	ep = &ipa_ctx->ep[src_pipe];
-	if (unlikely(src_pipe >= IPA_NUM_PIPES ||
+	if (unlikely(src_pipe >= ipa_ctx->ipa_num_pipes ||
 		!ep->valid ||
 		!ep->client_notify)) {
 		IPAERR("drop pipe=%d ep_valid=%d client_notify=%p\n",
@@ -2299,7 +2380,17 @@ void ipa_lan_rx_cb(void *priv, enum ipa_dp_evt_type evt, unsigned long data)
 				IPA_LAN_RX_HEADER_LENGTH);
 	else
 		skb_pull(rx_skb, IPA_PKT_STATUS_SIZE);
-	*(u8 *)rx_skb->cb = (metadata >> 16) & 0xFF;
+
+	/* Metadata Info
+	   ------------------------------------------
+	   |   3     |   2     |    1        |  0   |
+	   | fw_desc | vdev_id | qmap mux id | Resv |
+	   ------------------------------------------
+	 */
+	*(u16 *)rx_skb->cb = ((metadata >> 16) & 0xFFFF);
+	IPADBG("meta_data: 0x%x cb: 0x%x\n",
+			metadata, *(u32 *)rx_skb->cb);
+
 	ep->client_notify(ep->priv, IPA_RECEIVE, (unsigned long)(rx_skb));
 }
 
@@ -2324,6 +2415,7 @@ static void ipa_wq_rx_common(struct ipa_sys_context *sys, u32 size)
 			sys->rx_buff_sz, DMA_FROM_DEVICE);
 	skb_set_tail_pointer(rx_skb, rx_pkt_expected->len);
 	rx_skb->len = rx_pkt_expected->len;
+	*(unsigned int *)rx_skb->cb = rx_skb->len;
 	rx_skb->truesize = rx_pkt_expected->len + sizeof(struct sk_buff);
 	sys->pyld_hdlr(rx_skb, sys);
 	sys->repl_hdlr(sys);
@@ -2363,6 +2455,26 @@ static void ipa_wlan_wq_rx_common(struct ipa_sys_context *sys, u32 size)
 				(unsigned long)(&rx_pkt_expected->data));
 	}
 	ipa_replenish_wlan_rx_cache(sys);
+}
+
+static void ipa_dma_memcpy_notify(struct ipa_sys_context *sys,
+	struct sps_iovec *iovec)
+{
+	IPADBG("ENTER.\n");
+	if (unlikely(list_empty(&sys->head_desc_list))) {
+		IPAERR("descriptor list is empty!\n");
+		WARN_ON(1);
+		return;
+	}
+	if (!(iovec->flags & SPS_IOVEC_FLAG_EOT)) {
+		IPAERR("recieved unexpected event. sps flag is 0x%x\n"
+			, iovec->flags);
+		WARN_ON(1);
+		return;
+	}
+	sys->ep->client_notify(sys->ep->priv, IPA_RECEIVE,
+				(unsigned long)(iovec));
+	IPADBG("EXIT\n");
 }
 
 static void ipa_wq_rx_avail(struct work_struct *work)
@@ -2463,8 +2575,7 @@ static int ipa_assign_policy(struct ipa_sys_connect_params *in,
 			WARN_ON(1);
 			return -EINVAL;
 		}
-	} else if (ipa_ctx->ipa_hw_type == IPA_HW_v2_0 ||
-			ipa_ctx->ipa_hw_type == IPA_HW_v2_5) {
+	} else if (ipa_ctx->ipa_hw_type >= IPA_HW_v2_0) {
 		sys->ep->status.status_en = true;
 		if (IPA_CLIENT_IS_PROD(in->client)) {
 			if (!sys->ep->skip_ep_cfg) {
@@ -2473,6 +2584,8 @@ static int ipa_assign_policy(struct ipa_sys_connect_params *in,
 				sys->sps_callback = NULL;
 				sys->ep->status.status_ep = ipa_get_ep_mapping(
 						IPA_CLIENT_APPS_LAN_CONS);
+				if (IPA_CLIENT_IS_MEMCPY_DMA_PROD(in->client))
+					sys->ep->status.status_en = false;
 			} else {
 				sys->policy = IPA_POLICY_INTR_MODE;
 				sys->sps_option = (SPS_O_AUTO_ENABLE |
@@ -2494,23 +2607,69 @@ static int ipa_assign_policy(struct ipa_sys_connect_params *in,
 						replenish_rx_work_func);
 				INIT_WORK(&sys->repl_work, ipa_wq_repl_rx);
 				atomic_set(&sys->curr_polling_state, 0);
-				sys->rx_buff_sz = IPA_LAN_RX_BUFF_SZ;
-				sys->rx_pool_sz = IPA_GENERIC_RX_POOL_SZ;
+				sys->rx_buff_sz = IPA_GENERIC_RX_BUFF_SZ(
+					IPA_GENERIC_RX_BUFF_BASE_SZ);
 				sys->get_skb = ipa_get_skb_ipa_rx;
 				sys->free_skb = ipa_free_skb_rx;
 				in->ipa_ep_cfg.aggr.aggr_en = IPA_ENABLE_AGGR;
 				in->ipa_ep_cfg.aggr.aggr = IPA_GENERIC;
-				in->ipa_ep_cfg.aggr.aggr_byte_limit =
-					IPA_GENERIC_AGGR_BYTE_LIMIT;
 				in->ipa_ep_cfg.aggr.aggr_time_limit =
 					IPA_GENERIC_AGGR_TIME_LIMIT;
-				in->ipa_ep_cfg.aggr.aggr_pkt_limit =
-					IPA_GENERIC_AGGR_PKT_LIMIT;
 				if (in->client == IPA_CLIENT_APPS_LAN_CONS) {
 					sys->pyld_hdlr = ipa_lan_rx_pyld_hdlr;
+					sys->rx_pool_sz =
+						IPA_GENERIC_RX_POOL_SZ;
+					in->ipa_ep_cfg.aggr.aggr_byte_limit =
+					IPA_GENERIC_AGGR_BYTE_LIMIT;
+					in->ipa_ep_cfg.aggr.aggr_pkt_limit =
+					IPA_GENERIC_AGGR_PKT_LIMIT;
 				} else if (in->client ==
 						IPA_CLIENT_APPS_WAN_CONS) {
 					sys->pyld_hdlr = ipa_wan_rx_pyld_hdlr;
+					sys->rx_pool_sz =
+						ipa_ctx->wan_rx_ring_size;
+					if (ipa_ctx->
+					ipa_client_apps_wan_cons_agg_gro) {
+						IPAERR("get close-by %u\n",
+						ipa_adjust_ra_buff_base_sz(
+						in->ipa_ep_cfg.aggr.
+						aggr_byte_limit));
+						IPAERR("set rx_buff_sz %lu\n",
+						(unsigned long int)
+						IPA_GENERIC_RX_BUFF_SZ(
+						ipa_adjust_ra_buff_base_sz(
+						in->ipa_ep_cfg.
+							aggr.aggr_byte_limit)));
+						/* disable ipa_status */
+						sys->ep->status.
+							status_en = false;
+						sys->rx_buff_sz =
+						IPA_GENERIC_RX_BUFF_SZ(
+						ipa_adjust_ra_buff_base_sz(
+						in->ipa_ep_cfg.aggr.
+							aggr_byte_limit));
+						in->ipa_ep_cfg.aggr.
+							aggr_byte_limit =
+						sys->rx_buff_sz < in->
+						ipa_ep_cfg.aggr.
+						aggr_byte_limit ?
+						IPA_ADJUST_AGGR_BYTE_LIMIT(
+						sys->rx_buff_sz) :
+						IPA_ADJUST_AGGR_BYTE_LIMIT(
+						in->ipa_ep_cfg.
+						aggr.aggr_byte_limit);
+						IPAERR("set aggr_limit %lu\n",
+						(unsigned long int)
+						in->ipa_ep_cfg.aggr.
+						aggr_byte_limit);
+					} else {
+						in->ipa_ep_cfg.aggr.
+							aggr_byte_limit =
+						IPA_GENERIC_AGGR_BYTE_LIMIT;
+						in->ipa_ep_cfg.aggr.
+							aggr_pkt_limit =
+						IPA_GENERIC_AGGR_PKT_LIMIT;
+					}
 				}
 				if (nr_cpu_ids > 1)
 					sys->repl_hdlr =
@@ -2557,11 +2716,34 @@ static int ipa_assign_policy(struct ipa_sys_connect_params *in,
 					replenish_rx_work_func);
 				atomic_set(&sys->curr_polling_state, 0);
 				sys->rx_buff_sz = IPA_ODU_RX_BUFF_SZ;
-				sys->rx_pool_sz = IPA_ODU_RX_POOL_SZ;
+				sys->rx_pool_sz = in->desc_fifo_sz /
+					sizeof(struct sps_iovec) - 1;
+				if (sys->rx_pool_sz > IPA_ODU_RX_POOL_SZ)
+					sys->rx_pool_sz = IPA_ODU_RX_POOL_SZ;
 				sys->pyld_hdlr = ipa_odu_rx_pyld_hdlr;
 				sys->get_skb = ipa_get_skb_ipa_rx;
 				sys->free_skb = ipa_free_skb_rx;
 				sys->repl_hdlr = ipa_replenish_rx_cache;
+			} else if (in->client ==
+					IPA_CLIENT_MEMCPY_DMA_ASYNC_CONS) {
+				IPADBG("assigning policy to client:%d",
+					in->client);
+				sys->ep->status.status_en = false;
+				sys->policy = IPA_POLICY_INTR_POLL_MODE;
+				sys->sps_option = (SPS_O_AUTO_ENABLE | SPS_O_EOT
+					| SPS_O_ACK_TRANSFERS);
+				sys->sps_callback = ipa_sps_irq_rx_notify;
+				INIT_WORK(&sys->work, ipa_wq_handle_rx);
+				INIT_DELAYED_WORK(&sys->switch_to_intr_work,
+					switch_to_intr_rx_work_func);
+			} else if (in->client ==
+					IPA_CLIENT_MEMCPY_DMA_SYNC_CONS) {
+				IPADBG("assigning policy to client:%d",
+					in->client);
+				sys->ep->status.status_en = false;
+				sys->policy = IPA_POLICY_NOINTR_MODE;
+				sys->sps_option = SPS_O_AUTO_ENABLE |
+				SPS_O_ACK_TRANSFERS | SPS_O_POLL;
 			} else {
 				IPAERR("Need to install a RX pipe hdlr\n");
 				WARN_ON(1);
@@ -2662,6 +2844,11 @@ int ipa_tx_dp_mul(enum ipa_client_type src,
 	u32 num_desc, cnt;
 	int ep_idx;
 
+	if (unlikely(!ipa_ctx)) {
+		IPAERR("IPA driver was not initialized\n");
+		return -EINVAL;
+	}
+
 	IPADBG("Received data desc anchor:%p\n", data_desc);
 
 	spin_lock_bh(&ipa_ctx->wc_memb.ipa_tx_mul_spinlock);
@@ -2745,6 +2932,11 @@ EXPORT_SYMBOL(ipa_tx_dp_mul);
 void ipa_free_skb(struct ipa_rx_data *data)
 {
 	struct ipa_rx_pkt_wrapper *rx_pkt;
+
+	if (unlikely(!ipa_ctx)) {
+		IPAERR("IPA driver was not initialized\n");
+		return;
+	}
 
 	spin_lock_bh(&ipa_ctx->wc_memb.wlan_spinlock);
 
@@ -2882,7 +3074,8 @@ int ipa_sys_teardown(u32 clnt_hdl)
 {
 	struct ipa_ep_context *ep;
 
-	if (clnt_hdl >= IPA_NUM_PIPES || ipa_ctx->ep[clnt_hdl].valid == 0) {
+	if (clnt_hdl >= ipa_ctx->ipa_num_pipes ||
+	    ipa_ctx->ep[clnt_hdl].valid == 0) {
 		IPAERR("bad parm(Either endpoint or client hdl invalid)\n");
 		return -EINVAL;
 	}
@@ -2902,3 +3095,23 @@ int ipa_sys_teardown(u32 clnt_hdl)
 	return 0;
 }
 EXPORT_SYMBOL(ipa_sys_teardown);
+
+/**
+ * ipa_adjust_ra_buff_base_sz()
+ *
+ * Return value: the largest power of two which is smaller
+ * than the input value
+ */
+static u32 ipa_adjust_ra_buff_base_sz(u32 aggr_byte_limit)
+{
+	aggr_byte_limit += IPA_MTU;
+	aggr_byte_limit += IPA_GENERIC_RX_BUFF_LIMIT;
+	aggr_byte_limit--;
+	aggr_byte_limit |= aggr_byte_limit >> 1;
+	aggr_byte_limit |= aggr_byte_limit >> 2;
+	aggr_byte_limit |= aggr_byte_limit >> 4;
+	aggr_byte_limit |= aggr_byte_limit >> 8;
+	aggr_byte_limit |= aggr_byte_limit >> 16;
+	aggr_byte_limit++;
+	return aggr_byte_limit >> 1;
+}

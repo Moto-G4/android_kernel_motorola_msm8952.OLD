@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -63,6 +63,9 @@
 #define HAL_MAX_BIAS_COEFFS 3
 #define HAL_MAX_LIMIT_COEFFS 6
 
+/* 32 encoder and 32 decoder sessions */
+#define VIDC_MAX_SESSIONS               64
+
 enum vidc_status {
 	VIDC_ERR_NONE = 0x0,
 	VIDC_ERR_FAIL = 0x80000000,
@@ -126,6 +129,7 @@ enum hal_property {
 	HAL_PARAM_FRAME_SIZE,
 	HAL_CONFIG_REALTIME,
 	HAL_PARAM_BUFFER_COUNT_ACTUAL,
+	HAL_PARAM_BUFFER_SIZE_MINIMUM,
 	HAL_PARAM_NAL_STREAM_FORMAT_SELECT,
 	HAL_PARAM_VDEC_OUTPUT_ORDER,
 	HAL_PARAM_VDEC_PICTURE_TYPE_DECODE,
@@ -214,6 +218,8 @@ enum hal_property {
 	HAL_PARAM_VENC_HIER_B_MAX_ENH_LAYERS,
 	HAL_PARAM_VDEC_NON_SECURE_OUTPUT2,
 	HAL_PARAM_VENC_HIER_P_HYBRID_MODE,
+	HAL_PARAM_VENC_MBI_STATISTICS_MODE,
+	HAL_PARAM_VENC_BITRATE_TYPE,
 };
 
 enum hal_domain {
@@ -239,6 +245,11 @@ enum hal_core_capabilities {
 	HAL_VIDEO_UNUSED_CAPABILITY      = 0x10000000,
 };
 
+enum hal_default_properties {
+	HAL_VIDEO_DYNAMIC_BUF_MODE = 0x00000001,
+	HAL_VIDEO_CONTINUE_DATA_TRANSFER = 0x00000002,
+};
+
 enum hal_video_codec {
 	HAL_VIDEO_CODEC_UNKNOWN  = 0x00000000,
 	HAL_VIDEO_CODEC_MVC      = 0x00000001,
@@ -255,7 +266,8 @@ enum hal_video_codec {
 	HAL_VIDEO_CODEC_VP7      = 0x00000800,
 	HAL_VIDEO_CODEC_VP8      = 0x00001000,
 	HAL_VIDEO_CODEC_HEVC     = 0x00002000,
-	HAL_VIDEO_CODEC_HEVC_HYBRID     = 0x00004000,
+	HAL_VIDEO_CODEC_VP9      = 0x00004000,
+	HAL_VIDEO_CODEC_HEVC_HYBRID     = 0x80000000,
 	HAL_UNUSED_CODEC = 0x10000000,
 };
 
@@ -509,6 +521,12 @@ enum hal_uncompressed_format {
 	HAL_UNUSED_COLOR              = 0x10000000,
 };
 
+enum hal_statistics_mode_type {
+	HAL_STATISTICS_MODE_DEFAULT	= 0x00000001,
+	HAL_STATISTICS_MODE_1		= 0x00000002,
+	HAL_STATISTICS_MODE_2		= 0x00000004,
+};
+
 enum hal_ssr_trigger_type {
 	SSR_ERR_FATAL = 1,
 	SSR_SW_DIV_BY_ZERO,
@@ -565,6 +583,16 @@ struct hal_enable {
 struct hal_buffer_count_actual {
 	enum hal_buffer buffer_type;
 	u32 buffer_count_actual;
+};
+
+struct hal_buffer_size_minimum {
+	enum hal_buffer buffer_type;
+	u32 buffer_size;
+};
+
+struct hal_buffer_display_hold_count_actual {
+	enum hal_buffer buffer_type;
+	u32 hold_count;
 };
 
 enum hal_nal_stream_format {
@@ -830,7 +858,7 @@ struct hal_properties_supported {
 };
 
 enum hal_capability {
-	HAL_CAPABILITY_FRAME_WIDTH,
+	HAL_CAPABILITY_FRAME_WIDTH = 0x1,
 	HAL_CAPABILITY_FRAME_HEIGHT,
 	HAL_CAPABILITY_MBS_PER_FRAME,
 	HAL_CAPABILITY_MBS_PER_SECOND,
@@ -838,7 +866,14 @@ enum hal_capability {
 	HAL_CAPABILITY_SCALE_X,
 	HAL_CAPABILITY_SCALE_Y,
 	HAL_CAPABILITY_BITRATE,
+	HAL_CAPABILITY_BFRAME,
+	HAL_CAPABILITY_PEAKBITRATE,
+	HAL_CAPABILITY_HIER_P_NUM_ENH_LAYERS,
+	HAL_CAPABILITY_ENC_LTR_COUNT,
 	HAL_CAPABILITY_SECURE_OUTPUT2_THRESHOLD,
+	HAL_CAPABILITY_HIER_B_NUM_ENH_LAYERS,
+	HAL_CAPABILITY_LCU_SIZE,
+	HAL_CAPABILITY_HIER_P_HYBRID_NUM_ENH_LAYERS,
 	HAL_UNUSED_CAPABILITY = 0x10000000,
 };
 
@@ -996,7 +1031,6 @@ struct hal_fw_info {
 enum hal_flush {
 	HAL_FLUSH_INPUT,
 	HAL_FLUSH_OUTPUT,
-	HAL_FLUSH_OUTPUT2,
 	HAL_FLUSH_ALL,
 	HAL_UNUSED_FLUSH = 0x10000000,
 };
@@ -1162,7 +1196,7 @@ struct msm_vidc_cb_cmd_done {
 
 struct msm_vidc_cb_event {
 	u32 device_id;
-	u32 session_id;
+	void *session_id;
 	enum vidc_status status;
 	u32 height;
 	u32 width;
@@ -1235,12 +1269,9 @@ struct msm_vidc_cb_data_done {
 	};
 };
 
-struct vidc_hal_sys_init_done {
-	u32 enc_codec_supported;
-	u32 dec_codec_supported;
-};
-
-struct vidc_hal_session_init_done {
+struct msm_vidc_capability {
+	enum hal_domain domain;
+	enum hal_video_codec codec;
 	struct hal_capability_supported width;
 	struct hal_capability_supported height;
 	struct hal_capability_supported mbs_per_frame;
@@ -1249,17 +1280,34 @@ struct vidc_hal_session_init_done {
 	struct hal_capability_supported scale_x;
 	struct hal_capability_supported scale_y;
 	struct hal_capability_supported bitrate;
+	struct hal_capability_supported bframe;
+	struct hal_capability_supported peakbitrate;
 	struct hal_capability_supported hier_p;
 	struct hal_capability_supported ltr_count;
 	struct hal_capability_supported secure_output2_threshold;
+	struct hal_capability_supported hier_b;
+	struct hal_capability_supported lcu_size;
+	struct hal_capability_supported hier_p_hybrid;
+	struct hal_profile_level_supported profile_level;
 	struct hal_uncompressed_format_supported uncomp_format;
 	struct hal_interlace_format_supported HAL_format;
 	struct hal_nal_stream_format_supported nal_stream_format;
-	struct hal_profile_level_supported profile_level;
-	/*allocate and released memory for above.*/
 	struct hal_intra_refresh intra_refresh;
-	struct hal_seq_header_info seq_hdr_info;
 	enum buffer_mode_type alloc_mode_out;
+	enum buffer_mode_type alloc_mode_in;
+	u32 pixelprocess_capabilities;
+	bool capability_set;
+};
+
+struct vidc_hal_sys_init_done {
+	u32 dec_codec_supported;
+	u32 enc_codec_supported;
+	u32 codec_count;
+	struct msm_vidc_capability *capabilities;
+};
+
+struct vidc_hal_session_init_done {
+	struct msm_vidc_capability capability;
 };
 
 enum msm_vidc_hfi_type {
@@ -1274,7 +1322,7 @@ enum msm_vidc_thermal_level {
 	VIDC_THERMAL_CRITICAL
 };
 
-enum vidc_bus_vote_data_session {
+enum vidc_vote_data_session {
 	VIDC_BUS_VOTE_DATA_SESSION_INVALID = 0,
 	/* No declarations exist. Values generated by VIDC_VOTE_DATA_SESSION_VAL
 	 * describe the enumerations e.g.:
@@ -1289,7 +1337,7 @@ enum vidc_bus_vote_data_session {
  *
  * This macro assigns two bits to each codec: the lower bit denoting the codec
  * type, and the higher bit denoting session type. */
-static inline enum vidc_bus_vote_data_session VIDC_VOTE_DATA_SESSION_VAL(
+static inline enum vidc_vote_data_session VIDC_VOTE_DATA_SESSION_VAL(
 		enum hal_video_codec c, enum hal_domain d) {
 	if (d != HAL_VIDEO_DOMAIN_ENCODER && d != HAL_VIDEO_DOMAIN_DECODER)
 		return VIDC_BUS_VOTE_DATA_SESSION_INVALID;
@@ -1298,8 +1346,15 @@ static inline enum vidc_bus_vote_data_session VIDC_VOTE_DATA_SESSION_VAL(
 }
 
 struct vidc_bus_vote_data {
-	enum vidc_bus_vote_data_session session;
+	enum vidc_vote_data_session session;
 	int load;
+	enum msm_vidc_power_mode power_mode;
+};
+
+struct vidc_clk_scale_data {
+	enum vidc_vote_data_session session[VIDC_MAX_SESSIONS];
+	unsigned long freq[VIDC_MAX_SESSIONS];
+	int num_sessions;
 };
 
 #define call_hfi_op(q, op, args...)			\
@@ -1325,6 +1380,7 @@ struct hfi_device {
 	int (*session_load_res)(void *sess);
 	int (*session_release_res)(void *sess);
 	int (*session_start)(void *sess);
+	int (*session_continue)(void *sess);
 	int (*session_stop)(void *sess);
 	int (*session_etb)(void *sess,
 			struct vidc_frame_data *input_frame);
@@ -1339,7 +1395,8 @@ struct hfi_device {
 	int (*session_set_property)(void *sess, enum hal_property ptype,
 			void *pdata);
 	int (*session_get_property)(void *sess, enum hal_property ptype);
-	int (*scale_clocks)(void *dev, int load, int codecs_enabled);
+	int (*scale_clocks)(void *dev, int load,
+			struct vidc_clk_scale_data *data);
 	int (*vote_bus)(void *dev, struct vidc_bus_vote_data *data,
 			int num_data);
 	int (*unvote_bus)(void *dev);
@@ -1347,7 +1404,6 @@ struct hfi_device {
 			int *domain_num, int *partition_num);
 	int (*load_fw)(void *dev);
 	void (*unload_fw)(void *dev);
-	int (*resurrect_fw)(void *dev);
 	int (*get_fw_info)(void *dev, struct hal_fw_info *fw_info);
 	int (*get_stride_scanline)(int color_fmt, int width,
 		int height,	int *stride, int *scanlines);
@@ -1356,6 +1412,7 @@ struct hfi_device {
 	int (*power_enable)(void *dev);
 	int (*suspend)(void *dev);
 	unsigned long (*get_core_clock_rate)(void *dev);
+	enum hal_default_properties (*get_default_properties)(void *dev);
 };
 
 typedef void (*hfi_cmd_response_callback) (enum command_response cmd,
@@ -1367,6 +1424,9 @@ void *vidc_hfi_initialize(enum msm_vidc_hfi_type hfi_type, u32 device_id,
 			hfi_cmd_response_callback callback);
 void vidc_hfi_deinitialize(enum msm_vidc_hfi_type hfi_type,
 			struct hfi_device *hdev);
-
+u32 vidc_get_hfi_domain(enum hal_domain hal_domain);
+u32 vidc_get_hfi_codec(enum hal_video_codec hal_codec);
+enum hal_domain vidc_get_hal_domain(u32 hfi_domain);
+enum hal_video_codec vidc_get_hal_codec(u32 hfi_codec);
 
 #endif /*__VIDC_HFI_API_H__ */

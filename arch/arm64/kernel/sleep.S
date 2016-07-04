@@ -3,6 +3,10 @@
 #include <asm/asm-offsets.h>
 #include <asm/assembler.h>
 
+#ifdef CONFIG_HTC_DEBUG_FOOTPRINT
+#include <htc_mnemosyne/htc_footprint.h>
+#endif
+
 	.text
 /*
  * Implementation of MPIDR_EL1 hash algorithm through shifting
@@ -49,28 +53,39 @@
 	orr	\dst, \dst, \mask		// dst|=(aff3>>rs3)
 	.endm
 /*
- * Save CPU state for a suspend.  This saves callee registers, and allocates
- * space on the kernel stack to save the CPU specific registers + some
- * other data for resume.
+ * Save CPU state for a suspend and execute the suspend finisher.
+ * On success it will return 0 through cpu_resume - ie through a CPU
+ * soft/hard reboot from the reset vector.
+ * On failure it returns the suspend finisher return value or force
+ * -EOPNOTSUPP if the finisher erroneously returns 0 (the suspend finisher
+ * is not allowed to return, if it does this must be considered failure).
+ * It saves callee registers, and allocates space on the kernel stack
+ * to save the CPU specific registers + some other data for resume.
  *
  *  x0 = suspend finisher argument
+ *  x1 = suspend finisher function pointer
  */
-ENTRY(__cpu_suspend)
+ENTRY(__cpu_suspend_enter)
 	stp	x29, lr, [sp, #-96]!
 	stp	x19, x20, [sp,#16]
 	stp	x21, x22, [sp,#32]
 	stp	x23, x24, [sp,#48]
 	stp	x25, x26, [sp,#64]
 	stp	x27, x28, [sp,#80]
+	/*
+	 * Stash suspend finisher and its argument in x20 and x19
+	 */
+	mov	x19, x0
+	mov	x20, x1
 	mov	x2, sp
 	sub	sp, sp, #CPU_SUSPEND_SZ	// allocate cpu_suspend_ctx
-	mov	x1, sp
+	mov	x0, sp
 	/*
-	 * x1 now points to struct cpu_suspend_ctx allocated on the stack
+	 * x0 now points to struct cpu_suspend_ctx allocated on the stack
 	 */
-	str	x2, [x1, #CPU_CTX_SP]
-	ldr	x2, =sleep_save_sp
-	ldr	x2, [x2, #SLEEP_SAVE_SP_VIRT]
+	str	x2, [x0, #CPU_CTX_SP]
+	ldr	x1, =sleep_save_sp
+	ldr	x1, [x1, #SLEEP_SAVE_SP_VIRT]
 #ifdef CONFIG_SMP
 	mrs	x7, mpidr_el1
 	ldr	x9, =mpidr_hash
@@ -82,11 +97,21 @@ ENTRY(__cpu_suspend)
 	ldp	w3, w4, [x9, #MPIDR_HASH_SHIFTS]
 	ldp	w5, w6, [x9, #(MPIDR_HASH_SHIFTS + 8)]
 	compute_mpidr_hash x8, x3, x4, x5, x6, x7, x10
-	add	x2, x2, x8, lsl #3
+	add	x1, x1, x8, lsl #3
 #endif
-	bl	__cpu_suspend_finisher
+	bl	__cpu_suspend_save
+	/*
+	 * Grab suspend finisher in x20 and its argument in x19
+	 */
+	mov	x0, x19
+	mov	x1, x20
+	/*
+	 * We are ready for power down, fire off the suspend finisher
+	 * in x1, with argument in x0
+	 */
+	blr	x1
         /*
-	 * Never gets here, unless suspend fails.
+	 * Never gets here, unless suspend finisher fails.
 	 * Successful cpu_suspend should return from cpu_resume, returning
 	 * through this code path is considered an error
 	 * If the return value is set to 0 force x0 = -EOPNOTSUPP
@@ -103,7 +128,7 @@ ENTRY(__cpu_suspend)
 	ldp	x27, x28, [sp, #80]
 	ldp	x29, lr, [sp], #96
 	ret
-ENDPROC(__cpu_suspend)
+ENDPROC(__cpu_suspend_enter)
 	.ltorg
 
 ENTRY(cpu_resume)
@@ -123,6 +148,36 @@ ENTRY(cpu_resume)
 #else
 	mov	x7, xzr
 #endif
+
+#ifdef CONFIG_HTC_DEBUG_FOOTPRINT
+       MPIDR2INDEX x0, x1
+
+       VIRT2PHYS x1, mnemosyne_phys, cpu_resume, x2
+       ldr     x1, [x1]
+
+       cmp     x1, #0
+       beq     1f                                                      /* if base is NULL, skip it. */
+
+       ldr     x2, =mnemosyne_kernel_exit_counter_from_cpu             /* Get the offset of an element */
+       add     x3, x1, x2                                              /* Get the address of an element */
+       add     x3, x3, x0, LSL #MNEMOSYNE_ELEMENT_SIZE_BIT_SHIFT       /* calculate data offset with cpu index first. */
+
+       ldr     x2, [x3]
+       add     x2, x2, #1
+       str     x2, [x3]
+       dsb     sy
+
+       ldr     x2, =mnemosyne_kernel_footprint_cpu                     /* Get the offset of an element */
+       add     x3, x1, x2                                              /* Get the address of an element */
+       add     x3, x3, x0, LSL #MNEMOSYNE_ELEMENT_SIZE_BIT_SHIFT       /* calculate data offset with cpu index first. */
+
+       mov     x2, #4
+       strb    w2, [x3]                                                /* write footprint 4 */
+       dsb     sy
+
+       1:
+#endif
+
 	adrp	x0, sleep_save_sp
 	add	x0, x0, #:lo12:sleep_save_sp
 	ldr	x0, [x0, #SLEEP_SAVE_SP_PHYS]

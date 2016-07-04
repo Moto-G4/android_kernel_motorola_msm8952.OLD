@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, 2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012, 2014-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -29,7 +29,6 @@ enum dump_client_type {
 	MSM_TMC1_REG, /* TMC_ETF */
 	MSM_LOG_BUF,
 	MSM_LOG_BUF_FIRST_IDX,
-	MSM_TZ_LOG,
 	MAX_NUM_CLIENTS,
 };
 
@@ -77,12 +76,15 @@ enum msm_dump_data_ids {
 	MSM_DUMP_DATA_OCMEM = 0xE0,
 	MSM_DUMP_DATA_CNSS_WLAN = 0xE1,
 	MSM_DUMP_DATA_PMIC = 0xE4,
+	MSM_DUMP_DATA_DBGUI_REG = 0xE5,
+	MSM_DUMP_DATA_DCC_REG = 0xE6,
+	MSM_DUMP_DATA_DCC_SRAM = 0xE7,
 	MSM_DUMP_DATA_MISC = 0xE8,
+	MSM_DUMP_DATA_VSENSE = 0xE9,
 	MSM_DUMP_DATA_TMC_ETF = 0xF0,
 	MSM_DUMP_DATA_TMC_REG = 0x100,
 	MSM_DUMP_DATA_LOG_BUF = 0x110,
 	MSM_DUMP_DATA_LOG_BUF_FIRST_IDX = 0x111,
-	MSM_DUMP_DATA_TZ_LOG = 0x11F,
 	MSM_DUMP_DATA_L2_TLB = 0x120,
 	MSM_DUMP_DATA_MAX = MAX_NUM_ENTRIES,
 };

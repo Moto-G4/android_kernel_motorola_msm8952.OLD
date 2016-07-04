@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -84,6 +84,12 @@ static inline void msm_vidc_free_reg_table(
 	res->reg_set.reg_tbl = NULL;
 }
 
+static inline void msm_vidc_free_qdss_addr_table(
+			struct msm_vidc_platform_resources *res)
+{
+	res->qdss_addr_set.addr_tbl = NULL;
+}
+
 static inline void msm_vidc_free_bus_vectors(
 			struct msm_vidc_platform_resources *res)
 {
@@ -122,13 +128,24 @@ static inline void msm_vidc_free_clock_table(
 	res->clock_set.count = 0;
 }
 
+static inline void msm_vidc_free_clock_voltage_table(
+			struct msm_vidc_platform_resources *res)
+{
+	res->cv_info.cv_table = NULL;
+	res->cv_info.count = 0;
+	res->cv_info_vp9d.cv_table = NULL;
+	res->cv_info_vp9d.count = 0;
+}
+
 void msm_vidc_free_platform_resources(
 			struct msm_vidc_platform_resources *res)
 {
 	msm_vidc_free_clock_table(res);
+	msm_vidc_free_clock_voltage_table(res);
 	msm_vidc_free_regulator_table(res);
 	msm_vidc_free_freq_table(res);
 	msm_vidc_free_reg_table(res);
+	msm_vidc_free_qdss_addr_table(res);
 	msm_vidc_free_bus_vectors(res);
 	msm_vidc_free_iommu_groups(res);
 }
@@ -179,6 +196,58 @@ static int msm_vidc_load_reg_table(struct msm_vidc_platform_resources *res)
 	}
 	return rc;
 }
+static int msm_vidc_load_qdss_table(struct msm_vidc_platform_resources *res)
+{
+	struct addr_set *qdss_addr_set;
+	struct platform_device *pdev = res->pdev;
+	int i;
+	int rc = 0;
+
+	if (!of_find_property(pdev->dev.of_node, "qcom,qdss-presets", NULL)) {
+		/* qcom,qdss-presets is an optional property. It likely won't be
+		 * present if we don't have any register settings to program */
+		dprintk(VIDC_DBG, "qcom,qdss-presets not found\n");
+		return rc;
+	}
+
+	qdss_addr_set = &res->qdss_addr_set;
+	qdss_addr_set->count = get_u32_array_num_elements(pdev,
+					"qcom,qdss-presets");
+	qdss_addr_set->count /= sizeof(*qdss_addr_set->addr_tbl) / sizeof(u32);
+
+	if (qdss_addr_set->count == 0) {
+		dprintk(VIDC_DBG, "no elements in qdss reg set\n");
+		return rc;
+	}
+
+	qdss_addr_set->addr_tbl = devm_kzalloc(&pdev->dev,
+			qdss_addr_set->count * sizeof(*qdss_addr_set->addr_tbl),
+			GFP_KERNEL);
+	if (!qdss_addr_set->addr_tbl) {
+		dprintk(VIDC_ERR, "%s Failed to alloc register table\n",
+			__func__);
+		rc = -ENOMEM;
+		goto err_qdss_addr_tbl;
+	}
+
+	rc = of_property_read_u32_array(pdev->dev.of_node, "qcom,qdss-presets",
+		(u32 *)qdss_addr_set->addr_tbl, qdss_addr_set->count * 2);
+	if (rc) {
+		dprintk(VIDC_ERR, "Failed to read qdss address table\n");
+		msm_vidc_free_qdss_addr_table(res);
+		rc = -EINVAL;
+		goto err_qdss_addr_tbl;
+	}
+
+	for (i = 0; i < qdss_addr_set->count; i++) {
+		dprintk(VIDC_DBG, "qdss addr = %x, value = %x\n",
+				qdss_addr_set->addr_tbl[i].start,
+				qdss_addr_set->addr_tbl[i].size);
+	}
+err_qdss_addr_tbl:
+	return rc;
+}
+
 static int msm_vidc_load_freq_table(struct msm_vidc_platform_resources *res)
 {
 	int rc = 0;
@@ -253,10 +322,16 @@ static int msm_vidc_load_bus_vectors(struct msm_vidc_platform_resources *res)
 
 	for_each_child_of_node(bus_node, child_node) {
 		bool passive = false;
+		bool low_power = false;
+		bool low_latency = false;
 		u32 configs = 0;
 		struct bus_info *bus = &buses->bus_tbl[c];
 
 		passive = of_property_read_bool(child_node, "qcom,bus-passive");
+		low_power = of_property_read_bool(child_node,
+			"qcom,bus-low-power");
+		low_latency = of_property_read_bool(child_node,
+			"qcom,bus-low-latency");
 		rc = of_property_read_u32(child_node, "qcom,bus-configs",
 				&configs);
 		if (rc) {
@@ -265,7 +340,12 @@ static int msm_vidc_load_bus_vectors(struct msm_vidc_platform_resources *res)
 					child_node->name, rc);
 			break;
 		}
-
+		if (low_power)
+			bus->power_mode = VIDC_POWER_LOW;
+		else if (low_latency)
+			bus->power_mode = VIDC_POWER_LOW_LATENCY;
+		else
+			bus->power_mode = VIDC_POWER_NORMAL;
 		bus->passive = passive;
 		bus->sessions_supported = configs;
 		bus->pdata = msm_bus_pdata_from_node(pdev, child_node);
@@ -274,10 +354,12 @@ static int msm_vidc_load_bus_vectors(struct msm_vidc_platform_resources *res)
 			dprintk(VIDC_ERR, "Failed to get bus pdata: %d\n", rc);
 			break;
 		}
+		res->power_modes |= bus->power_mode;
 
-		dprintk(VIDC_DBG, "Bus %s supports: %x, passive: %d\n",
+		dprintk(VIDC_DBG,
+				"Bus %s supports: %x, passive: %d, power_mode: %d\n",
 				bus->pdata->name, bus->sessions_supported,
-				passive);
+				passive, bus->power_mode);
 		++c;
 	}
 
@@ -598,6 +680,126 @@ err_load_clk_table_fail:
 	return rc;
 }
 
+static int msm_vidc_load_clock_voltage_table(
+		struct msm_vidc_platform_resources *res)
+{
+	int rc = 0, i = 0, num_elements = 0;
+	struct platform_device *pdev = res->pdev;
+	struct clock_voltage_info *cv_info = &res->cv_info;
+	struct clock_voltage_info *cv_info_vp9d = &res->cv_info_vp9d;
+	int *cv_table = NULL;
+	bool reset_clock_control = false;
+	bool regulator_scaling = false;
+
+	reset_clock_control = of_property_read_bool(pdev->dev.of_node,
+			"qcom,reset-clock-control");
+	if (reset_clock_control)
+		msm_vidc_reset_clock_control = 1;
+
+	regulator_scaling = of_property_read_bool(pdev->dev.of_node,
+			"qcom,regulator-scaling");
+	if (regulator_scaling)
+		msm_vidc_regulator_scaling = 1;
+
+	num_elements = get_u32_array_num_elements(pdev,
+			"qcom,clock-voltage-tbl");
+	if (num_elements <= 0) {
+		dprintk(VIDC_DBG,
+			"No clocks and voltage elements found, numelements %d\n",
+			num_elements);
+		cv_info->count = 0;
+		rc = 0;
+		goto err_load_clk_vltg_table_fail;
+	}
+	cv_info->count =  num_elements /
+			(sizeof(*cv_info->cv_table) / sizeof(u32));
+
+	cv_table = devm_kzalloc(&pdev->dev,
+			num_elements * sizeof(u32), GFP_KERNEL);
+	if (!cv_table) {
+		dprintk(VIDC_ERR, "No memory to read clock voltage tables\n");
+		rc = -ENOMEM;
+		goto err_load_clk_vltg_table_fail;
+	}
+
+	rc = of_property_read_u32_array(pdev->dev.of_node,
+				"qcom,clock-voltage-tbl", cv_table,
+				num_elements);
+	if (rc) {
+		dprintk(VIDC_ERR, "Failed to read clock properties: %d\n", rc);
+		goto err_load_clk_vltg_table_fail;
+	}
+	cv_info->cv_table = (struct clock_voltage_table *)cv_table;
+
+	dprintk(VIDC_DBG, "%s: clock voltage table size %d\n",
+		__func__, cv_info->count);
+	for (i = 0; i < cv_info->count; i++) {
+		dprintk(VIDC_DBG,
+			"clock freq: %d, voltage index: %d\n",
+			cv_info->cv_table[i].clock_freq,
+			cv_info->cv_table[i].voltage_idx);
+	}
+
+	/* load vp9 decoder specific clock voltage table */
+	num_elements = get_u32_array_num_elements(pdev,
+			"qcom,vp9d-clock-voltage-tbl");
+	if (num_elements <= 0) {
+		dprintk(VIDC_DBG,
+			"No vp9 clocks and voltage elements found, num elements %d\n",
+			num_elements);
+		cv_info_vp9d->count = 0;
+		rc = 0;
+		goto err_load_clk_vltg_table_fail;
+	}
+	cv_info_vp9d->count =  num_elements /
+			(sizeof(*cv_info_vp9d->cv_table) / sizeof(u32));
+
+	cv_table = devm_kzalloc(&pdev->dev,
+			num_elements * sizeof(u32), GFP_KERNEL);
+	if (!cv_table) {
+		dprintk(VIDC_ERR,
+			"No memory to read vp9 clock voltage tables\n");
+		rc = -ENOMEM;
+		goto err_load_clk_vltg_table_fail;
+	}
+
+	rc = of_property_read_u32_array(pdev->dev.of_node,
+				"qcom,vp9d-clock-voltage-tbl", cv_table,
+				num_elements);
+	if (rc) {
+		dprintk(VIDC_ERR,
+			"Failed to read vp9 clock properties: %d\n",
+			rc);
+		goto err_load_clk_vltg_table_fail;
+	}
+	cv_info_vp9d->cv_table = (struct clock_voltage_table *)cv_table;
+
+	/*
+	 * enable regulator scaling if vp9 decoder clock vs voltage
+	 * table is available and hw fuse version = 1 which supports
+	 * vp9 decoder in video hardware.
+	 */
+	if (cv_info_vp9d->count && vidc_driver->version == 1)
+		msm_vidc_regulator_scaling = 1;
+
+	dprintk(VIDC_DBG, "%s: vp9d clock voltage table size %d\n",
+		__func__, cv_info_vp9d->count);
+	for (i = 0; i < cv_info_vp9d->count; i++) {
+		dprintk(VIDC_DBG,
+			"vp9d clock freq: %d, voltage index: %d\n",
+			cv_info_vp9d->cv_table[i].clock_freq,
+			cv_info_vp9d->cv_table[i].voltage_idx);
+	}
+
+	dprintk(VIDC_DBG, "video reset clock control enabled = %s\n",
+			msm_vidc_reset_clock_control ? "yes" : "no");
+	dprintk(VIDC_DBG, "regulator scaling enabled = %s\n",
+			msm_vidc_regulator_scaling ? "yes" : "no");
+
+err_load_clk_vltg_table_fail:
+	return rc;
+}
+
 int read_platform_resources_from_dt(
 		struct msm_vidc_platform_resources *res)
 {
@@ -628,16 +830,34 @@ int read_platform_resources_from_dt(
 	res->sys_idle_indicator = of_property_read_bool(pdev->dev.of_node,
 			"qcom,enable-idle-indicator");
 
+	res->thermal_mitigable =
+			of_property_read_bool(pdev->dev.of_node,
+			"qcom,enable-thermal-mitigation");
+
+	rc = of_property_read_string(pdev->dev.of_node, "qcom,firmware-name",
+			&res->fw_name);
+	if (rc) {
+		dprintk(VIDC_ERR, "Failed to read firmware name: %d\n", rc);
+		goto err_load_freq_table;
+	}
+	dprintk(VIDC_DBG, "Firmware filename: %s\n", res->fw_name);
+
 	rc = msm_vidc_load_freq_table(res);
 	if (rc) {
 		dprintk(VIDC_ERR, "Failed to load freq table: %d\n", rc);
 		goto err_load_freq_table;
 	}
+
+	rc = msm_vidc_load_qdss_table(res);
+	if (rc)
+		dprintk(VIDC_WARN, "Failed to load qdss reg table: %d\n", rc);
+
 	rc = msm_vidc_load_reg_table(res);
 	if (rc) {
 		dprintk(VIDC_ERR, "Failed to load reg table: %d\n", rc);
 		goto err_load_reg_table;
 	}
+
 	rc = msm_vidc_load_bus_vectors(res);
 	if (rc) {
 		dprintk(VIDC_ERR, "Failed to load bus vectors: %d\n", rc);
@@ -662,6 +882,25 @@ int read_platform_resources_from_dt(
 		goto err_load_clock_table;
 	}
 
+	rc = msm_vidc_load_clock_voltage_table(res);
+	if (rc) {
+		dprintk(VIDC_ERR,
+			"Failed to load clock voltage table: %d\n", rc);
+		goto err_load_clock_voltage_table;
+	}
+
+	rc = of_property_read_u32(pdev->dev.of_node, "qcom,dcvs-min-load",
+			&res->dcvs_min_load);
+	if (rc)
+		dprintk(VIDC_ERR,
+			"Failed to determine dcvs min load: %d\n", rc);
+
+	rc = of_property_read_u32(pdev->dev.of_node, "qcom,dcvs-min-mbperframe",
+			&res->dcvs_min_mbperframe);
+	if (rc)
+		dprintk(VIDC_ERR,
+			"Failed to determine dcvs min MB per frame: %d\n", rc);
+
 	rc = of_property_read_u32(pdev->dev.of_node, "qcom,max-hw-load",
 			&res->max_load);
 	if (rc) {
@@ -682,6 +921,8 @@ int read_platform_resources_from_dt(
 	}
 	return rc;
 err_load_max_hw_load:
+	msm_vidc_free_clock_voltage_table(res);
+err_load_clock_voltage_table:
 	msm_vidc_free_clock_table(res);
 err_load_clock_table:
 	msm_vidc_free_regulator_table(res);

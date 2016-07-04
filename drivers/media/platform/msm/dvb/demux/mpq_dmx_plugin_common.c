@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -19,7 +19,7 @@
 #include "mpq_dmx_plugin_common.h"
 #include "mpq_sdmx.h"
 
-#define SDMX_MAJOR_VERSION_MATCH	(5)
+#define SDMX_MAJOR_VERSION_MATCH	(7)
 
 /* Length of mandatory fields that must exist in header of video PES */
 #define PES_MANDATORY_FIELDS_LEN			9
@@ -79,10 +79,6 @@ module_param(mpq_sdmx_scramble_odd, int, S_IRUGO | S_IWUSR);
  */
 static int mpq_sdmx_scramble_default_discard = 1;
 module_param(mpq_sdmx_scramble_default_discard, int, S_IRUGO | S_IWUSR);
-
-/* Whether to use secure demux or bypass it. Use for debugging */
-static int mpq_bypass_sdmx = 1;
-module_param(mpq_bypass_sdmx, int, S_IRUGO | S_IWUSR);
 
 /* Max number of TS packets allowed as input for a single sdmx process */
 static int mpq_sdmx_proc_limit = MAX_TS_PACKETS_FOR_SDMX_PROCESS;
@@ -1619,6 +1615,7 @@ static int mpq_sdmx_alloc_data_buf(struct mpq_feed *mpq_feed, size_t size)
 		0);
 	if (IS_ERR_OR_NULL(mpq_feed->sdmx_buf_handle)) {
 		ret = PTR_ERR(mpq_feed->sdmx_buf_handle);
+		mpq_feed->sdmx_buf_handle = NULL;
 		MPQ_DVB_ERR_PRINT(
 			"%s: FAILED to allocate sdmx buffer %d\n",
 			__func__, ret);
@@ -1681,6 +1678,7 @@ static int mpq_sdmx_init_metadata_buffer(struct mpq_demux *mpq_demux,
 		0);
 	if (IS_ERR_OR_NULL(feed->metadata_buf_handle)) {
 		ret = PTR_ERR(feed->metadata_buf_handle);
+		feed->metadata_buf_handle = NULL;
 		MPQ_DVB_ERR_PRINT(
 			"%s: FAILED to allocate metadata buffer %d\n",
 			__func__, ret);
@@ -5115,9 +5113,6 @@ int mpq_dmx_write(struct dmx_demux *demux, const char *buf, size_t count)
 int mpq_sdmx_is_loaded(void)
 {
 	static int sdmx_load_checked;
-
-	if (mpq_bypass_sdmx)
-		return 0;
 
 	if (!sdmx_load_checked) {
 		mpq_sdmx_check_app_loaded();

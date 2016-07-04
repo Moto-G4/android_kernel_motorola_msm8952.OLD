@@ -1,9 +1,9 @@
-/* arch/arm/mach-msm/cpufreq.c
+/* drivers/cpufreq/qcom-cpufreq.c
  *
  * MSM architecture cpufreq driver
  *
  * Copyright (C) 2007 Google, Inc.
- * Copyright (c) 2007-2014, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2007-2015, The Linux Foundation. All rights reserved.
  * Author: Mike A. Chan <mikechan@google.com>
  *
  * This software is licensed under the terms of the GNU General Public
@@ -22,14 +22,16 @@
 #include <linux/cpufreq.h>
 #include <linux/cpu.h>
 #include <linux/cpumask.h>
-#include <linux/sched.h>
-#include <linux/sched/rt.h>
 #include <linux/suspend.h>
 #include <linux/clk.h>
 #include <linux/err.h>
 #include <linux/platform_device.h>
 #include <linux/of.h>
 #include <trace/events/power.h>
+
+#if defined(CONFIG_HTC_DEBUG_FOOTPRINT)
+#include <htc_mnemosyne/htc_footprint.h>
+#endif
 
 static DEFINE_MUTEX(l2bw_lock);
 
@@ -49,44 +51,37 @@ static int set_cpu_freq(struct cpufreq_policy *policy, unsigned int new_freq,
 			unsigned int index)
 {
 	int ret = 0;
-	int saved_sched_policy = -EINVAL;
-	int saved_sched_rt_prio = -EINVAL;
 	struct cpufreq_freqs freqs;
-	struct sched_param param = { .sched_priority = MAX_RT_PRIO-1 };
 	unsigned long rate;
 
 	freqs.old = policy->cur;
 	freqs.new = new_freq;
 	freqs.cpu = policy->cpu;
 
-	/*
-	 * Put the caller into SCHED_FIFO priority to avoid cpu starvation
-	 * while increasing frequencies
-	 */
-
-	if (freqs.new > freqs.old && current->policy != SCHED_FIFO) {
-		saved_sched_policy = current->policy;
-		saved_sched_rt_prio = current->rt_priority;
-		sched_setscheduler_nocheck(current, SCHED_FIFO, &param);
-	}
-
 	cpufreq_notify_transition(policy, &freqs, CPUFREQ_PRECHANGE);
 
 	trace_cpu_frequency_switch_start(freqs.old, freqs.new, policy->cpu);
 
 	rate = new_freq * 1000;
+#if defined(CONFIG_HTC_DEBUG_FOOTPRINT)
+	set_acpuclk_footprint_by_clk(cpu_clk[policy->cpu], ACPU_ENTER);
+	set_acpuclk_cpu_freq_footprint_by_clk(FT_PREV_RATE, cpu_clk[policy->cpu], policy->cur * 1000);
+	set_acpuclk_cpu_freq_footprint_by_clk(FT_NEW_RATE, cpu_clk[policy->cpu], rate);
+#endif
 	rate = clk_round_rate(cpu_clk[policy->cpu], rate);
 	ret = clk_set_rate(cpu_clk[policy->cpu], rate);
 	if (!ret) {
+#if defined(CONFIG_HTC_DEBUG_FOOTPRINT)
+		set_acpuclk_footprint_by_clk(cpu_clk[policy->cpu], ACPU_BEFORE_UPDATE_L2_BW);
+#endif
 		cpufreq_notify_transition(policy, &freqs, CPUFREQ_POSTCHANGE);
 		trace_cpu_frequency_switch_end(policy->cpu);
 	}
 
-	/* Restore priority after clock ramp-up */
-	if (freqs.new > freqs.old && saved_sched_policy >= 0) {
-		param.sched_priority = saved_sched_rt_prio;
-		sched_setscheduler_nocheck(current, saved_sched_policy, &param);
-	}
+#if defined(CONFIG_HTC_DEBUG_FOOTPRINT)
+	set_acpuclk_footprint_by_clk(cpu_clk[policy->cpu], ACPU_LEAVE);
+#endif
+
 	return ret;
 }
 
@@ -218,17 +213,29 @@ static int msm_cpufreq_cpu_callback(struct notifier_block *nfb,
 		clk_unprepare(l2_clk);
 		break;
 	case CPU_UP_PREPARE:
+#ifdef CONFIG_HTC_DEBUG_FOOTPRINT
+		set_hotplug_on_footprint(cpu, HOF_ENTER);
+#endif
 		rc = clk_prepare(l2_clk);
 		if (rc < 0)
 			return NOTIFY_BAD;
+#ifdef CONFIG_HTC_DEBUG_FOOTPRINT
+		set_hotplug_on_footprint(cpu, HOF_AFTER_PREPARE_ENABLE_L2);
+#endif
 		rc = clk_prepare(cpu_clk[cpu]);
 		if (rc < 0) {
 			clk_unprepare(l2_clk);
 			return NOTIFY_BAD;
 		}
+#ifdef CONFIG_HTC_DEBUG_FOOTPRINT
+		set_hotplug_on_footprint(cpu, HOF_AFTER_PREPARE_ENABLE_CPU);
+#endif
 		break;
 
 	case CPU_STARTING:
+#ifdef CONFIG_HTC_DEBUG_FOOTPRINT
+		set_hotplug_on_footprint(cpu, HOF_BEFORE_UPDATE_L2_BW);
+#endif
 		rc = clk_enable(l2_clk);
 		if (rc < 0)
 			return NOTIFY_BAD;
@@ -237,6 +244,9 @@ static int msm_cpufreq_cpu_callback(struct notifier_block *nfb,
 			clk_disable(l2_clk);
 			return NOTIFY_BAD;
 		}
+#ifdef CONFIG_HTC_DEBUG_FOOTPRINT
+		set_hotplug_on_footprint(cpu, HOF_LEAVE);
+#endif
 		break;
 
 	default:
@@ -426,8 +436,10 @@ static int __init msm_cpufreq_probe(struct platform_device *pdev)
 	/* Parse commong cpufreq table for all CPUs */
 	ftbl = cpufreq_parse_dt(dev, "qcom,cpufreq-table", 0);
 	if (!IS_ERR(ftbl)) {
-		for_each_possible_cpu(cpu)
+		for_each_possible_cpu(cpu) {
 			per_cpu(freq_table, cpu) = ftbl;
+			cpufreq_frequency_table_get_attr(ftbl, cpu);
+		}
 		return 0;
 	}
 
@@ -447,6 +459,7 @@ static int __init msm_cpufreq_probe(struct platform_device *pdev)
 		}
 		if (cpu == 0) {
 			per_cpu(freq_table, cpu) = ftbl;
+			cpufreq_frequency_table_get_attr(ftbl, cpu);
 			continue;
 		}
 
@@ -461,11 +474,12 @@ static int __init msm_cpufreq_probe(struct platform_device *pdev)
 			if (!IS_ERR(ftbl)) {
 				dev_warn(dev, "Conflicting tables for CPU%d\n",
 					 cpu);
-				kfree(ftbl);
+				devm_kfree(dev, ftbl);
 			}
 			ftbl = per_cpu(freq_table, cpu - 1);
 		}
 		per_cpu(freq_table, cpu) = ftbl;
+		cpufreq_frequency_table_get_attr(ftbl, cpu);
 	}
 
 	return 0;
@@ -507,6 +521,22 @@ static int __init msm_cpufreq_register(void)
 	register_pm_notifier(&msm_cpufreq_pm_notifier);
 	return cpufreq_register_driver(&msm_cpufreq_driver);
 }
+
+int is_sync_cpu(struct cpumask *mask, int first_cpu)
+{
+	int cpu;
+
+	for_each_cpu_and(cpu, mask, cpu_possible_mask) {
+		if (cpu == first_cpu)
+			continue;
+		if (cpu_clk[cpu] != cpu_clk[first_cpu])
+			return 0;
+	}
+
+	return 1;
+}
+
+EXPORT_SYMBOL(is_sync_cpu);
 
 subsys_initcall(msm_cpufreq_register);
 

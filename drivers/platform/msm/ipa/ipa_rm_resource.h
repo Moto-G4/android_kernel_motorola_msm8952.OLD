@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -72,6 +72,8 @@ struct ipa_rm_resource {
  * @resource: resource
  * @usage_count: number of producers in GRANTED / REQUESTED state
  *		using this consumer
+ * @request_consumer_in_progress: when set, the consumer is during its request
+ *		phase
  * @request_resource: function which should be called to request resource
  *			from resource manager
  * @release_resource: function which should be called to release resource
@@ -81,6 +83,7 @@ struct ipa_rm_resource {
 struct ipa_rm_resource_cons {
 	struct ipa_rm_resource resource;
 	int usage_count;
+	struct completion request_consumer_in_progress;
 	int (*request_resource)(void);
 	int (*release_resource)(void);
 };
@@ -123,10 +126,12 @@ int ipa_rm_resource_producer_request(struct ipa_rm_resource_prod *producer);
 int ipa_rm_resource_producer_release(struct ipa_rm_resource_prod *producer);
 
 int ipa_rm_resource_consumer_request(struct ipa_rm_resource_cons *consumer,
-				u32 needed_bw);
+				u32 needed_bw,
+				bool inc_usage_count);
 
 int ipa_rm_resource_consumer_release(struct ipa_rm_resource_cons *consumer,
-				u32 needed_bw);
+				u32 needed_bw,
+				bool dec_usage_count);
 
 int ipa_rm_resource_set_perf_profile(struct ipa_rm_resource *resource,
 				     struct ipa_rm_perf_profile *profile);

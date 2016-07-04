@@ -36,11 +36,35 @@ dtb-$(CONFIG_ARCH_MSM8909) += msm8909-sim.dtb \
 	msm8909-cdp.dtb \
 	msm8909-mtp.dtb \
 	msm8909-mtp-smb1360.dtb \
+	msm8909-pm8916-mtp-smb1360.dtb \
+	msm8909-512mb-mtp-smb1360.dtb \
 	msm8909-1gb-qrd-skua.dtb \
+	msm8909-1gb-qrd-skuc.dtb \
+	msm8909-1gb-qrd-skue.dtb \
 	msm8909-1gb-cdp.dtb \
-	msm8909-1gb-mtp.dtb
-# Do not include QC default DTBs if not needed
-ifneq ($(CONFIG_MMI_DEVICE_DTBS),y)
+	msm8909-1gb-mtp.dtb \
+	msm8909-1gb-rcm.dtb \
+	msm8909-pm8916-1gb-rcm.dtb \
+	msm8909-pm8916-mtp.dtb \
+	msm8909-pm8916-cdp.dtb \
+	msm8909-qhd-cdp.dtb \
+	msm8909-qhd-rcm.dtb \
+	msm8909-pm8916-1gb-qhd-rcm.dtb \
+	msm8909-pm8916-qhd-rcm.dtb \
+	msm8909-pm8916-qrd-skut.dtb \
+	msm8208-cdp.dtb \
+	msm8208-mtp.dtb \
+	msm8208-1gb-cdp.dtb \
+	msm8208-1gb-mtp.dtb \
+	msm8208-qrd-skua.dtb \
+	msm8208-qrd-skuc.dtb \
+	msm8208-qrd-skue.dtb \
+	msm8208-1gb-qrd-skua.dtb \
+	msm8208-1gb-qrd-skuc.dtb \
+	msm8208-1gb-qrd-skue.dtb \
+	msm8208-1gb-rcm.dtb \
+	msm8208-qhd-cdp.dtb \
+	msm8208-qhd-rcm.dtb
 dtb-$(CONFIG_ARCH_MSM8916) += msm8916-sim.dtb \
 	msm8916-rumi.dtb \
 	msm8916-cdp.dtb \
@@ -58,20 +82,28 @@ dtb-$(CONFIG_ARCH_MSM8916) += msm8916-sim.dtb \
 	msm8916-512mb-qrd-skuid.dtb \
 	msm8916-512mb-qrd-skuh.dtb \
 	msm8916-qrd-skut1.dtb \
+	msm8916-qrd-skut2.dtb \
+	msm8916-qrd-skut3.dtb \
 	apq8016-mtp.dtb \
 	apq8016-mtp-smb1360.dtb \
+	apq8016-sbc.dtb \
+	apq8016-qrd-skuh.dtb \
 	msm8939-sim.dtb \
 	msm8939-rumi.dtb \
 	msm8939-qrd-skuk.dtb \
+	msm8939-qrd-skul.dtb \
 	msm8939-cdp.dtb \
 	msm8939-cdp-jdi.dtb \
+	msm8939-cdp-jdi-a216-fhd.dtb \
 	msm8939-mtp.dtb \
 	msm8939-mtp-jdi.dtb \
 	msm8939-mtp-smb1360.dtb \
 	msm8939-mtp-wcd9306.dtb \
 	msm8939-v3.0-qrd-skuk.dtb \
+	msm8939-v3.0-qrd-skul.dtb \
 	msm8939-v3.0-cdp.dtb \
 	msm8939-v3.0-cdp-jdi.dtb \
+	msm8939-v3.0-cdp-jdi-a216-fhd.dtb \
 	msm8939-v3.0-mtp.dtb \
 	msm8939-v3.0-mtp-jdi.dtb \
 	msm8939-v3.0-mtp-smb1360.dtb \
@@ -82,16 +114,43 @@ dtb-$(CONFIG_ARCH_MSM8916) += msm8916-sim.dtb \
 	msm8936-mtp.dtb \
 	msm8936-mtp-smb1360.dtb \
 	msm8936-mtp-wcd9306.dtb \
-	msmtellurium-sim.dtb \
-	msmtellurium-rumi.dtb \
+	msm8952-sim.dtb \
+	msm8952-rumi.dtb \
+	msm8952-qrd-skum.dtb \
+	msm8952-qrd-skum-dvt2.dtb \
+	msm8952-cdp.dtb \
+	msm8952-ext-codec-cdp.dtb \
+	msm8952-mtp.dtb \
+	msm8952-htc_hiae-xa.dtb \
+	msm8952-htc_hiae-xb.dtb \
+	msm8952-htc_hiae-xc.dtb \
+	msm8952-htc_hiae-xd.dtb \
+	msm8952-htc_hiae-pvt.dtb \
+	apq8052-cdp.dtb \
+	apq8052-mtp.dtb \
+	msm8976-sim.dtb \
+	msm8976-rumi.dtb \
+	msm8976-qrd-skun.dtb \
+	msm8976-qrd-skun-evt2.dtb \
+	msm8976-cdp.dtb \
+	msm8976-mtp.dtb \
+	msm8976-rcm.dtb \
+	apq8076-cdp.dtb \
+	apq8076-mtp.dtb \
+	msm8956-sim.dtb \
+	msm8956-rumi.dtb \
+	msm8956-cdp.dtb \
+	msm8956-mtp.dtb \
+	apq8056-cdp.dtb \
+	apq8056-mtp.dtb \
 	msm8929-cdp.dtb \
 	msm8929-mtp.dtb \
 	msm8929-mtp-smb1360.dtb \
 	msm8929-mtp-jdi-smb1360.dtb \
 	msm8929-mtp-wcd9306-smb1360.dtb \
+	msm8929-qrd-skul.dtb \
+	msm8929-qrd-skulb.dtb \
 	msm8929-cdp-jdi.dtb
-endif # CONFIG_MMI_DEVICE_DTBS
-
 dtb-$(CONFIG_ARCH_MSM8226) += msm8226-sim.dtb \
 	msm8226-fluid.dtb \
 	msm8226-v1-cdp.dtb \
@@ -148,13 +207,14 @@ dtb-$(CONFIG_ARCH_MSM8610) += msm8610-rumi.dtb \
 	msm8610-v2-qrd-skuaa.dtb \
 	msm8610-v2-qrd-skuab.dtb
 dtb-$(CONFIG_ARCH_FSM9900) += fsm9900-rumi.dtb \
-	fsm9900-sim.dtb \
 	fsm9900-cdp.dtb \
 	fsm9900-mtp-v1.0.dtb \
-	fsm9900-mtp-v1.1.dtb
-dtb-$(CONFIG_ARCH_FSM9010) += fsm9010-rumi.dtb
-dtb-$(CONFIG_ARCH_MDM9630) += mdm9630-sim.dtb \
-	mdm9630-v1-cdp.dtb \
+	fsm9900-mtp-v1.1.dtb \
+	fsm9900-mtp-v2.0.dtb
+dtb-$(CONFIG_ARCH_FSM9010) += fsm9010-rumi.dtb \
+	fsm9010-v1.0-mtp.dtb  \
+	fsm9010-v1.0-cdp.dtb
+dtb-$(CONFIG_ARCH_MDM9630) += mdm9630-v1-cdp.dtb \
 	mdm9630-v1-mtp.dtb \
 	mdm9630-v2-cdp.dtb \
 	mdm9630-v2-mtp.dtb \
@@ -162,14 +222,15 @@ dtb-$(CONFIG_ARCH_MDM9630) += mdm9630-sim.dtb \
 	mdm9630-v2-gf-cdp.dtb  \
 	mdm9630-v2-tsmc-mtp.dtb \
 	mdm9630-v2-gf-mtp.dtb
-dtb-$(CONFIG_ARCH_MSMZIRC) += msmzirc-sim.dtb \
-	msmzirc-rumi.dtb \
-	msmzirc-cdp.dtb \
-	msmzirc-mtp.dtb
-dtb-$(CONFIG_ARCH_MDMFERRUM) += mdmferrum-sim.dtb \
-	mdmferrum-rumi.dtb \
-	mdmferrum-cdp.dtb \
-	mdmferrum-mtp.dtb
+dtb-$(CONFIG_ARCH_MDMCALIFORNIUM) += mdmcalifornium-sim.dtb \
+	mdmcalifornium-rumi.dtb
+dtb-$(CONFIG_ARCH_MDM9640) += mdm9640-v1-emmc-cdp.dtb \
+	mdm9640-v1-nand-cdp.dtb \
+	mdm9640-v1-mtp.dtb \
+	mdm9640-v2-emmc-cdp.dtb \
+	mdm9640-v2-nand-cdp.dtb \
+	mdm9640-v2-mtp.dtb
+dtb-$(CONFIG_ARCH_MSMVPIPA) += msmvpipa-sim.dtb
 dtb-$(CONFIG_ARCH_APQ8084) += apq8084-v1.0-old-pwr-grid-liquid.dtb \
 	apq8084-v1.1-old-pwr-grid-liquid.dtb \
 	apq8084-v1.1-liquid.dtb \
@@ -211,71 +272,36 @@ dtb-$(CONFIG_ARCH_MSM8994) += msm8994-v1-sim.dtb \
 	apq8094-v1-fluid.dtb \
 	apq8094-v1-dragonboard.dtb \
 	msm8994-v2-sim.dtb \
-	msm8994-v2-cdp.dtb \
-	msm8994-pmi8994-pm8004-v2-cdp.dtb \
-	msm8994-v2-mtp.dtb \
-	msm8994-pmi8994-pm8004-v2-mtp.dtb \
-	msm8994-v2-liquid.dtb \
-	msm8994-v2-fluid.dtb \
-	apq8094-v2-cdp.dtb \
-	apq8094-v2-mtp.dtb \
-	apq8094-v2-liquid.dtb \
-	apq8094-v2-fluid.dtb
+	msm8994-v2.0-cdp.dtb \
+	msm8994-pmi8994-pm8004-v2.0-cdp.dtb \
+	msm8994-v2.0-mtp.dtb \
+	msm8994-pmi8994-pm8004-v2.0-mtp.dtb \
+	msm8994-v2.0-liquid.dtb \
+	msm8994-v2.0-fluid.dtb \
+	apq8094-v2.0-cdp.dtb \
+	apq8094-v2.0-mtp.dtb \
+	apq8094-v2.0-liquid.dtb \
+	apq8094-v2.0-fluid.dtb \
+	apq8094-v2.0-dragonboard.dtb \
+	msm8994-v2.1-mtp.dtb \
+	msm8994-v2.1-cdp.dtb \
+	msm8994-v2.1-liquid.dtb \
+	msm8994-v2.1-fluid.dtb \
+	msm8994-pmi8994-pm8004-v2.1-cdp.dtb \
+	msm8994-pmi8994-pm8004-v2.1-mtp.dtb \
+	apq8094-v2.1-cdp.dtb \
+	apq8094-v2.1-mtp.dtb \
+	apq8094-v2.1-liquid.dtb \
+	apq8094-v2.1-fluid.dtb \
+	apq8094-v2.1-dragonboard.dtb
 
 dtb-$(CONFIG_ARCH_MSM8992) += msm8992-sim.dtb \
-	msm8992-rumi.dtb
-
-# Motorola 8916 Devices
-ifeq ($(CONFIG_MMI_SURNIA_DTB),y)
-#dtb-$(CONFIG_ARCH_MSM8916) += msm8916-styx-p0.dtb
-#dtb-$(CONFIG_ARCH_MSM8916) += msm8916-styx-p1.dtb
-#dtb-$(CONFIG_ARCH_MSM8916) += msm8916-surnia-p1a.dtb
-#dtb-$(CONFIG_ARCH_MSM8916) += msm8916-surnia-p1b.dtb
-#dtb-$(CONFIG_ARCH_MSM8916) += msm8916-surnia-p1ad.dtb
-#dtb-$(CONFIG_ARCH_MSM8916) += msm8916-surnia-p1bd.dtb
-#dtb-$(CONFIG_ARCH_MSM8916) += msm8916-surnia-p2a.dtb
-#dtb-$(CONFIG_ARCH_MSM8916) += msm8916-surnia-p2ad.dtb
-#dtb-$(CONFIG_ARCH_MSM8916) += msm8916-surnia-p2b.dtb
-#dtb-$(CONFIG_ARCH_MSM8916) += msm8916-surnia-p2bd.dtb
-dtb-$(CONFIG_ARCH_MSM8916) += msm8916-surnia-p3.dtb
-dtb-$(CONFIG_ARCH_MSM8916) += msm8916-surnia-p3d.dtb
-endif
-
-ifeq ($(CONFIG_MMI_OSPREY_DTB),y)
-# Osprey
-#dtb-$(CONFIG_ARCH_MSM8916) += msm8916-osprey-p0.dtb
-#dtb-$(CONFIG_ARCH_MSM8916) += msm8916-osprey-p1a.dtb
-#dtb-$(CONFIG_ARCH_MSM8916) += msm8916-osprey-p1ad.dtb
-#dtb-$(CONFIG_ARCH_MSM8916) += msm8916-osprey-p1b.dtb
-#dtb-$(CONFIG_ARCH_MSM8916) += msm8916-osprey-p1bd.dtb
-#dtb-$(CONFIG_ARCH_MSM8916) += msm8916-osprey-p2a.dtb
-#dtb-$(CONFIG_ARCH_MSM8916) += msm8916-osprey-p2ad.dtb
-dtb-$(CONFIG_ARCH_MSM8916) += msm8916-osprey-p2b.dtb
-dtb-$(CONFIG_ARCH_MSM8916) += msm8916-osprey-p2bd.dtb
-endif
-
-# Motorola 8939 Devices
-ifeq ($(CONFIG_MMI_LUX_DTB),y)
-#dtb-$(CONFIG_ARCH_MSM8916) += msm8939-lux-p0.dtb
-#dtb-$(CONFIG_ARCH_MSM8916) += msm8939-lux-p1.dtb
-#dtb-$(CONFIG_ARCH_MSM8916) += msm8939-lux-p1b.dtb
-#dtb-$(CONFIG_ARCH_MSM8916) += msm8939-lux-p1c.dtb
-dtb-$(CONFIG_ARCH_MSM8916) += msm8939-lux-p2a.dtb
-dtb-$(CONFIG_ARCH_MSM8916) += msm8939-lux-p2c.dtb
-endif
-
-# Merlin
-ifeq ($(CONFIG_MMI_MERLIN_DTB),y)
-dtb-$(CONFIG_ARCH_MSM8916) += msm8939-merlin-p0.dtb
-dtb-$(CONFIG_ARCH_MSM8916) += msm8939-merlin-p1.dtb
-dtb-$(CONFIG_ARCH_MSM8916) += msm8939-merlin-p1v3.dtb
-endif
-
-ifeq ($(CONFIG_MMI_DEVICE_DTBS),y)
-# Add 1k of padding to the DTBs to allow for environment variables
-# to be runtime added by the bootloader (i.e. /chosen properties)
-DTC_FLAGS := -p 1024
-endif
+	msm8992-rumi.dtb \
+	msm8992-cdp.dtb \
+	msm8992-mtp.dtb \
+	msm8992-pmi8994-pm8004-cdp.dtb \
+	msm8992-pmi8994-pm8004-mtp.dtb
+dtb-$(CONFIG_ARCH_MDMFERMIUM) += mdmfermium-rumi.dtb
 
 DTB_NAMES := $(subst $\",,$(CONFIG_BUILD_ARM_APPENDED_DTB_IMAGE_NAMES))
 ifneq ($(DTB_NAMES),)

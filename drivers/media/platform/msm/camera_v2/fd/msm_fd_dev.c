@@ -1,4 +1,4 @@
-/* Copyright (c) 2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2014-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -237,7 +237,7 @@ static int msm_fd_start_streaming(struct vb2_queue *q, unsigned int count)
 	struct fd_ctx *ctx = vb2_get_drv_priv(q);
 	int ret;
 
-	if (!ctx->work_buf.handle) {
+	if (ctx->work_buf.fd == -1) {
 		dev_err(ctx->fd_device->dev, "Missing working buffer\n");
 		return -EINVAL;
 	}
@@ -349,7 +349,7 @@ static int msm_fd_open(struct file *file)
 	ctx->work_buf.fd = -1;
 
 	/* Set ctx defaults */
-	ctx->settings.speed = ctx->fd_device->clk_rates_num;
+	ctx->settings.speed = ctx->fd_device->clk_rates_num - 1;
 	ctx->settings.angle_index = MSM_FD_DEF_ANGLE_IDX;
 	ctx->settings.direction_index = MSM_FD_DEF_DIR_IDX;
 	ctx->settings.min_size_index = MSM_FD_DEF_MIN_SIZE_IDX;
@@ -375,14 +375,7 @@ static int msm_fd_open(struct file *file)
 		goto error_vb2_queue_init;
 	}
 
-	ctx->mem_pool.client = msm_ion_client_create(MSM_FD_DRV_NAME);
-	if (IS_ERR_OR_NULL(ctx->mem_pool.client)) {
-		dev_err(device->dev, "Error ion client create\n");
-		goto error_ion_client_create;
-	}
 	ctx->mem_pool.fd_device = ctx->fd_device;
-	ctx->mem_pool.domain_num = ctx->fd_device->iommu_domain_num;
-
 	ctx->stats = vmalloc(sizeof(*ctx->stats) * MSM_FD_MAX_RESULT_BUFS);
 	if (!ctx->stats) {
 		dev_err(device->dev, "No memory for face statistics\n");
@@ -393,8 +386,6 @@ static int msm_fd_open(struct file *file)
 	return 0;
 
 error_stats_vmalloc:
-	ion_client_destroy(ctx->mem_pool.client);
-error_ion_client_create:
 	vb2_queue_release(&ctx->vb2_q);
 error_vb2_queue_init:
 	v4l2_fh_del(&ctx->fh);
@@ -415,10 +406,8 @@ static int msm_fd_release(struct file *file)
 
 	vfree(ctx->stats);
 
-	if (ctx->work_buf.handle)
+	if (ctx->work_buf.fd != -1)
 		msm_fd_hw_unmap_buffer(&ctx->work_buf);
-
-	ion_client_destroy(ctx->mem_pool.client);
 
 	v4l2_fh_del(&ctx->fh);
 	v4l2_fh_exit(&ctx->fh);
@@ -804,6 +793,7 @@ static int msm_fd_guery_ctrl(struct file *file, void *fh,
 		a->step = 1;
 		strlcpy(a->name, "msm fd face speed idx",
 			sizeof(a->name));
+		break;
 	case V4L2_CID_FD_FACE_ANGLE:
 		a->type = V4L2_CTRL_TYPE_INTEGER;
 		a->default_value =  msm_fd_angle[MSM_FD_DEF_ANGLE_IDX];
@@ -898,7 +888,7 @@ static int msm_fd_g_ctrl(struct file *file, void *fh, struct v4l2_control *a)
 		a->value = ctx->format.size->work_size;
 		break;
 	case V4L2_CID_FD_WORK_MEMORY_FD:
-		if (!ctx->work_buf.handle)
+		if (ctx->work_buf.fd == -1)
 			return -EINVAL;
 
 		a->value = ctx->work_buf.fd;
@@ -924,8 +914,8 @@ static int msm_fd_s_ctrl(struct file *file, void *fh, struct v4l2_control *a)
 
 	switch (a->id) {
 	case V4L2_CID_FD_SPEED:
-		if (a->value > ctx->fd_device->clk_rates_num)
-			a->value = ctx->fd_device->clk_rates_num;
+		if (a->value > ctx->fd_device->clk_rates_num - 1)
+			a->value = ctx->fd_device->clk_rates_num - 1;
 		else if (a->value < 0)
 			a->value = 0;
 
@@ -968,9 +958,8 @@ static int msm_fd_s_ctrl(struct file *file, void *fh, struct v4l2_control *a)
 			a->value = ctx->format.size->work_size;
 		break;
 	case V4L2_CID_FD_WORK_MEMORY_FD:
-		if (ctx->work_buf.handle)
+		if (ctx->work_buf.fd != -1)
 			msm_fd_hw_unmap_buffer(&ctx->work_buf);
-
 		if (a->value >= 0) {
 			ret = msm_fd_hw_map_buffer(&ctx->mem_pool,
 				a->value, &ctx->work_buf);
@@ -1176,6 +1165,10 @@ static void msm_fd_wq_handler(struct work_struct *work)
 	/* We have the data from fd hw, we can start next processing */
 	msm_fd_hw_schedule_next_buffer(fd);
 
+	/* Return buffer to vb queue */
+	active_buf->vb.v4l2_buf.sequence = ctx->fh.sequence;
+	vb2_buffer_done(&active_buf->vb, VB2_BUF_STATE_DONE);
+
 	/* Sent event */
 	memset(&event, 0x00, sizeof(event));
 	event.type = MSM_EVENT_FD;
@@ -1185,29 +1178,8 @@ static void msm_fd_wq_handler(struct work_struct *work)
 	fd_event->frame_id = ctx->sequence;
 	v4l2_event_queue_fh(&ctx->fh, &event);
 
-	/* Return buffer to vb queue */
-	active_buf->vb.v4l2_buf.sequence = ctx->fh.sequence;
-	vb2_buffer_done(&active_buf->vb, VB2_BUF_STATE_DONE);
-
 	/* Release buffer from the device */
 	msm_fd_hw_buffer_done(fd, active_buf);
-}
-
-/*
- * msm_fd_irq - Fd device irq handler.
- * @irq: Pointer to work struct.
- * @dev_id: Pointer to fd device.
- */
-static irqreturn_t msm_fd_irq(int irq, void *dev_id)
-{
-	struct msm_fd_device *fd = dev_id;
-
-	if (msm_fd_hw_is_finished(fd))
-		queue_work(fd->work_queue, &fd->work);
-	else
-		dev_err(fd->dev, "Something wrong! FD still running\n");
-
-	return IRQ_HANDLED;
 }
 
 /*
@@ -1226,6 +1198,8 @@ static int fd_probe(struct platform_device *pdev)
 
 	mutex_init(&fd->lock);
 	spin_lock_init(&fd->slock);
+	init_completion(&fd->hw_halt_completion);
+	INIT_LIST_HEAD(&fd->buf_queue);
 	fd->dev = &pdev->dev;
 
 	/* Get resources */
@@ -1249,35 +1223,27 @@ static int fd_probe(struct platform_device *pdev)
 		goto error_get_clocks;
 	}
 
-	ret = msm_fd_hw_get_iommu(fd);
+	ret = msm_fd_hw_get_bus(fd);
 	if (ret < 0) {
-		dev_err(&pdev->dev, "Fail to get iommu\n");
-		goto error_iommu_get;
+		dev_err(&pdev->dev, "Fail to get bus\n");
+		goto error_get_bus;
 	}
 
-	fd->irq_num = platform_get_irq(pdev, 0);
-	if (fd->irq_num < 0) {
-		dev_err(&pdev->dev, "Can not get fd irq resource\n");
-		ret = -ENODEV;
-		goto error_irq_request;
+	/* Get face detect hw before read engine revision */
+	ret = msm_fd_hw_get(fd, 0);
+	if (ret < 0) {
+		dev_err(&pdev->dev, "Fail to get hw\n");
+		goto error_get_clocks;
 	}
+	fd->hw_revision = msm_fd_hw_get_revision(fd);
 
-	ret = devm_request_irq(&pdev->dev, fd->irq_num, msm_fd_irq,
-		IRQF_TRIGGER_RISING, dev_name(&pdev->dev), fd);
-	if (ret) {
-		dev_err(&pdev->dev, "Can not claim IRQ %d\n", fd->irq_num);
-		goto error_irq_request;
-	}
+	msm_fd_hw_put(fd);
 
-	fd->work_queue = alloc_workqueue(MSM_FD_DRV_NAME,
-		WQ_HIGHPRI | WQ_NON_REENTRANT | WQ_UNBOUND, 0);
-	if (!fd->work_queue) {
-		dev_err(&pdev->dev, "Can not register workqueue\n");
-		ret = -ENOMEM;
-		goto error_alloc_workqueue;
+	ret = msm_fd_hw_request_irq(pdev, fd, msm_fd_wq_handler);
+	if (ret < 0) {
+		dev_err(&pdev->dev, "Fail request irq\n");
+		goto error_hw_get_request_irq;
 	}
-	INIT_WORK(&fd->work, msm_fd_wq_handler);
-	INIT_LIST_HEAD(&fd->buf_queue);
 
 	/* v4l2 device */
 	ret = v4l2_device_register(&pdev->dev, &fd->v4l2_dev);
@@ -1311,12 +1277,10 @@ static int fd_probe(struct platform_device *pdev)
 error_video_register:
 	v4l2_device_unregister(&fd->v4l2_dev);
 error_v4l2_register:
-	destroy_workqueue(fd->work_queue);
-error_alloc_workqueue:
-	devm_free_irq(&pdev->dev, fd->irq_num, fd);
-error_irq_request:
-	msm_fd_hw_put_iommu(fd);
-error_iommu_get:
+	msm_fd_hw_release_irq(fd);
+error_hw_get_request_irq:
+	msm_fd_hw_put_bus(fd);
+error_get_bus:
 	msm_fd_hw_put_clocks(fd);
 error_get_clocks:
 	regulator_put(fd->vdd);
@@ -1341,10 +1305,9 @@ static int fd_device_remove(struct platform_device *pdev)
 		return 0;
 	}
 	video_unregister_device(&fd->video);
-	destroy_workqueue(fd->work_queue);
 	v4l2_device_unregister(&fd->v4l2_dev);
-	devm_free_irq(&pdev->dev, fd->irq_num, fd);
-	msm_fd_hw_put_iommu(fd);
+	msm_fd_hw_release_irq(fd);
+	msm_fd_hw_put_bus(fd);
 	msm_fd_hw_put_clocks(fd);
 	regulator_put(fd->vdd);
 	msm_fd_hw_release_mem_resources(fd);

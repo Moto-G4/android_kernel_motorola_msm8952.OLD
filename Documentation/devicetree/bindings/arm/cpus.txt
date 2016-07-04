@@ -197,6 +197,20 @@ nodes to be present and contain the properties described below.
 			  property identifying a 64-bit zero-initialised
 			  memory location.
 
+	- efficiency
+		Usage: optional.
+		Value type: <u32>
+		Definition:
+			# Specifies the CPU efficiency. The CPU efficiency is
+			a unit less number and it is intended to show relative
+			performance of CPUs when normalized for clock frequency
+			(instructions per cycle performance).
+
+			The efficiency of a CPU can vary across SoCs depending
+			on the cache size, bus interconnect frequencies etc.
+			This value overrides the default efficiency value
+			defined for the corresponding CPU architecture.
+
 	- qcom,saw
 		Usage: required for systems that have an "enable-method"
 		       property value of "qcom,kpss-acc-v1" or
@@ -211,6 +225,11 @@ nodes to be present and contain the properties described below.
 		Value type: <phandle>
 		Definition: Specifies the ACC[2] node associated with this CPU.
 
+	- qcom,ldo
+		Usage: required for systems that need LDO configuration.
+		Value type: <phandle>
+		Definition: Specifies the LDO reference node associated with
+			    this cpu.
 
 Example 1 (dual-cluster big.LITTLE system 32-bit):
 

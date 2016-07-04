@@ -1,4 +1,5 @@
 # UAPI Header export list
+header-y += android/
 header-y += byteorder/
 header-y += can/
 header-y += caif/
@@ -142,6 +143,7 @@ header-y += genetlink.h
 header-y += gfs2_ondisk.h
 header-y += gigaset_dev.h
 header-y += hbtp_input.h
+header-y += hbtp_vm.h
 header-y += hdlc.h
 header-y += hdlcdrv.h
 header-y += hdreg.h
@@ -416,7 +418,6 @@ header-y += sound.h
 header-y += soundcard.h
 header-y += stat.h
 header-y += stddef.h
-header-y += stml0xx.h
 header-y += string.h
 header-y += suspend_ioctls.h
 header-y += swab.h
@@ -486,3 +487,5 @@ header-y += hw_breakpoint.h
 header-y += android_pmem.h
 header-y += tsc.h
 header-y += danipc_ioctl.h
+header-y += shub_ctrl.h
+header-y += minifb.h

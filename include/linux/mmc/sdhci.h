@@ -264,8 +264,6 @@ struct sdhci_host {
 	struct tasklet_struct finish_tasklet;
 
 	struct timer_list timer;	/* Timer for timeouts */
-	unsigned long timeout_jiffies;	/* Current timeout in jiffies */
-	unsigned int last_blocks;	/* Blocks transferred since last timeout */
 
 	u32 caps;		/* Alternative CAPABILITY_0 */
 	u32 caps1;		/* Alternative CAPABILITY_1 */
@@ -286,14 +284,18 @@ struct sdhci_host {
 	enum sdhci_host_qos_policy last_qos_policy;
 
 	bool host_use_default_qos;
-	unsigned int pm_qos_dbg_tracer;         /* dbg tracer for PM QoS request */
-	struct device_attribute pm_qos_dbg;
+	unsigned int pm_qos_timeout_us;         /* timeout for PM QoS request */
+	struct device_attribute pm_qos_tout;
 	struct delayed_work pm_qos_work;
+	struct mutex qos_lock;
 
 	struct sdhci_next next_data;
 	ktime_t data_start_time;
 	struct mutex ios_mutex;
 	enum sdhci_power_policy power_policy;
+
+	bool is_crypto_en;
+	bool crypto_reset_reqd;
 
 	bool irq_enabled; /* host irq status flag */
 	bool async_int_supp;  /* async support to rxv int, when clks are off */
@@ -303,6 +305,7 @@ struct sdhci_host {
 	int reset_wa_applied; /* reset workaround status */
 	ktime_t reset_wa_t; /* time when the reset workaround is applied */
 	int reset_wa_cnt; /* total number of times workaround is used */
+	struct cmdq_host *cq_host;
 
 	unsigned long private[0] ____cacheline_aligned;
 };

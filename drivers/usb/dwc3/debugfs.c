@@ -758,6 +758,8 @@ static int dwc3_ep_trbs_show(struct seq_file *s, void *unused)
 
 	spin_lock_irqsave(&dwc->lock, flags);
 	dep = dwc->eps[ep_num];
+	if (!dep->trb_pool)
+		return 0;
 
 	seq_printf(s, "%s trb pool: flags:0x%x freeslot:%d busyslot:%d\n",
 		dep->name, dep->flags, dep->free_slot, dep->busy_slot);
@@ -793,7 +795,7 @@ module_param(ep_addr_txdbg_mask, uint, S_IRUGO | S_IWUSR);
 #define DBG_DATA_MSG   64UL
 
 /* Maximum number of messages */
-#define DBG_DATA_MAX   128UL
+#define DBG_DATA_MAX   2048UL
 
 static struct {
 	char     (buf[DBG_DATA_MAX])[DBG_DATA_MSG];   /* buffer */
@@ -1191,6 +1193,9 @@ static int dwc3_gadget_int_events_show(struct seq_file *s, void *unused)
 	for (i = 0; i < MAX_INTR_STATS; i++)
 		seq_printf(s, "%d\t", dwc->bh_completion_time[i]);
 	seq_puts(s, "\n(usec)\n");
+
+	seq_printf(s, "t_pwr evt irq : %lld\t",
+			ktime_to_us(dwc->t_pwr_evt_irq));
 
 	spin_unlock_irqrestore(&dwc->lock, flags);
 	return 0;

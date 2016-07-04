@@ -39,6 +39,7 @@
 #include "palTimer.h"
 #include "csrLinkList.h"
 #include "smsDebug.h"
+#include "sme_Trace.h"
 #include "pmcApi.h"
 #include "pmc.h"
 #include "cfgApi.h"
@@ -113,15 +114,6 @@ eHalStatus pmcOpen (tHalHandle hHal)
         pmcLog(pMac, LOGE, FL("Cannot allocate timer for traffic measurement"));
         return eHAL_STATUS_FAILURE;
     }
-
-#ifdef FEATURE_WLAN_DIAG_SUPPORT    
-    /* Allocate a timer used to report current PMC state through periodic DIAG event */
-    if (vos_timer_init(&pMac->pmc.hDiagEvtTimer, VOS_TIMER_TYPE_SW, pmcDiagEvtTimerExpired, hHal) != VOS_STATUS_SUCCESS)
-    {
-        pmcLog(pMac, LOGE, FL("Cannot allocate timer for diag event reporting"));
-        return eHAL_STATUS_FAILURE;
-    }
-#endif
 
     //Initialize the default value for Bmps related config. 
     pMac->pmc.bmpsConfig.trafficMeasurePeriod = BMPS_TRAFFIC_TIMER_DEFAULT;
@@ -251,13 +243,6 @@ eHalStatus pmcStart (tHalHandle hHal)
                        sizeof(tSirMacHTMIMOPowerSaveState)) != eHAL_STATUS_SUCCESS)
         return eHAL_STATUS_FAILURE;
 
-#ifdef FEATURE_WLAN_DIAG_SUPPORT 
-    if (pmcStartDiagEvtTimer(hHal) != eHAL_STATUS_SUCCESS)
-    {
-       return eHAL_STATUS_FAILURE;
-    }
-#endif
-
 #if defined(ANI_LOGDUMP)
     pmcDumpInit(hHal);
 #endif
@@ -296,10 +281,6 @@ eHalStatus pmcStop (tHalHandle hHal)
     }
 
     pmcStopTrafficTimer(hHal);
-
-#ifdef FEATURE_WLAN_DIAG_SUPPORT    
-    pmcStopDiagEvtTimer(hHal);
-#endif
 
     if (vos_timer_stop(&pMac->pmc.hExitPowerSaveTimer) != VOS_STATUS_SUCCESS)
     {
@@ -360,12 +341,6 @@ eHalStatus pmcClose (tHalHandle hHal)
     {
         pmcLog(pMac, LOGE, FL("Cannot deallocate traffic timer"));
     }
-#ifdef FEATURE_WLAN_DIAG_SUPPORT    
-    if (vos_timer_destroy(&pMac->pmc.hDiagEvtTimer) != VOS_STATUS_SUCCESS)
-    {
-        pmcLog(pMac, LOGE, FL("Cannot deallocate timer for diag event reporting"));
-    }
-#endif
     if (vos_timer_destroy(&pMac->pmc.hExitPowerSaveTimer) != VOS_STATUS_SUCCESS)
     {
         pmcLog(pMac, LOGE, FL("Cannot deallocate exit power save mode timer"));
@@ -1258,7 +1233,7 @@ static void pmcProcessResponse( tpAniSirGlobal pMac, tSirSmeRsp *pMsg )
     {
         pCommand = GET_BASE_ADDR(pEntry, tSmeCmd, Link);
 
-        pmcLog(pMac, LOG2, FL("process message = %d"), pMsg->messageType);
+        pmcLog(pMac, LOG2, FL("process message = 0x%x"), pMsg->messageType);
 
     /* Process each different type of message. */
     switch (pMsg->messageType)
@@ -1442,7 +1417,7 @@ static void pmcProcessResponse( tpAniSirGlobal pMac, tSirSmeRsp *pMsg )
         case eWNI_PMC_ENTER_UAPSD_RSP:
             pmcLog(pMac, LOG2, FL("Rcvd eWNI_PMC_ENTER_UAPSD_RSP with status = %d"), pMsg->statusCode);
             if( eSmeCommandEnterUapsd != pCommand->command )
-        {
+            {
                 pmcLog(pMac, LOGW, FL("Rcvd eWNI_PMC_ENTER_UAPSD_RSP without request"));
                 fRemoveCommand = eANI_BOOLEAN_FALSE;
                 break;
@@ -1455,23 +1430,32 @@ static void pmcProcessResponse( tpAniSirGlobal pMac, tSirSmeRsp *pMsg )
                 break;
             }
 
-         /* Enter UAPSD State if response indicates success. */
+            /* Enter UAPSD State if response indicates success. */
             if (pMsg->statusCode == eSIR_SME_SUCCESS) 
             {
                 pmcEnterUapsdState(pMac);
                 pmcDoStartUapsdCallbacks(pMac, eHAL_STATUS_SUCCESS);
-         }
-         /* If response is failure, then we try to put the chip back in
-            BMPS mode*/
-            else {
+            }
+            else
+            {
+                /* If response is failure, then we try to put the chip back in
+                   BMPS mode*/
+                tANI_BOOLEAN OrigUapsdReqState = pMac->pmc.uapsdSessionRequired;
                 pmcLog(pMac, LOGE, "PMC: response message to request to enter "
                    "UAPSD indicates failure, status %d", pMsg->statusCode);
+
                 //Need to reset the UAPSD flag so pmcEnterBmpsState won't try to enter UAPSD.
                 pMac->pmc.uapsdSessionRequired = FALSE;
                 pmcEnterBmpsState(pMac);
-                //UAPSD will not be retied in this case so tell requester we are done with failure
-                pmcDoStartUapsdCallbacks(pMac, eHAL_STATUS_FAILURE);
-         }
+
+                if (pMsg->statusCode != eSIR_SME_UAPSD_REQ_INVALID)
+                {
+                    //UAPSD will not be retied in this case so tell requester we are done with failure
+                    pmcDoStartUapsdCallbacks(pMac, eHAL_STATUS_FAILURE);
+                }
+                else
+                    pMac->pmc.uapsdSessionRequired = OrigUapsdReqState;
+            }
          break;
 
       /* We got a response to our Stop UAPSD request.  */
@@ -1597,7 +1581,7 @@ void pmcMessageProcessor (tHalHandle hHal, tSirSmeRsp *pMsg)
 {
     tpAniSirGlobal pMac = PMAC_STRUCT(hHal);
 
-    pmcLog(pMac, LOG2, FL("Entering pmcMessageProcessor, message type %d"), pMsg->messageType);
+    pmcLog(pMac, LOG2, FL("Message type %d"), pMsg->messageType);
 
     switch( pMsg->messageType )
     {
@@ -2104,7 +2088,7 @@ eHalStatus pmcDeregisterDeviceStateUpdateInd (tHalHandle hHal,
     tListElem *pEntry;
     tpDeviceStateUpdateIndEntry pDeviceStateUpdateIndEntry;
 
-    pmcLog(pMac, LOG2, FL("Entering pmcDeregisterDeviceStateUpdateInd"));
+    pmcLog(pMac, LOG2, FL(": Enter"));
 
     /* Find entry in the power save update routine list that matches
        the specified routine and remove it. */
@@ -2182,7 +2166,6 @@ eHalStatus pmcWowlAddBcastPattern (
 
 #ifdef FEATURE_WLAN_DIAG_SUPPORT
     vos_log_powersave_wow_add_ptrn_pkt_type *log_ptr = NULL;
-    WLAN_VOS_DIAG_LOG_ALLOC(log_ptr, vos_log_powersave_wow_add_ptrn_pkt_type, LOG_WLAN_POWERSAVE_WOW_ADD_PTRN_C);
 #endif //#ifdef FEATURE_WLAN_DIAG_SUPPORT
 
     pmcLog(pMac, LOG2, "PMC: entering pmcWowlAddBcastPattern");
@@ -2200,6 +2183,8 @@ eHalStatus pmcWowlAddBcastPattern (
     }
 
 #ifdef FEATURE_WLAN_DIAG_SUPPORT
+    WLAN_VOS_DIAG_LOG_ALLOC(log_ptr, vos_log_powersave_wow_add_ptrn_pkt_type,
+        LOG_WLAN_POWERSAVE_WOW_ADD_PTRN_C);
     if( log_ptr )
     {
        log_ptr->pattern_id = pattern->ucPatternId;
@@ -2216,9 +2201,9 @@ eHalStatus pmcWowlAddBcastPattern (
        /* 1 bit in the pattern mask denotes 1 byte of pattern hence pattern mask size is 1/8 */
        vos_mem_copy(log_ptr->pattern_mask, pattern->ucPatternMask,
                     SIR_WOWL_BCAST_PATTERN_MAX_SIZE >> 3);
+       WLAN_VOS_DIAG_LOG_REPORT(log_ptr);
     }
 
-    WLAN_VOS_DIAG_LOG_REPORT(log_ptr);
 #endif
 
 
@@ -2594,6 +2579,8 @@ eHalStatus pmcSetHostOffload (tHalHandle hHal, tpSirHostOffloadReq pRequest,
     msg.type = WDA_SET_HOST_OFFLOAD;
     msg.reserved = 0;
     msg.bodyptr = pRequestBuf;
+    MTRACE(vos_trace(VOS_MODULE_ID_SME,
+                 TRACE_CODE_SME_TX_WDA_MSG, sessionId, msg.type));
     if(VOS_STATUS_SUCCESS != vos_mq_post_message(VOS_MODULE_ID_WDA, &msg))
     {
         VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_ERROR, "%s: Not able to post WDA_SET_HOST_OFFLOAD message to WDA", __func__);
@@ -2647,6 +2634,8 @@ eHalStatus pmcSetKeepAlive (tHalHandle hHal, tpSirKeepAliveReq pRequest, tANI_U8
     msg.type = WDA_SET_KEEP_ALIVE;
     msg.reserved = 0;
     msg.bodyptr = pRequestBuf;
+    MTRACE(vos_trace(VOS_MODULE_ID_SME,
+                 TRACE_CODE_SME_TX_WDA_MSG, sessionId, msg.type));
     if(VOS_STATUS_SUCCESS != vos_mq_post_message(VOS_MODULE_ID_WDA, &msg))
     {
         VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_ERROR, "%s: "
@@ -2699,6 +2688,8 @@ eHalStatus pmcSetNSOffload (tHalHandle hHal, tpSirHostOffloadReq pRequest,
     msg.type = WDA_SET_NS_OFFLOAD;
     msg.reserved = 0;
     msg.bodyptr = pRequestBuf;
+    MTRACE(vos_trace(VOS_MODULE_ID_SME,
+                 TRACE_CODE_SME_TX_WDA_MSG, sessionId, msg.type));
     if(VOS_STATUS_SUCCESS != vos_mq_post_message(VOS_MODULE_ID_WDA, &msg))
     {
         VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_ERROR, "%s: Not able to post SIR_HAL_SET_HOST_OFFLOAD message to HAL", __func__);
@@ -3103,6 +3094,8 @@ eHalStatus pmcSetRssiFilter(tHalHandle hHal,   v_U8_t        rssiThreshold)
     msg.type = WDA_SET_RSSI_FILTER_REQ;
     msg.reserved = 0;
     msg.bodyptr = pRequestBuf;
+    MTRACE(vos_trace(VOS_MODULE_ID_SME,
+                 TRACE_CODE_SME_TX_WDA_MSG, NO_SESSION, msg.type));
     if (!VOS_IS_STATUS_SUCCESS(vos_mq_post_message(VOS_MODULE_ID_WDA, &msg)))
     {
         VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_ERROR, "%s: Not able to post WDA_SET_PNO_REQ message to WDA", __func__);
@@ -3154,6 +3147,8 @@ eHalStatus pmcUpdateScanParams(tHalHandle hHal, tCsrConfig *pRequest, tCsrChanne
     msg.type = WDA_UPDATE_SCAN_PARAMS_REQ;
     msg.reserved = 0;
     msg.bodyptr = pRequestBuf;
+    MTRACE(vos_trace(VOS_MODULE_ID_SME,
+                 TRACE_CODE_SME_TX_WDA_MSG, NO_SESSION, msg.type));
     if (!VOS_IS_STATUS_SUCCESS(vos_mq_post_message(VOS_MODULE_ID_WDA, &msg)))
     {
         VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_ERROR, "%s: Not able to post WDA_UPDATE_SCAN_PARAMS message to WDA", __func__);
@@ -3193,6 +3188,8 @@ eHalStatus pmcSetPowerParams(tHalHandle hHal,   tSirSetPowerParamsReq*  pwParams
     msg.reserved = 0;
     msg.bodyptr = pRequestBuf;
 
+    MTRACE(vos_trace(VOS_MODULE_ID_SME,
+                 TRACE_CODE_SME_TX_WDA_MSG, NO_SESSION, msg.type));
     if(VOS_STATUS_SUCCESS != vos_mq_post_message(VOS_MODULE_ID_WDA, &msg))
     {
         VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_ERROR, "%s: Not able to post WDA_SET_POWER_PARAMS_REQ message to WDA", __func__);
@@ -3256,6 +3253,8 @@ eHalStatus pmcGetFilterMatchCount
     pMac->pmc.FilterMatchCountCB = callbackRoutine;
     pMac->pmc.FilterMatchCountCBContext = callbackContext;
 
+    MTRACE(vos_trace(VOS_MODULE_ID_SME,
+                 TRACE_CODE_SME_TX_WDA_MSG, sessionId, msg.type));
     if(VOS_STATUS_SUCCESS != vos_mq_post_message(VOS_MODULE_ID_WDA, &msg))
     {
         VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_ERROR, 
@@ -3313,6 +3312,8 @@ eHalStatus pmcSetGTKOffload (tHalHandle hHal, tpSirGtkOffloadParams pGtkOffload,
     msg.type = WDA_GTK_OFFLOAD_REQ;
     msg.reserved = 0;
     msg.bodyptr = pRequestBuf;
+    MTRACE(vos_trace(VOS_MODULE_ID_SME,
+                 TRACE_CODE_SME_TX_WDA_MSG, sessionId, msg.type));
     if (!VOS_IS_STATUS_SUCCESS(vos_mq_post_message(VOS_MODULE_ID_WDA, &msg)))
     {
         VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_ERROR, "%s: Not able to post "
@@ -3378,6 +3379,8 @@ eHalStatus pmcGetGTKOffload(tHalHandle hHal, GTKOffloadGetInfoCallback callbackR
     pMac->pmc.GtkOffloadGetInfoCB = callbackRoutine;
     pMac->pmc.GtkOffloadGetInfoCBContext = callbackContext;
 
+    MTRACE(vos_trace(VOS_MODULE_ID_SME,
+                 TRACE_CODE_SME_TX_WDA_MSG, sessionId, msg.type));
     if (!VOS_IS_STATUS_SUCCESS(vos_mq_post_message(VOS_MODULE_ID_WDA, &msg)))
     {
         VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_ERROR, "%s: Not able to post WDA_GTK_OFFLOAD_GETINFO_REQ message to WDA", 
@@ -3450,6 +3453,8 @@ eHalStatus pmcSetBatchScanReq(tHalHandle hHal, tSirSetBatchScanReq *pRequest,
     msg.type     = WDA_SET_BATCH_SCAN_REQ;
     msg.reserved = 0;
     msg.bodyptr  = pRequestBuf;
+    MTRACE(vos_trace(VOS_MODULE_ID_SME,
+                 TRACE_CODE_SME_TX_WDA_MSG, sessionId, msg.type));
     if (!VOS_IS_STATUS_SUCCESS(vos_mq_post_message(VOS_MODULE_ID_WDA, &msg)))
     {
         VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_ERROR,
@@ -3502,6 +3507,8 @@ eHalStatus pmcTriggerBatchScanResultInd
     msg.type     = WDA_TRIGGER_BATCH_SCAN_RESULT_IND;
     msg.reserved = 0;
     msg.bodyptr  = pRequestBuf;
+    MTRACE(vos_trace(VOS_MODULE_ID_SME,
+                 TRACE_CODE_SME_TX_WDA_MSG, sessionId, msg.type));
     if (!VOS_IS_STATUS_SUCCESS(vos_mq_post_message(VOS_MODULE_ID_WDA, &msg)))
     {
         VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_ERROR,
@@ -3543,6 +3550,8 @@ eHalStatus pmcStopBatchScanInd(tHalHandle hHal, tSirStopBatchScanInd *pRequest,
     msg.type     = WDA_STOP_BATCH_SCAN_IND;
     msg.reserved = 0;
     msg.bodyptr  = pRequestBuf;
+    MTRACE(vos_trace(VOS_MODULE_ID_SME,
+                 TRACE_CODE_SME_TX_WDA_MSG, sessionId, msg.type));
     if (!VOS_IS_STATUS_SUCCESS(vos_mq_post_message(VOS_MODULE_ID_WDA, &msg)))
     {
         VOS_TRACE(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_ERROR,

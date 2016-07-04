@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2013-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -21,6 +21,7 @@
 #include <linux/rmnet_data.h>
 #include <linux/spinlock.h>
 #include <linux/workqueue.h>
+#include <linux/time.h>
 #include <linux/net_map.h>
 #include <linux/ip.h>
 #include <linux/ipv6.h>
@@ -39,11 +40,23 @@
 RMNET_LOG_MODULE(RMNET_DATA_LOGMASK_MAPD);
 
 /* ***************** Local Definitions ************************************** */
+
+long agg_time_limit __read_mostly = 1000000L;
+module_param(agg_time_limit, long, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(agg_time_limit, "Maximum time packets sit in the agg buf");
+
+long agg_bypass_time __read_mostly = 10000000L;
+module_param(agg_bypass_time, long, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(agg_bypass_time, "Skip agg when apart spaced more than this");
+
+
 struct agg_work {
 	struct delayed_work work;
 	struct rmnet_phys_ep_conf_s *config;
 };
 
+#define RMNET_MAP_DEAGGR_SPACING  64
+#define RMNET_MAP_DEAGGR_HEADROOM (RMNET_MAP_DEAGGR_SPACING/2)
 /******************************************************************************/
 
 /**
@@ -97,10 +110,10 @@ struct rmnet_map_header_s *rmnet_map_add_map_header(struct sk_buff *skb,
  * @skb:        Source socket buffer containing multiple MAP frames
  * @config:     Physical endpoint configuration of the ingress device
  *
- * Source skb is cloned with skb_clone(). The new skb data and tail pointers are
- * modified to contain a single MAP frame. Clone happens with GFP_ATOMIC flags
- * set. User should keep calling deaggregate() on the source skb until 0 is
- * returned, indicating that there are no more packets to deaggregate.
+ * A whole new buffer is allocated for each portion of an aggregated frame.
+ * Caller should keep calling deaggregate() on the source skb until 0 is
+ * returned, indicating that there are no more packets to deaggregate. Caller
+ * is responsible for freeing the original skb.
  *
  * Return:
  *     - Pointer to new skb
@@ -129,15 +142,16 @@ struct sk_buff *rmnet_map_deaggregate(struct sk_buff *skb,
 		return 0;
 	}
 
-	skbn = skb_clone(skb, GFP_ATOMIC);
+	skbn = alloc_skb(packet_len + RMNET_MAP_DEAGGR_SPACING, GFP_ATOMIC);
 	if (!skbn)
 		return 0;
 
-	LOGD("Trimming to %d bytes", packet_len);
-	LOGD("before skbn->len = %d", skbn->len);
-	skb_trim(skbn, packet_len);
+	skbn->dev = skb->dev;
+	skb_reserve(skbn, RMNET_MAP_DEAGGR_HEADROOM);
+	skb_put(skbn, packet_len);
+	memcpy(skbn->data, skb->data, packet_len);
 	skb_pull(skb, packet_len);
-	LOGD("after skbn->len = %d", skbn->len);
+
 
 	/* Some hardware can send us empty frames. Catch them */
 	if (ntohs(maph->pkt_len) == 0) {
@@ -148,7 +162,7 @@ struct sk_buff *rmnet_map_deaggregate(struct sk_buff *skb,
 
 	/* Sanity check */
 	ip_byte = (skbn->data[4]) & 0xF0;
-	if (ip_byte != 0x40 && ip_byte != 0x60) {
+	if (!RMNET_MAP_GET_CD_BIT(skbn) && ip_byte != 0x40 && ip_byte != 0x60) {
 		LOGM("Unknown IP type: 0x%02X", ip_byte);
 		rmnet_kfree_skb(skbn, RMNET_STATS_SKBFREE_DEAGG_UNKOWN_IP_TYP);
 		return 0;
@@ -188,6 +202,8 @@ static void rmnet_map_flush_packet_queue(struct work_struct *work)
 			skb = config->agg_skb;
 			agg_count = config->agg_count;
 			config->agg_skb = 0;
+			config->agg_count = 0;
+			memset(&(config->agg_time), 0, sizeof(struct timespec));
 		}
 		config->agg_state = RMNET_MAP_AGG_IDLE;
 	} else {
@@ -220,6 +236,7 @@ void rmnet_map_aggregate(struct sk_buff *skb,
 	struct agg_work *work;
 	unsigned long flags;
 	struct sk_buff *agg_skb;
+	struct timespec diff, last;
 	int size, rc, agg_count = 0;
 
 
@@ -234,11 +251,33 @@ void rmnet_map_aggregate(struct sk_buff *skb,
 
 new_packet:
 	spin_lock_irqsave(&config->agg_lock, flags);
+
+	memcpy(&last, &(config->agg_last), sizeof(struct timespec));
+	getnstimeofday(&(config->agg_last));
+
 	if (!config->agg_skb) {
+		/* Check to see if we should agg first. If the traffic is very
+		 * sparse, don't aggregate. We will need to tune this later
+		 */
+		diff = timespec_sub(config->agg_last, last);
+
+		if ((diff.tv_sec > 0) || (diff.tv_nsec > agg_bypass_time)) {
+			spin_unlock_irqrestore(&config->agg_lock, flags);
+			LOGL("delta t: %ld.%09lu\tcount: bypass", diff.tv_sec,
+			     diff.tv_nsec);
+			rmnet_stats_agg_pkts(1);
+			trace_rmnet_map_aggregate(skb, 0);
+			rc = dev_queue_xmit(skb);
+			rmnet_stats_queue_xmit(rc,
+					       RMNET_STATS_QUEUE_XMIT_AGG_SKIP);
+			return;
+		}
+
 		config->agg_skb = skb_copy_expand(skb, 0, size, GFP_ATOMIC);
 		if (!config->agg_skb) {
 			config->agg_skb = 0;
 			config->agg_count = 0;
+			memset(&(config->agg_time), 0, sizeof(struct timespec));
 			spin_unlock_irqrestore(&config->agg_lock, flags);
 			rmnet_stats_agg_pkts(1);
 			trace_rmnet_map_aggregate(skb, 0);
@@ -248,20 +287,25 @@ new_packet:
 			return;
 		}
 		config->agg_count = 1;
+		getnstimeofday(&(config->agg_time));
 		trace_rmnet_start_aggregation(skb);
 		rmnet_kfree_skb(skb, RMNET_STATS_SKBFREE_AGG_CPY_EXPAND);
 		goto schedule;
 	}
+	diff = timespec_sub(config->agg_last, config->agg_time);
 
-	if (skb->len > (config->egress_agg_size - config->agg_skb->len)) {
+	if (skb->len > (config->egress_agg_size - config->agg_skb->len)
+	    || (config->agg_count >= config->egress_agg_count)
+	    ||  (diff.tv_sec > 0) || (diff.tv_nsec > agg_time_limit)) {
 		rmnet_stats_agg_pkts(config->agg_count);
-		if (config->agg_count > 1)
-			LOGL("Agg count: %d", config->agg_count);
 		agg_skb = config->agg_skb;
 		agg_count = config->agg_count;
 		config->agg_skb = 0;
 		config->agg_count = 0;
+		memset(&(config->agg_time), 0, sizeof(struct timespec));
 		spin_unlock_irqrestore(&config->agg_lock, flags);
+		LOGL("delta t: %ld.%09lu\tcount: %d", diff.tv_sec,
+		     diff.tv_nsec, agg_count);
 		trace_rmnet_map_aggregate(skb, agg_count);
 		rc = dev_queue_xmit(agg_skb);
 		rmnet_stats_queue_xmit(rc,
@@ -584,8 +628,7 @@ static void rmnet_map_fill_ipv4_packet_ul_checksum_header(void *iphdr,
 
 	ul_header->checksum_start_offset = htons((unsigned short)
 		(skb_transport_header(skb) - (unsigned char *)iphdr));
-	ul_header->checksum_insert_offset = skb->csum_offset + (unsigned short)
-		(skb_transport_header(skb) - (unsigned char *)iphdr);
+	ul_header->checksum_insert_offset = skb->csum_offset;
 	ul_header->cks_en = 1;
 	if (ip4h->protocol == IPPROTO_UDP)
 		ul_header->udp_ip4_ind = 1;
@@ -604,8 +647,7 @@ static void rmnet_map_fill_ipv6_packet_ul_checksum_header(void *iphdr,
 
 	ul_header->checksum_start_offset = htons((unsigned short)
 		(skb_transport_header(skb) - (unsigned char *)iphdr));
-	ul_header->checksum_insert_offset = skb->csum_offset + (unsigned short)
-		(skb_transport_header(skb) - (unsigned char *)iphdr);
+	ul_header->checksum_insert_offset = skb->csum_offset;
 	ul_header->cks_en = 1;
 	ul_header->udp_ip4_ind = 0;
 	/* Changing checksum_insert_offset to network order */

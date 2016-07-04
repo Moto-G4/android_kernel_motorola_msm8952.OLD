@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -21,6 +21,7 @@
 #include "msm_vidc_common.h"
 #include <linux/delay.h>
 #include "vidc_hfi_api.h"
+#include "msm_vidc_dcvs.h"
 
 #define MAX_EVENTS 30
 
@@ -727,25 +728,27 @@ int output_buffer_cache_invalidate(struct msm_vidc_inst *inst,
 	return 0;
 }
 
+static bool valid_v4l2_buffer(struct v4l2_buffer *b,
+		struct msm_vidc_inst *inst) {
+	enum vidc_ports port =
+		!V4L2_TYPE_IS_MULTIPLANAR(b->type) ? MAX_PORT_NUM :
+		b->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE ? CAPTURE_PORT :
+		b->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE ? OUTPUT_PORT :
+								MAX_PORT_NUM;
+
+	return port != MAX_PORT_NUM &&
+		inst->fmts[port]->num_planes == b->length;
+}
+
 int msm_vidc_prepare_buf(void *instance, struct v4l2_buffer *b)
 {
 	struct msm_vidc_inst *inst = instance;
 
-	if (!inst || !b)
+	if (!inst || !b || !valid_v4l2_buffer(b, inst))
 		return -EINVAL;
 
-	if (!V4L2_TYPE_IS_MULTIPLANAR(b->type) || !b->length ||
-		(b->length > VIDEO_MAX_PLANES)) {
-		dprintk(VIDC_ERR, "%s: wrong input params\n",
-				__func__);
-		return -EINVAL;
-	}
-
-	if (is_dynamic_output_buffer_mode(b, inst)) {
-		dprintk(VIDC_ERR, "%s: not supported in dynamic buffer mode\n",
-				__func__);
-		return -EINVAL;
-	}
+	if (is_dynamic_output_buffer_mode(b, inst))
+		return 0;
 
 	/* Map the buffer only for non-kernel clients*/
 	if (b->m.planes[0].reserved[0]) {
@@ -765,7 +768,7 @@ EXPORT_SYMBOL(msm_vidc_prepare_buf);
 int msm_vidc_release_buffers(void *instance, int buffer_type)
 {
 	struct msm_vidc_inst *inst = instance;
-	struct buffer_info *bi, *dummy;
+	struct buffer_info *bi;
 	struct v4l2_buffer buffer_info;
 	struct v4l2_plane plane[VIDEO_MAX_PLANES];
 	int i, rc = 0;
@@ -806,10 +809,12 @@ int msm_vidc_release_buffers(void *instance, int buffer_type)
 				plane[i].m.userptr = bi->device_addr[i];
 				buffer_info.m.planes = plane;
 				dprintk(VIDC_DBG,
-					"Releasing buffer: %d, %d, %d\n",
+					"Releasing buffer: device_addr %pa, fd %d, offset %d, size %d, buffer_type 0x%x\n",
+					&bi->device_addr[i],
 					buffer_info.m.planes[i].reserved[0],
 					buffer_info.m.planes[i].reserved[1],
-					buffer_info.m.planes[i].length);
+					buffer_info.m.planes[i].length,
+					buffer_info.type);
 			}
 			buffer_info.length = bi->num_planes;
 			release_buf = true;
@@ -825,14 +830,31 @@ int msm_vidc_release_buffers(void *instance, int buffer_type)
 				&buffer_info);
 		if (rc)
 			dprintk(VIDC_ERR,
-				"Failed Release buffer: %d, %d, %d\n",
+				"Failed Release buffer: device_addr %pa, fd %d, offset %d, size %d, buffer_type 0x%x\n",
+				&bi->device_addr[0],
 				buffer_info.m.planes[0].reserved[0],
 				buffer_info.m.planes[0].reserved[1],
-				buffer_info.m.planes[0].length);
+				buffer_info.m.planes[0].length,
+				buffer_info.type);
 	}
 	mutex_unlock(&inst->registeredbufs.lock);
 
 free_and_unmap:
+	return rc;
+}
+EXPORT_SYMBOL(msm_vidc_release_buffers);
+
+int msm_vidc_free_buffers(void *instance, int buffer_type)
+{
+	struct msm_vidc_inst *inst = instance;
+	struct buffer_info *bi, *dummy;
+	int i, rc = 0;
+
+	if (!inst) {
+		dprintk(VIDC_ERR, "%s: invalid instance\n", __func__);
+		return -EINVAL;
+	}
+
 	mutex_lock(&inst->registeredbufs.lock);
 	list_for_each_entry_safe(bi, dummy, &inst->registeredbufs.list, list) {
 		if (bi->type == buffer_type) {
@@ -840,10 +862,11 @@ free_and_unmap:
 			for (i = 0; i < bi->num_planes; i++) {
 				if (bi->handle[i] && bi->mapped[i]) {
 					dprintk(VIDC_DBG,
-						"%s: [UNMAP] binfo = 0x%p, handle[%d] = %p, device_addr = 0x%pa, fd = %d, offset = %d, mapped = %d\n",
+						"%s: binfo = 0x%p, handle[%d] = %p, device_addr = %pa, fd = %d, offset = %d, buffer_type 0x%x, mapped = %d\n",
 						__func__, bi, i, bi->handle[i],
 						&bi->device_addr[i], bi->fd[i],
-						bi->buff_off[i], bi->mapped[i]);
+						bi->buff_off[i], bi->type,
+						bi->mapped[i]);
 					msm_comm_smem_free(inst,
 							bi->handle[i]);
 				}
@@ -854,7 +877,7 @@ free_and_unmap:
 	mutex_unlock(&inst->registeredbufs.lock);
 	return rc;
 }
-EXPORT_SYMBOL(msm_vidc_release_buffers);
+EXPORT_SYMBOL(msm_vidc_free_buffers);
 
 int msm_vidc_encoder_cmd(void *instance, struct v4l2_encoder_cmd *enc)
 {
@@ -890,15 +913,8 @@ int msm_vidc_qbuf(void *instance, struct v4l2_buffer *b)
 	int rc = 0;
 	int i;
 
-	if (!inst || !b)
+	if (!inst || !b || !valid_v4l2_buffer(b, inst))
 		return -EINVAL;
-
-	if (!V4L2_TYPE_IS_MULTIPLANAR(b->type) || !b->length ||
-		(b->length > VIDEO_MAX_PLANES)) {
-		dprintk(VIDC_ERR, "%s: wrong input params\n",
-				__func__);
-		return -EINVAL;
-	}
 
 	if (is_dynamic_output_buffer_mode(b, inst)) {
 		if (b->m.planes[0].reserved[0])
@@ -935,8 +951,7 @@ int msm_vidc_qbuf(void *instance, struct v4l2_buffer *b)
 		dprintk(VIDC_DBG, "Queueing device address = 0x%pa\n",
 				&binfo->device_addr[i]);
 
-		if ((inst->fmts[OUTPUT_PORT]->fourcc ==
-			V4L2_PIX_FMT_HEVC_HYBRID) &&  binfo->handle[i] &&
+		if (binfo->handle[i] &&
 			(b->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)) {
 			rc = msm_comm_smem_cache_operations(inst,
 				binfo->handle[i], SMEM_CACHE_INVALIDATE);
@@ -975,15 +990,8 @@ int msm_vidc_dqbuf(void *instance, struct v4l2_buffer *b)
 	struct buffer_info *buffer_info = NULL;
 	int i = 0, rc = 0;
 
-	if (!inst || !b)
+	if (!inst || !b || !valid_v4l2_buffer(b, inst))
 		return -EINVAL;
-
-	if (!V4L2_TYPE_IS_MULTIPLANAR(b->type) || !b->length ||
-		(b->length > VIDEO_MAX_PLANES)) {
-		dprintk(VIDC_ERR, "%s: wrong input params\n",
-				__func__);
-		return -EINVAL;
-	}
 
 	if (inst->session_type == MSM_VIDC_DECODER)
 		rc = msm_vdec_dqbuf(instance, b);
@@ -1078,7 +1086,7 @@ EXPORT_SYMBOL(msm_vidc_streamoff);
 int msm_vidc_enum_framesizes(void *instance, struct v4l2_frmsizeenum *fsize)
 {
 	struct msm_vidc_inst *inst = instance;
-	struct msm_vidc_core_capability *capability = NULL;
+	struct msm_vidc_capability *capability = NULL;
 
 	if (!inst || !fsize) {
 		dprintk(VIDC_ERR, "%s: invalid parameter: %p %p\n",
@@ -1205,6 +1213,12 @@ static int setup_event_queue(void *inst,
 	int rc = 0;
 	struct msm_vidc_inst *vidc_inst = (struct msm_vidc_inst *)inst;
 
+	if (!inst || !pvdev) {
+		dprintk(VIDC_ERR, "%s Invalid params inst %p pvdev %p\n",
+					__func__, inst, pvdev);
+		return -EINVAL;
+	}
+
 	v4l2_fh_init(&vidc_inst->event_handler, pvdev);
 	v4l2_fh_add(&vidc_inst->event_handler);
 
@@ -1284,7 +1298,7 @@ void *msm_vidc_open(int core_id, int session_type)
 	mutex_init(&inst->lock);
 
 	INIT_MSM_VIDC_LIST(&inst->pendingq);
-	INIT_MSM_VIDC_LIST(&inst->internalbufs);
+	INIT_MSM_VIDC_LIST(&inst->scratchbufs);
 	INIT_MSM_VIDC_LIST(&inst->persistbufs);
 	INIT_MSM_VIDC_LIST(&inst->pending_getpropq);
 	INIT_MSM_VIDC_LIST(&inst->outputbufs);
@@ -1308,12 +1322,16 @@ void *msm_vidc_open(int core_id, int session_type)
 	}
 	if (session_type == MSM_VIDC_DECODER) {
 		msm_vdec_inst_init(inst);
-		msm_vdec_ctrl_init(inst);
+		rc = msm_vdec_ctrl_init(inst);
 	} else if (session_type == MSM_VIDC_ENCODER) {
 		msm_venc_inst_init(inst);
-		msm_venc_ctrl_init(inst);
+		rc = msm_venc_ctrl_init(inst);
 	}
-	msm_comm_init_dcvs(inst);
+
+	if (rc)
+		goto fail_bufq_capture;
+
+	msm_dcvs_init(inst);
 	rc = vb2_bufq_init(inst, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
 			session_type);
 	if (rc) {
@@ -1333,6 +1351,13 @@ void *msm_vidc_open(int core_id, int session_type)
 	list_add_tail(&inst->list, &core->instances);
 	mutex_unlock(&core->lock);
 
+	rc = setup_event_queue(inst, &core->vdev[session_type].vdev);
+	if (rc) {
+		dprintk(VIDC_ERR,
+			"%s Failed to set up event queue\n", __func__);
+		goto fail_setup;
+	}
+
 	rc = msm_comm_try_state(inst, MSM_VIDC_CORE_INIT);
 	if (rc) {
 		dprintk(VIDC_ERR,
@@ -1342,10 +1367,12 @@ void *msm_vidc_open(int core_id, int session_type)
 	inst->debugfs_root =
 		msm_vidc_debugfs_init_inst(inst, core->debugfs_root);
 
-	setup_event_queue(inst, &core->vdev[session_type].vdev);
-
 	return inst;
+
 fail_init:
+	debugfs_remove_recursive(inst->debugfs_root);
+	v4l2_fh_del(&inst->event_handler);
+fail_setup:
 	vb2_queue_release(&inst->bufq[OUTPUT_PORT].vb2_bufq);
 
 	mutex_lock(&core->lock);

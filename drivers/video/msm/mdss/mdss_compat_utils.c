@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2013-2016, The Linux Foundation. All rights reserved.
  * Copyright (C) 1994 Martin Schaller
  *
  * 2001 - Documented with DocBook
@@ -50,10 +50,6 @@
 #define MSMFB_BUFFER_SYNC32  _IOW(MSMFB_IOCTL_MAGIC, 162, struct mdp_buf_sync32)
 #define MSMFB_OVERLAY_PREPARE32		_IOWR(MSMFB_IOCTL_MAGIC, 169, \
 						struct mdp_overlay_list32)
-#define MSMFB_REG_READ32   _IOWR(MSMFB_IOCTL_MAGIC, 64, \
-						struct msmfb_reg_access32)
-#define MSMFB_REG_WRITE32  _IOW(MSMFB_IOCTL_MAGIC, 65, \
-						struct msmfb_reg_access32)
 
 static unsigned int __do_compat_ioctl_nr(unsigned int cmd32)
 {
@@ -98,12 +94,6 @@ static unsigned int __do_compat_ioctl_nr(unsigned int cmd32)
 		break;
 	case MSMFB_OVERLAY_PREPARE32:
 		cmd = MSMFB_OVERLAY_PREPARE;
-		break;
-	case MSMFB_REG_READ32:
-		cmd = MSMFB_REG_READ;
-		break;
-	case MSMFB_REG_WRITE32:
-		cmd = MSMFB_REG_WRITE;
 		break;
 	default:
 		cmd = cmd32;
@@ -185,6 +175,27 @@ static int __from_user_fb_cmap(struct fb_cmap __user *cmap,
 	return 0;
 }
 
+static int __to_user_fb_cmap(struct fb_cmap __user *cmap,
+				struct fb_cmap32 __user *cmap32)
+{
+	unsigned long data;
+
+	if (copy_in_user(&cmap32->start, &cmap->start, 2 * sizeof(__u32)))
+		return -EFAULT;
+
+	if (get_user(data, (unsigned long *) &cmap->red) ||
+	    put_user((compat_caddr_t) data, &cmap32->red) ||
+	    get_user(data, (unsigned long *) &cmap->green) ||
+	    put_user((compat_caddr_t) data, &cmap32->green) ||
+	    get_user(data, (unsigned long *) &cmap->blue) ||
+	    put_user((compat_caddr_t) data, &cmap32->blue) ||
+	    get_user(data, (unsigned long *) &cmap->transp) ||
+	    put_user((compat_caddr_t) data, &cmap32->transp))
+		return -EFAULT;
+
+	return 0;
+}
+
 static int __from_user_fb_image(struct fb_image __user *image,
 				struct fb_image32 __user *image32)
 {
@@ -234,52 +245,6 @@ static int mdss_fb_compat_cursor(struct fb_info *info, unsigned int cmd,
 		return -EFAULT;
 
 	ret = mdss_fb_do_ioctl(info, cmd, (unsigned long) cursor);
-	return ret;
-}
-
-static int mdss_fb_compat_reg_access(struct fb_info *info, unsigned int cmd,
-				unsigned long arg)
-{
-	struct msmfb_reg_access32 __user *reg_access32;
-	struct msmfb_reg_access __user *reg_access;
-	u32 data;
-	int ret;
-
-	reg_access = compat_alloc_user_space(sizeof(*reg_access));
-	if (!reg_access) {
-		pr_err("%s:%u: compat alloc error [%zu] bytes\n",
-				__func__, __LINE__, sizeof(*reg_access));
-		return -EINVAL;
-	}
-
-	reg_access32 = compat_ptr(arg);
-	if (copy_in_user(&reg_access->use_hs_mode, &reg_access32->use_hs_mode,
-							sizeof(uint8_t)))
-		return -EFAULT;
-
-	if (copy_in_user(&reg_access->address, &reg_access32->address,
-							sizeof(uint8_t)))
-		return -EFAULT;
-
-	if (copy_in_user(&reg_access->buffer_size, &reg_access32->buffer_size,
-							sizeof(uint32_t)))
-		return -EFAULT;
-
-
-	if (get_user(data, &reg_access32->buffer) ||
-		put_user(compat_ptr(data), &reg_access->buffer))
-		return -EFAULT;
-
-	ret = mdss_fb_do_ioctl(info, cmd, (unsigned long) reg_access);
-	if (ret) {
-		pr_err("%s: failed %d\n", __func__, ret);
-		return ret;
-	}
-
-	if (copy_in_user(compat_ptr(reg_access32->buffer),
-				reg_access->buffer, reg_access32->buffer_size))
-		return -EFAULT;
-
 	return ret;
 }
 
@@ -919,6 +884,32 @@ static int __to_user_hist_lut_data(
 	return 0;
 }
 
+static int __from_user_rgb_lut_data(
+				struct mdp_rgb_lut_data32 __user *rgb_lut32,
+				struct mdp_rgb_lut_data __user *rgb_lut)
+{
+	if (copy_in_user(&rgb_lut->flags, &rgb_lut32->flags,
+		sizeof(uint32_t)) ||
+		copy_in_user(&rgb_lut->lut_type, &rgb_lut32->lut_type,
+		sizeof(uint32_t)))
+		return -EFAULT;
+
+	return __from_user_fb_cmap(&rgb_lut->cmap, &rgb_lut32->cmap);
+}
+
+static int __to_user_rgb_lut_data(
+			struct mdp_rgb_lut_data32 __user *rgb_lut32,
+			struct mdp_rgb_lut_data __user *rgb_lut)
+{
+	if (copy_in_user(&rgb_lut32->flags, &rgb_lut->flags,
+		sizeof(uint32_t)) ||
+		copy_in_user(&rgb_lut32->lut_type, &rgb_lut->lut_type,
+		sizeof(uint32_t)))
+		return -EFAULT;
+
+	return __to_user_fb_cmap(&rgb_lut->cmap, &rgb_lut32->cmap);
+}
+
 static int __from_user_lut_cfg_data(
 			struct mdp_lut_cfg_data32 __user *lut_cfg32,
 			struct mdp_lut_cfg_data __user *lut_cfg)
@@ -950,6 +941,11 @@ static int __from_user_lut_cfg_data(
 		ret = __from_user_hist_lut_data(
 			compat_ptr((uintptr_t)&lut_cfg32->data.hist_lut_data),
 			&lut_cfg->data.hist_lut_data);
+		break;
+	case mdp_lut_rgb:
+		ret = __from_user_rgb_lut_data(
+			compat_ptr((uintptr_t)&lut_cfg32->data.rgb_lut_data),
+			&lut_cfg->data.rgb_lut_data);
 		break;
 	default:
 		break;
@@ -989,6 +985,11 @@ static int __to_user_lut_cfg_data(
 		ret = __to_user_hist_lut_data(
 			compat_ptr((uintptr_t)&lut_cfg32->data.hist_lut_data),
 			&lut_cfg->data.hist_lut_data);
+		break;
+	case mdp_lut_rgb:
+		ret = __to_user_rgb_lut_data(
+			compat_ptr((uintptr_t)&lut_cfg32->data.rgb_lut_data),
+			&lut_cfg->data.rgb_lut_data);
 		break;
 	default:
 		break;
@@ -1192,7 +1193,19 @@ static int __from_user_mem_col_cfg(
 			sizeof(uint32_t)) ||
 	    copy_in_user(&mem_col_cfg->val_region,
 			&mem_col_cfg32->val_region,
-			sizeof(uint32_t)))
+			sizeof(uint32_t)) ||
+	    copy_in_user(&mem_col_cfg->color_adjust_p2,
+			&mem_col_cfg32->color_adjust_p2,
+			sizeof(uint32_t)) ||
+	    copy_in_user(&mem_col_cfg->blend_gain,
+			&mem_col_cfg32->blend_gain,
+			sizeof(uint32_t)) ||
+	    copy_in_user(&mem_col_cfg->sat_hold,
+			&mem_col_cfg32->sat_hold,
+			sizeof(uint8_t)) ||
+	    copy_in_user(&mem_col_cfg->val_hold,
+			&mem_col_cfg32->val_hold,
+			sizeof(uint8_t)))
 		return -EFAULT;
 
 	return 0;
@@ -1216,7 +1229,19 @@ static int __to_user_mem_col_cfg(
 			sizeof(uint32_t)) ||
 	    copy_in_user(&mem_col_cfg32->val_region,
 			&mem_col_cfg->val_region,
-			sizeof(uint32_t)))
+			sizeof(uint32_t)) ||
+	    copy_in_user(&mem_col_cfg32->color_adjust_p2,
+			&mem_col_cfg->color_adjust_p2,
+			sizeof(uint32_t)) ||
+	    copy_in_user(&mem_col_cfg32->blend_gain,
+			&mem_col_cfg->blend_gain,
+			sizeof(uint32_t)) ||
+	    copy_in_user(&mem_col_cfg32->sat_hold,
+			&mem_col_cfg->sat_hold,
+			sizeof(uint8_t)) ||
+	    copy_in_user(&mem_col_cfg32->val_hold,
+			&mem_col_cfg->val_hold,
+			sizeof(uint8_t)))
 		return -EFAULT;
 
 	return 0;
@@ -1248,7 +1273,20 @@ static int __from_user_pa_v2_data(
 			sizeof(uint32_t)) ||
 	    copy_in_user(&pa_v2_data->six_zone_len,
 			&pa_v2_data32->six_zone_len,
-			sizeof(uint32_t)))
+			sizeof(uint32_t)) ||
+	    copy_in_user(&pa_v2_data->six_zone_adj_p0,
+			&pa_v2_data32->six_zone_adj_p0,
+			sizeof(uint32_t)) ||
+	    copy_in_user(&pa_v2_data->six_zone_adj_p1,
+			&pa_v2_data32->six_zone_adj_p1,
+			sizeof(uint32_t)) ||
+	    copy_in_user(&pa_v2_data->six_zone_sat_hold,
+			&pa_v2_data32->six_zone_sat_hold,
+			sizeof(uint8_t)) ||
+	    copy_in_user(&pa_v2_data->six_zone_val_hold,
+			&pa_v2_data32->six_zone_val_hold,
+			sizeof(uint8_t)))
+
 		return -EFAULT;
 
 	if (get_user(data, &pa_v2_data32->six_zone_curve_p0) ||
@@ -1297,7 +1335,19 @@ static int __to_user_pa_v2_data(
 			sizeof(uint32_t)) ||
 	    copy_in_user(&pa_v2_data32->six_zone_len,
 			&pa_v2_data->six_zone_len,
-			sizeof(uint32_t)))
+			sizeof(uint32_t)) ||
+	    copy_in_user(&pa_v2_data32->six_zone_adj_p0,
+			&pa_v2_data->six_zone_adj_p0,
+			sizeof(uint32_t)) ||
+	    copy_in_user(&pa_v2_data32->six_zone_adj_p1,
+			&pa_v2_data->six_zone_adj_p1,
+			sizeof(uint32_t)) ||
+	    copy_in_user(&pa_v2_data32->six_zone_sat_hold,
+			&pa_v2_data->six_zone_sat_hold,
+			sizeof(uint8_t)) ||
+	    copy_in_user(&pa_v2_data32->six_zone_val_hold,
+			&pa_v2_data->six_zone_val_hold,
+			sizeof(uint8_t)))
 		return -EFAULT;
 
 	if (get_user(data, (unsigned long *) &pa_v2_data->six_zone_curve_p0) ||
@@ -1849,17 +1899,6 @@ static int __from_user_calib_dcm_state(
 	return 0;
 }
 
-static int __from_user_pp_init_data(
-			struct mdp_pp_init_data32 __user *init_data32,
-			struct mdp_pp_init_data __user *init_data)
-{
-	if (copy_in_user(&init_data->init_request, &init_data32->init_request,
-			sizeof(uint32_t)))
-		return -EFAULT;
-
-	return 0;
-}
-
 static int __pp_compat_alloc(struct msmfb_mdp_pp32 __user *pp32,
 					struct msmfb_mdp_pp __user **pp,
 					uint32_t op)
@@ -2132,14 +2171,6 @@ static int mdss_compat_pp_ioctl(struct fb_info *info, unsigned int cmd,
 		ret = __from_user_calib_dcm_state(
 			compat_ptr((uintptr_t)&pp32->data.calib_dcm),
 			&pp->data.calib_dcm);
-		if (ret)
-			goto pp_compat_exit;
-		ret = mdss_fb_do_ioctl(info, cmd, (unsigned long) pp);
-		break;
-	case mdp_op_pp_init_cfg:
-		ret = __from_user_pp_init_data(
-			compat_ptr((uintptr_t)&pp32->data.init_data),
-			&pp->data.init_data);
 		if (ret)
 			goto pp_compat_exit;
 		ret = mdss_fb_do_ioctl(info, cmd, (unsigned long) pp);
@@ -2446,6 +2477,10 @@ static int __to_user_mdp_overlay(struct mdp_overlay32 __user *ov32,
 	if (ret)
 		return -EFAULT;
 
+	ret = put_user(ov->frame_rate, &ov32->frame_rate);
+	if (ret)
+		return -EFAULT;
+
 	return 0;
 }
 
@@ -2504,6 +2539,10 @@ static int __from_user_mdp_overlay(struct mdp_overlay *ov,
 
 	if (get_user(data, &ov32->color_space) ||
 	    put_user(data, &ov->color_space))
+		return -EFAULT;
+
+	if (get_user(data, &ov32->frame_rate) ||
+	    put_user(data, &ov->frame_rate))
 		return -EFAULT;
 
 	return 0;
@@ -2658,11 +2697,15 @@ int mdss_compat_overlay_ioctl(struct fb_info *info, unsigned int cmd,
 		}
 		ov32 = compat_ptr(arg);
 		ret = __from_user_mdp_overlay(ov, ov32);
-		if (ret)
+
+		if (ret) {
 			pr_err("%s: compat mdp overlay failed\n", __func__);
-		else
+		} else {
 			ret = mdss_fb_do_ioctl(info, cmd, (unsigned long) ov);
-		ret = __to_user_mdp_overlay(ov32, ov);
+
+			if (!ret)
+				ret = __to_user_mdp_overlay(ov32, ov);
+		}
 		break;
 	case MSMFB_OVERLAY_SET:
 		ov = compat_alloc_user_space(sizeof(*ov));
@@ -2677,7 +2720,9 @@ int mdss_compat_overlay_ioctl(struct fb_info *info, unsigned int cmd,
 			pr_err("%s: compat mdp overlay failed\n", __func__);
 		} else {
 			ret = mdss_fb_do_ioctl(info, cmd, (unsigned long) ov);
-			ret = __to_user_mdp_overlay(ov32, ov);
+
+			if (!ret)
+				ret = __to_user_mdp_overlay(ov32, ov);
 		}
 		break;
 	case MSMFB_OVERLAY_PREPARE:
@@ -2786,11 +2831,6 @@ int mdss_fb_compat_ioctl(struct fb_info *info, unsigned int cmd,
 	case MSMFB_OVERLAY_PREPARE:
 		ret = mdss_compat_overlay_ioctl(info, cmd, arg);
 		break;
-	case MSMFB_REG_WRITE:
-	case MSMFB_REG_READ:
-		ret = mdss_fb_compat_reg_access(info, cmd, arg);
-		break;
-	case MSMFB_NOTIFY_UPDATE:
 	case MSMFB_DISPLAY_COMMIT:
 	default:
 		ret = mdss_fb_do_ioctl(info, cmd, arg);

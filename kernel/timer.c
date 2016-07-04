@@ -49,6 +49,8 @@
 #include <asm/timex.h>
 #include <asm/io.h>
 
+#include "time/tick-internal.h"
+
 #define CREATE_TRACE_POINTS
 #include <trace/events/timer.h>
 
@@ -384,17 +386,23 @@ __internal_add_timer(struct tvec_base *base, struct timer_list *timer)
 	list_add_tail(&timer->entry, vec);
 }
 
-static void internal_add_timer(struct tvec_base *base, struct timer_list *timer)
+static int internal_add_timer(struct tvec_base *base, struct timer_list *timer)
 {
+	int leftmost = 0;
+
 	__internal_add_timer(base, timer);
 	/*
 	 * Update base->active_timers and base->next_timer
 	 */
 	if (!tbase_get_deferrable(timer->base)) {
-		if (time_before(timer->expires, base->next_timer))
+		if (time_before(timer->expires, base->next_timer)) {
+			leftmost = 1;
 			base->next_timer = timer->expires;
+		}
 		base->active_timers++;
 	}
+
+	return leftmost;
 }
 
 #ifdef CONFIG_TIMER_STATS
@@ -737,7 +745,7 @@ __mod_timer(struct timer_list *timer, unsigned long expires,
 {
 	struct tvec_base *base, *new_base;
 	unsigned long flags;
-	int ret = 0 , cpu;
+	int ret = 0, cpu, leftmost;
 
 	timer_stats_timer_set_start_info(timer);
 	BUG_ON(!timer->function);
@@ -750,14 +758,15 @@ __mod_timer(struct timer_list *timer, unsigned long expires,
 
 	debug_activate(timer, expires);
 
+	cpu = smp_processor_id();
+
 #ifdef CONFIG_SMP
 	if (base != tvec_base_deferral) {
 #endif
-		 cpu = smp_processor_id();
 
 #if defined(CONFIG_NO_HZ_COMMON) && defined(CONFIG_SMP)
-		if (!pinned && get_sysctl_timer_migration() && idle_cpu(cpu))
-			cpu = get_nohz_timer_target();
+	if (!pinned && get_sysctl_timer_migration())
+		cpu = get_nohz_timer_target();
 #endif
 		new_base = per_cpu(tvec_bases, cpu);
 
@@ -783,7 +792,23 @@ __mod_timer(struct timer_list *timer, unsigned long expires,
 #endif
 
 	timer->expires = expires;
-	internal_add_timer(base, timer);
+	leftmost = internal_add_timer(base, timer);
+
+#ifdef CONFIG_SCHED_HMP
+	/*
+	 * Check whether the other CPU is in dynticks mode and needs
+	 * to be triggered to reevaluate the timer wheel.
+	 * We are protected against the other CPU fiddling
+	 * with the timer by holding the timer base lock. This also
+	 * makes sure that a CPU on the way to stop its tick can not
+	 * evaluate the timer wheel.
+	 *
+	 * This test is needed for only CONFIG_SCHED_HMP, as !CONFIG_SCHED_HMP
+	 * selects non-idle cpu as target of timer migration.
+	 */
+	if (cpu != smp_processor_id() && leftmost)
+		wake_up_nohz_cpu(cpu);
+#endif
 
 out_unlock:
 	spin_unlock_irqrestore(&base->lock, flags);
@@ -942,13 +967,15 @@ void add_timer_on(struct timer_list *timer, int cpu)
 {
 	struct tvec_base *base = per_cpu(tvec_bases, cpu);
 	unsigned long flags;
+	int leftmost;
 
 	timer_stats_timer_set_start_info(timer);
 	BUG_ON(timer_pending(timer) || !timer->function);
 	spin_lock_irqsave(&base->lock, flags);
 	timer_set_base(timer, base);
 	debug_activate(timer, timer->expires);
-	internal_add_timer(base, timer);
+	leftmost = internal_add_timer(base, timer);
+
 	/*
 	 * Check whether the other CPU is in dynticks mode and needs
 	 * to be triggered to reevaluate the timer wheel.
@@ -957,7 +984,8 @@ void add_timer_on(struct timer_list *timer, int cpu)
 	 * makes sure that a CPU on the way to stop its tick can not
 	 * evaluate the timer wheel.
 	 */
-	wake_up_nohz_cpu(cpu);
+	if (leftmost)
+		wake_up_nohz_cpu(cpu);
 	spin_unlock_irqrestore(&base->lock, flags);
 }
 EXPORT_SYMBOL_GPL(add_timer_on);
@@ -1154,20 +1182,15 @@ static void call_timer_fn(struct timer_list *timer, void (*fn)(unsigned long),
 /**
  * __run_timers - run all expired timers (if any) on this CPU.
  * @base: the timer vector to be processed.
- * @try: try and just return if base's lock already acquired.
  *
  * This function cascades all vectors and executes all expired timer
  * vectors.
  */
-static inline void __run_timers(struct tvec_base *base, bool try)
+static inline void __run_timers(struct tvec_base *base)
 {
 	struct timer_list *timer;
 
-	if (!try)
-		spin_lock_irq(&base->lock);
-	else if (!spin_trylock_irq(&base->lock))
-		return;
-
+	spin_lock_irq(&base->lock);
 	while (time_after_eq(jiffies, base->timer_jiffies)) {
 		struct list_head work_list;
 		struct list_head *head = &work_list;
@@ -1395,16 +1418,13 @@ static void run_timer_softirq(struct softirq_action *h)
 	hrtimer_run_pending();
 
 #ifdef CONFIG_SMP
-	if (time_after_eq(jiffies, tvec_base_deferral->timer_jiffies))
-		/*
-		 * if other cpu is handling cpu unbound deferrable timer base,
-		 * current cpu doesn't need to handle it so pass try=true.
-		 */
-		__run_timers(tvec_base_deferral, true);
+	if (smp_processor_id() == tick_do_timer_cpu &&
+	    time_after_eq(jiffies, tvec_base_deferral->timer_jiffies))
+		__run_timers(tvec_base_deferral);
 #endif
 
 	if (time_after_eq(jiffies, base->timer_jiffies))
-		__run_timers(base, false);
+		__run_timers(base);
 }
 
 /*

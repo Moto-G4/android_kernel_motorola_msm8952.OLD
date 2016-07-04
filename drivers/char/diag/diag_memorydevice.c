@@ -25,11 +25,13 @@
 #include "diag_memorydevice.h"
 #include "diagfwd_bridge.h"
 #include "diag_mux.h"
+#include "diagmem.h"
 
 struct diag_md_info diag_md[NUM_DIAG_MD_DEV] = {
 	{
 		.id = DIAG_MD_LOCAL,
 		.ctx = 0,
+		.mempool = POOL_TYPE_MUX_APPS,
 		.num_tbl_entries = 0,
 		.tbl = NULL,
 		.ops = NULL,
@@ -38,6 +40,7 @@ struct diag_md_info diag_md[NUM_DIAG_MD_DEV] = {
 	{
 		.id = DIAG_MD_MDM,
 		.ctx = 0,
+		.mempool = POOL_TYPE_MDM_MUX,
 		.num_tbl_entries = 0,
 		.tbl = NULL,
 		.ops = NULL,
@@ -45,6 +48,7 @@ struct diag_md_info diag_md[NUM_DIAG_MD_DEV] = {
 	{
 		.id = DIAG_MD_MDM2,
 		.ctx = 0,
+		.mempool = POOL_TYPE_MDM2_MUX,
 		.num_tbl_entries = 0,
 		.tbl = NULL,
 		.ops = NULL,
@@ -52,6 +56,7 @@ struct diag_md_info diag_md[NUM_DIAG_MD_DEV] = {
 	{
 		.id = DIAG_MD_SMUX,
 		.ctx = 0,
+		.mempool = POOL_TYPE_QSC_MUX,
 		.num_tbl_entries = 0,
 		.tbl = NULL,
 		.ops = NULL,
@@ -92,11 +97,10 @@ void diag_md_close_all()
 
 	for (i = 0; i < NUM_DIAG_MD_DEV; i++) {
 		ch = &diag_md[i];
-		/*
-		 * When we close the Memory device mode, make sure we flush the
-		 * internal buffers in the table so that there are no stale
-		 * entries.
-		 */
+
+		if (ch->ops && ch->ops->close)
+			ch->ops->close(ch->ctx, DIAG_MEMORY_DEVICE_MODE);
+
 		for (j = 0; j < ch->num_tbl_entries; j++) {
 			entry = &ch->tbl[j];
 			if (entry->len <= 0)
@@ -111,11 +115,9 @@ void diag_md_close_all()
 			entry->ctx = 0;
 			spin_unlock_irqrestore(&ch->lock, flags);
 		}
-		if (ch->ops && ch->ops->close)
-			ch->ops->close(ch->ctx, DIAG_MEMORY_DEVICE_MODE);
 	}
 
-	diag_ws_reset(DIAG_WS_MD);
+	diag_ws_reset(DIAG_WS_MUX);
 }
 
 int diag_md_write(int id, unsigned char *buf, int len, int ctx)
@@ -125,7 +127,7 @@ int diag_md_write(int id, unsigned char *buf, int len, int ctx)
 	unsigned long flags;
 	struct diag_md_info *ch = NULL;
 
-	if (id < 0 || id >= NUM_DIAG_MD_DEV)
+	if (id < 0 || id >= NUM_DIAG_MD_DEV || id >= DIAG_NUM_PROC)
 		return -EINVAL;
 
 	if (!buf || len < 0)
@@ -153,7 +155,7 @@ int diag_md_write(int id, unsigned char *buf, int len, int ctx)
 			ch->tbl[i].len = len;
 			ch->tbl[i].ctx = ctx;
 			found = 1;
-			diag_ws_on_read(DIAG_WS_MD, len);
+			diag_ws_on_read(DIAG_WS_MUX, len);
 		}
 	}
 	spin_unlock_irqrestore(&ch->lock, flags);
@@ -166,11 +168,13 @@ int diag_md_write(int id, unsigned char *buf, int len, int ctx)
 
 	found = 0;
 	for (i = 0; i < driver->num_clients && !found; i++) {
-		if (driver->client_map[i].pid != driver->logging_process_id)
+		if ((driver->client_map[i].pid != driver->md_proc[id].pid) ||
+		    (driver->client_map[i].pid == 0)) {
 			continue;
+		}
 		found = 1;
-		driver->data_ready[i] |= USER_SPACE_DATA_TYPE;
-		pr_debug("diag: wake up logging process\n");
+		driver->data_ready[i] |= USERMODE_DIAGFWD;
+		DIAG_DBUG("diag: wake up logging process\n");
 		wake_up_interruptible(&driver->wait_q);
 	}
 
@@ -180,7 +184,7 @@ int diag_md_write(int id, unsigned char *buf, int len, int ctx)
 	return 0;
 }
 
-int diag_md_copy_to_user(char __user *buf, int *pret)
+int diag_md_copy_to_user(char __user *buf, int *pret, size_t buf_size)
 {
 
 	int i, j;
@@ -191,6 +195,7 @@ int diag_md_copy_to_user(char __user *buf, int *pret)
 	unsigned long flags;
 	struct diag_md_info *ch = NULL;
 	struct diag_buf_tbl_t *entry = NULL;
+	uint8_t drain_again = 0;
 
 	for (i = 0; i < NUM_DIAG_MD_DEV && !err; i++) {
 		ch = &diag_md[i];
@@ -198,10 +203,19 @@ int diag_md_copy_to_user(char __user *buf, int *pret)
 			entry = &ch->tbl[j];
 			if (entry->len <= 0)
 				continue;
-			/*
-			 * If the data is from remote processor, copy the remote
-			 * token first
-			 */
+			if (i > 0) {
+				if ((ret + (3 * sizeof(int)) + entry->len) >=
+							buf_size) {
+					drain_again = 1;
+					break;
+				}
+			} else {
+				if ((ret + (2 * sizeof(int)) + entry->len) >=
+						buf_size) {
+					drain_again = 1;
+					break;
+				}
+			}
 			if (i > 0) {
 				remote_token = diag_get_remote(i);
 				err = copy_to_user(buf + ret, &remote_token,
@@ -211,33 +225,27 @@ int diag_md_copy_to_user(char __user *buf, int *pret)
 				ret += sizeof(int);
 			}
 
-			/* Copy the length of data being passed */
+			
 			err = copy_to_user(buf + ret, (void *)&(entry->len),
 					   sizeof(int));
 			if (err)
 				goto drop_data;
 			ret += sizeof(int);
 
-			/* Copy the actual data being passed */
+			
 			err = copy_to_user(buf + ret, (void *)entry->buf,
 					   entry->len);
 			if (err)
 				goto drop_data;
 			ret += entry->len;
 
-			/*
-			 * The data is now copied to the user space client,
-			 * Notify that the write is complete and delete its
-			 * entry from the table
-			 */
 			num_data++;
 drop_data:
 			spin_lock_irqsave(&ch->lock, flags);
-			if (ch->ops && ch->ops->write_done)
-				ch->ops->write_done(entry->buf, entry->len,
-						    entry->ctx,
-						    DIAG_MEMORY_DEVICE_MODE);
-			diag_ws_on_copy(DIAG_WS_MD);
+			ch->ops->write_done(entry->buf, entry->len,
+					    entry->ctx,
+					    DIAG_MEMORY_DEVICE_MODE);
+			diag_ws_on_copy(DIAG_WS_MUX);
 			entry->buf = NULL;
 			entry->len = 0;
 			entry->ctx = 0;
@@ -247,7 +255,10 @@ drop_data:
 
 	*pret = ret;
 	err = copy_to_user(buf + sizeof(int), (void *)&num_data, sizeof(int));
-	diag_ws_on_copy_complete(DIAG_WS_MD);
+	diag_ws_on_copy_complete(DIAG_WS_MUX);
+	if (drain_again)
+		chk_logging_wakeup();
+
 	return err;
 }
 
@@ -258,7 +269,7 @@ int diag_md_init()
 
 	for (i = 0; i < NUM_DIAG_MD_DEV; i++) {
 		ch = &diag_md[i];
-		ch->num_tbl_entries = driver->poolsize;
+		ch->num_tbl_entries = diag_mempools[ch->mempool].poolsize;
 		ch->tbl = kzalloc(ch->num_tbl_entries *
 				  sizeof(struct diag_buf_tbl_t),
 				  GFP_KERNEL);

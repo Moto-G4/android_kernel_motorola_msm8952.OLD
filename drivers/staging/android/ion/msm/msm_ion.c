@@ -60,6 +60,10 @@ static struct ion_heap_desc ion_heap_meta[] = {
 		.name	= ION_KMALLOC_HEAP_NAME,
 	},
 	{
+		.id	= ION_SECURE_HEAP_ID,
+		.name	= ION_SECURE_HEAP_NAME,
+	},
+	{
 		.id	= ION_CP_MM_HEAP_ID,
 		.name	= ION_MM_HEAP_NAME,
 		.permission_type = IPT_TYPE_MM_CARVEOUT,
@@ -104,6 +108,11 @@ static struct ion_heap_desc ion_heap_meta[] = {
 	{
 		.id	= ION_ADSP_HEAP_ID,
 		.name	= ION_ADSP_HEAP_NAME,
+	},
+	{
+		.id	= ION_FBMEM_HEAP_ID,
+		.type = ION_HEAP_TYPE_CARVEOUT,
+		.name	= ION_FBMEM_HEAP_NAME,
 	}
 };
 #endif
@@ -121,6 +130,8 @@ static struct notifier_block msm_ion_nb = {
 
 struct ion_client *msm_ion_client_create(const char *name)
 {
+	struct ion_client *client;
+
 	/*
 	 * The assumption is that if there is a NULL device, the ion
 	 * driver has not yet probed.
@@ -131,7 +142,12 @@ struct ion_client *msm_ion_client_create(const char *name)
 	if (IS_ERR(idev))
 		return (struct ion_client *)idev;
 
-	return ion_client_create(idev, name);
+	client = ion_client_create(idev, name);
+
+	if (client)
+		ion_client_set_debug_name(client, name);
+
+	return client;
 }
 EXPORT_SYMBOL(msm_ion_client_create);
 
@@ -141,6 +157,43 @@ int msm_ion_do_cache_op(struct ion_client *client, struct ion_handle *handle,
 	return ion_do_cache_op(client, handle, vaddr, 0, len, cmd);
 }
 EXPORT_SYMBOL(msm_ion_do_cache_op);
+
+static atomic_t ion_alloc_mem_usages[ION_USAGE_MAX]
+			= {[0 ... ION_USAGE_MAX-1] = ATOMIC_INIT(0)};
+
+static inline atomic_t* ion_get_meminfo(const enum ion_heap_mem_usage usage)
+{
+	return (usage < ION_USAGE_MAX) ?
+			&ion_alloc_mem_usages[usage] : NULL;
+}
+
+void ion_alloc_inc_usage(const enum ion_heap_mem_usage usage,
+					const size_t size)
+{
+	atomic_t * const ion_alloc_usage = ion_get_meminfo(usage);
+
+	if (ion_alloc_usage)
+		atomic_add(size, ion_alloc_usage);
+}
+EXPORT_SYMBOL(ion_alloc_inc_usage);
+
+void ion_alloc_dec_usage(const enum ion_heap_mem_usage usage,
+					const size_t size)
+{
+	atomic_t * const ion_alloc_usage = ion_get_meminfo(usage);
+
+	if (ion_alloc_usage)
+		atomic_sub(size, ion_alloc_usage);
+}
+EXPORT_SYMBOL(ion_alloc_dec_usage);
+
+uintptr_t msm_ion_heap_meminfo(const bool is_total)
+{
+	atomic_t * const ion_alloc_usage = ion_get_meminfo(is_total? ION_TOTAL : ION_IN_USE);
+
+	return ion_alloc_usage? atomic_read(ion_alloc_usage) * PAGE_SIZE : 0;
+}
+EXPORT_SYMBOL(msm_ion_heap_meminfo);
 
 static int ion_no_pages_cache_ops(struct ion_client *client,
 			struct ion_handle *handle,
@@ -366,6 +419,7 @@ static struct heap_types_info {
 	MAKE_HEAP_TYPE_MAPPING(DMA),
 	MAKE_HEAP_TYPE_MAPPING(SECURE_DMA),
 	MAKE_HEAP_TYPE_MAPPING(REMOVED),
+	MAKE_HEAP_TYPE_MAPPING(SYSTEM_SECURE),
 };
 
 static int msm_ion_get_heap_type_from_dt_node(struct device_node *node,
@@ -644,6 +698,11 @@ out:
 	return ret;
 }
 
+int ion_heap_is_system_secure_heap_type(enum ion_heap_type type)
+{
+	return type == ((enum ion_heap_type) ION_HEAP_TYPE_SYSTEM_SECURE);
+}
+
 int ion_heap_allow_secure_allocation(enum ion_heap_type type)
 {
 	return type == ((enum ion_heap_type) ION_HEAP_TYPE_SECURE_DMA);
@@ -758,7 +817,28 @@ long msm_ion_custom_ioctl(struct ion_client *client,
 			ion_secure_cma_drain_pool);
 		break;
 	}
+	case ION_IOC_CLIENT_DEBUG_NAME:
+	{
+		struct ion_client_name_data data;
+		int name_len;
+		const size_t ION_CLIENT_DEBUG_NAME_LENGTH = 64;
+		char debug_name[ION_CLIENT_DEBUG_NAME_LENGTH + 1];
 
+		if (copy_from_user(&data, (void __user *)arg,
+					sizeof(struct ion_client_name_data)))
+			return -EFAULT;
+		if (data.len <= 0)
+			return -EFAULT;
+
+		name_len = min(ION_CLIENT_DEBUG_NAME_LENGTH, data.len);
+		if (copy_from_user(debug_name, (void __user *)data.name, name_len))
+			return -EFAULT;
+
+		debug_name[name_len] = '\0';
+
+		return ion_client_set_debug_name(
+				client, debug_name);
+	}
 	default:
 		return -ENOTTY;
 	}
@@ -882,6 +962,8 @@ int msm_ion_heap_buffer_zero(struct ion_buffer *buffer)
 	for_each_sg(table->sgl, sg, table->nents, i) {
 		struct page *page = sg_page(sg);
 		unsigned long len = sg->length;
+		/* needed to make dma_sync_sg_for_device work: */
+		sg->dma_address = sg_phys(sg);
 
 		for (j = 0; j < len / PAGE_SIZE; j++)
 			pages_mem.pages[npages++] = page + j;
@@ -907,7 +989,9 @@ static struct ion_heap *msm_ion_heap_create(struct ion_platform_heap *heap_data)
 	case ION_HEAP_TYPE_REMOVED:
 		heap = ion_removed_heap_create(heap_data);
 		break;
-
+	case ION_HEAP_TYPE_SYSTEM_SECURE:
+		heap = ion_system_secure_heap_create(heap_data);
+		break;
 	default:
 		heap = ion_heap_create(heap_data);
 	}
@@ -939,9 +1023,27 @@ static void msm_ion_heap_destroy(struct ion_heap *heap)
 	case ION_HEAP_TYPE_REMOVED:
 		ion_removed_heap_destroy(heap);
 		break;
+	case ION_HEAP_TYPE_SYSTEM_SECURE:
+		ion_system_secure_heap_destroy(heap);
+		break;
 	default:
 		ion_heap_destroy(heap);
 	}
+}
+
+struct ion_heap *get_ion_heap(int heap_id)
+{
+	int i;
+	struct ion_heap *heap;
+
+	for (i = 0; i < num_heaps; i++) {
+		heap = heaps[i];
+		if (heap->id == heap_id)
+			return heap;
+	}
+
+	pr_err("%s: heap_id %d not found\n", __func__, heap_id);
+	return NULL;
 }
 
 static int msm_ion_probe(struct platform_device *pdev)

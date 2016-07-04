@@ -63,16 +63,6 @@ config LEDS_LM3533
 	  hardware-accelerated blinking with maximum on and off periods of 9.8
 	  and 77 seconds respectively.
 
-config LEDS_LM3633
-	tristate "LED support for the TI LM3633 LMU"
-	depends on LEDS_CLASS
-	depends on MFD_TI_LMU
-	help
-	  This option enables support for the LEDs on the LM3633.
-	  LM3633 has 6 low voltage indicator LEDs.
-	  All low voltage current sinks can have a programmable pattern
-	  modulated onto LED output strings.
-
 config LEDS_LM3642
 	tristate "LED support for LM3642 Chip"
 	depends on LEDS_CLASS && I2C
@@ -83,15 +73,6 @@ config LEDS_LM3642
 	  converter plus 1.5A constant current driver for a high-current
 	  white LED.
 
-config LEDS_ISL98611
-	tristate "LED support for ISL98611 Chip"
-	depends on LEDS_CLASS && I2C
-	select REGMAP_I2C
-	help
-	  This option enables support for integrated dual display power supply
-	  and LED backlight driver ISL98611.
-	  Power supply level can be configured useing device tree. GPIO or I2C
-	  can be used to control the supply operation.
 
 config LEDS_LOCOMO
 	tristate "LED Support for Locomo device"
@@ -230,6 +211,23 @@ config LEDS_LP5521
 	  Driver provides direct control via LED class and interface for
 	  programming the engines.
 
+config LEDS_LP5521_HTC
+	tristate "LED Support for N.S. LP5521 LED driver chip"
+	depends on LEDS_CLASS && I2C
+	select LEDS_LP55XX_COMMON
+	help
+		If you say yes here you get support for the National Semiconductor
+		LP5521 LED driver. It is 3 channel chip with programmable engines.
+		Driver provides direct control via LED class and interface for
+		programming the engines.
+
+config LED_CHECK_PANEL_CONNECTED
+	tristate "LED check panel connected for MFG test"
+	depends on LEDS_LP5521_HTC
+	select LEDS_LP55XX_COMMON
+	help
+		Say Y here if need to check panel connected for MFG test.
+
 config LEDS_LP5523
 	tristate "LED Support for TI/National LP5523/55231 LED driver chip"
 	depends on LEDS_CLASS && I2C
@@ -306,16 +304,6 @@ config LEDS_PCA9633
 	  This option enables support for LEDs connected to the PCA9633
 	  LED driver chip accessed via the I2C bus.
 
-config LEDS_ATC
-	tristate "Support for PMIC ATC LED"
-	depends on LEDS_CLASS
-	depends on SPMI && OF_SPMI
-	help
-	  This driver supports the ATC led functionality of Qualcomm PNP PMIC.
-	  Creates standard LED interface for the auto trickle charge indication
-	  LED. SPMI register write is used to access PMIC control register.
-	  Device tree can be used to adjust control register address used.
-
 config LEDS_QPNP
 	tristate "Support for QPNP LEDs"
 	depends on SPMI && OF_SPMI
@@ -354,16 +342,6 @@ config LEDS_MSM_GPIO_FLASH
 
 	  To compile this driver as a module, choose M here: the module will
 	  be called leds-gpio-flash.
-
-config LEDS_QPNP_RGB
-	tristate "Support for QPNP LEDs"
-	depends on SPMI && OF_SPMI
-	help
-	  This driver supports the leds functionality of Qualcomm PNP PMIC.
-	  It supports Motorola breathing feature.
-
-	  To compile this driver as a module, choose M here: the module will
-	  be called leds-qpn-rgb.
 
 config LEDS_WM831X_STATUS
 	tristate "LED support for status LEDs on WM831x PMICs"
@@ -557,16 +535,12 @@ config LEDS_BLINKM
 	  This option enables support for the BlinkM RGB LED connected
 	  through I2C. Say Y to enable support for the BlinkM LED.
 
-config LEDS_BD65B60
-	tristate "LED Driver for BD65B60"
-	depends on LEDS_CLASS
-	depends on I2C
+config LEDS_AW2013
+	tristate "LED support for AW2013"
+	depends on LEDS_CLASS && I2C
 	help
-	  If you have a LCD backlight connected to the ROHM BD65B60,
-	  say Y here to enable this driver.
-
-	  To compile this driver as a module, choose M here: the module will
-	  be called leds-bd65b60.
+	  This option enables support for the AW2013 RGB LED connected
+	  through I2C. Say Y to enable support for the AW2013 LED.
 
 comment "LED Triggers"
 source "drivers/leds/trigger/Kconfig"

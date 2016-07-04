@@ -40,6 +40,13 @@
 #define MON_MASK(m)		((m)->base + 0x298)
 #define MON_MATCH(m)		((m)->base + 0x29C)
 
+/*
+ * Don't set the threshold lower than this value. This helps avoid
+ * threshold IRQs when the traffic is close to zero and even small
+ * changes can exceed the threshold percentage.
+ */
+#define FLOOR_MBPS	100UL
+
 struct bwmon_spec {
 	bool wrap_on_thres;
 	bool overflow;
@@ -66,11 +73,18 @@ static void mon_enable(struct bwmon *m)
 static void mon_disable(struct bwmon *m)
 {
 	writel_relaxed(0x0, MON_EN(m));
+	mb();
 }
 
 static void mon_clear(struct bwmon *m)
 {
 	writel_relaxed(0x1, MON_CLEAR(m));
+	/*
+	 * The counter clear and IRQ clear bits are not in the same 4KB
+	 * region. So, we need to make sure the counter clear is completed
+	 * before we try to clear the IRQ or do any other counter operations.
+	 */
+	mb();
 }
 
 static void mon_irq_enable(struct bwmon *m)
@@ -86,6 +100,7 @@ static void mon_irq_enable(struct bwmon *m)
 	val = readl_relaxed(MON_INT_EN(m));
 	val |= 0x1;
 	writel_relaxed(val, MON_INT_EN(m));
+	mb();
 }
 
 static void mon_irq_disable(struct bwmon *m)
@@ -101,6 +116,7 @@ static void mon_irq_disable(struct bwmon *m)
 	val = readl_relaxed(MON_INT_EN(m));
 	val &= ~0x1;
 	writel_relaxed(val, MON_INT_EN(m));
+	mb();
 }
 
 static unsigned int mon_irq_status(struct bwmon *m)
@@ -195,7 +211,7 @@ static unsigned long meas_bw_and_set_irq(struct bw_hwmon *hw,
 	 * multiple times before the IRQ is processed.
 	 */
 	if (likely(!m->spec->wrap_on_thres))
-		limit = mbps_to_bytes(mbps, sample_ms, tol);
+		limit = mbps_to_bytes(max(mbps, FLOOR_MBPS), sample_ms, tol);
 	else
 		limit = mbps_to_bytes(max(mbps, 400UL), sample_ms, tol);
 
@@ -252,9 +268,9 @@ static void stop_bw_hwmon(struct bw_hwmon *hw)
 {
 	struct bwmon *m = to_bwmon(hw);
 
+	mon_irq_disable(m);
 	free_irq(m->irq, m);
 	mon_disable(m);
-	mon_irq_disable(m);
 	mon_clear(m);
 	mon_irq_clear(m);
 }
@@ -263,9 +279,9 @@ static int suspend_bw_hwmon(struct bw_hwmon *hw)
 {
 	struct bwmon *m = to_bwmon(hw);
 
+	mon_irq_disable(m);
 	free_irq(m->irq, m);
 	mon_disable(m);
-	mon_irq_disable(m);
 	mon_irq_clear(m);
 
 	return 0;
@@ -277,8 +293,6 @@ static int resume_bw_hwmon(struct bw_hwmon *hw)
 	int ret;
 
 	mon_clear(m);
-	mon_irq_enable(m);
-	mon_enable(m);
 	ret = request_threaded_irq(m->irq, NULL, bwmon_intr_handler,
 				  IRQF_ONESHOT | IRQF_SHARED,
 				  dev_name(m->dev), m);
@@ -287,6 +301,9 @@ static int resume_bw_hwmon(struct bw_hwmon *hw)
 				ret);
 		return ret;
 	}
+
+	mon_irq_enable(m);
+	mon_enable(m);
 
 	return 0;
 }

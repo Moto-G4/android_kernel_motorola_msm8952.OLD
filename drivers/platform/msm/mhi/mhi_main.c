@@ -1,4 +1,4 @@
-/* Copyright (c) 2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2014-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -21,11 +21,13 @@
 #include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/completion.h>
+#include <linux/pm_runtime.h>
 
 #include "mhi_sys.h"
 #include "mhi.h"
 #include "mhi_hwio.h"
 #include "mhi_macros.h"
+#include "mhi_trace.h"
 
 static void mhi_write_db(struct mhi_device_ctxt *mhi_dev_ctxt,
 		  void __iomem *io_addr_lower,
@@ -44,12 +46,16 @@ static void mhi_update_ctxt(struct mhi_device_ctxt *mhi_dev_ctxt,
 			    u64 val)
 {
 	wmb();
-	if (mhi_dev_ctxt->channel_db_addr == io_addr) {
+	if (mhi_dev_ctxt->mmio_info.chan_db_addr == io_addr) {
 		mhi_dev_ctxt->mhi_ctrl_seg->mhi_cc_list[chan].
 				mhi_trb_write_ptr = val;
-	} else if (mhi_dev_ctxt->event_db_addr == io_addr) {
-		mhi_dev_ctxt->mhi_ctrl_seg->mhi_ec_list[chan].
+	} else if (mhi_dev_ctxt->mmio_info.event_db_addr == io_addr) {
+		if (chan < mhi_dev_ctxt->mmio_info.nr_event_rings)
+			mhi_dev_ctxt->mhi_ctrl_seg->mhi_ec_list[chan].
 				mhi_event_write_ptr = val;
+		else
+			mhi_log(MHI_MSG_ERROR,
+				"Bad EV ring index: %lx\n", chan);
 	}
 }
 
@@ -127,15 +133,17 @@ mhi_pcie_read_ep_config_err:
 static void mhi_move_interrupts(struct mhi_device_ctxt *mhi_dev_ctxt, u32 cpu)
 {
 	u32 irq_to_affin = 0;
+	int i;
 
-	MHI_GET_EVENT_RING_INFO(EVENT_RING_MSI_VEC,
-	mhi_dev_ctxt->ev_ring_props[IPA_IN_EV_RING], irq_to_affin);
-	irq_to_affin += mhi_dev_ctxt->dev_props->irq_base;
-	irq_set_affinity(irq_to_affin, get_cpu_mask(cpu));
-	MHI_GET_EVENT_RING_INFO(EVENT_RING_MSI_VEC,
-	mhi_dev_ctxt->ev_ring_props[IPA_OUT_EV_RING], irq_to_affin);
-	irq_to_affin += mhi_dev_ctxt->dev_props->irq_base;
-	irq_set_affinity(irq_to_affin, get_cpu_mask(cpu));
+	for (i = 0; i < mhi_dev_ctxt->mmio_info.nr_event_rings; ++i) {
+		if (MHI_ER_DATA_TYPE ==
+			GET_EV_PROPS(EV_TYPE,
+				mhi_dev_ctxt->ev_ring_props[i].flags)) {
+			irq_to_affin = mhi_dev_ctxt->ev_ring_props[i].msi_vec;
+			irq_to_affin += mhi_dev_ctxt->dev_props->irq_base;
+			irq_set_affinity(irq_to_affin, get_cpu_mask(cpu));
+		}
+	}
 }
 
 int mhi_cpu_notifier_cb(struct notifier_block *nfb, unsigned long action,
@@ -220,47 +228,136 @@ mhi_gpio_dir_err:
 	return -EIO;
 }
 
+int get_chan_props(struct mhi_device_ctxt *mhi_dev_ctxt, int chan,
+		   struct mhi_chan_info *chan_info)
+{
+	char dt_prop[MAX_BUF_SIZE];
+	int r;
+
+	scnprintf(dt_prop, MAX_BUF_SIZE, "%s%d", "mhi-chan-cfg-", chan);
+	r = of_property_read_u32_array(
+			mhi_dev_ctxt->dev_info->plat_dev->dev.of_node,
+			dt_prop, (u32 *)chan_info,
+			sizeof(struct mhi_chan_info) / sizeof(u32));
+	if (r)
+		mhi_log(MHI_MSG_VERBOSE,
+			"Failed to pull chan %d info from DT, %d\n", chan, r);
+	return r;
+}
+
+int mhi_release_chan_ctxt(struct mhi_chan_ctxt *cc_list,
+			  struct mhi_ring *ring)
+{
+	if (cc_list == NULL || ring == NULL)
+		return -EINVAL;
+
+	dma_free_coherent(NULL, ring->len, ring->base,
+			 cc_list->mhi_trb_ring_base_addr);
+	mhi_init_chan_ctxt(cc_list, 0, 0, 0, 0, 0, ring,
+				MHI_CHAN_STATE_DISABLED);
+	return 0;
+}
+
+void free_tre_ring(struct mhi_client_handle *client_handle)
+{
+	struct mhi_chan_ctxt *chan_ctxt;
+	struct mhi_device_ctxt *mhi_dev_ctxt = client_handle->mhi_dev_ctxt;
+	int chan = client_handle->chan_info.chan_nr;
+	int r;
+
+	chan_ctxt = &mhi_dev_ctxt->mhi_ctrl_seg->mhi_cc_list[chan];
+	r = mhi_release_chan_ctxt(chan_ctxt,
+				&mhi_dev_ctxt->mhi_local_chan_ctxt[chan]);
+	if (r)
+		mhi_log(MHI_MSG_ERROR,
+		"Failed to release chan %d ret %d\n", chan, r);
+}
+
+static int populate_tre_ring(struct mhi_client_handle *client_handle)
+{
+	dma_addr_t ring_dma_addr;
+	void *ring_local_addr;
+	struct mhi_chan_ctxt *chan_ctxt;
+	struct mhi_device_ctxt *mhi_dev_ctxt = client_handle->mhi_dev_ctxt;
+	u32 chan = client_handle->chan_info.chan_nr;
+	u32 nr_desc = client_handle->chan_info.max_desc;
+
+	mhi_log(MHI_MSG_INFO,
+		"Entered chan %d requested desc %d\n", chan, nr_desc);
+
+	chan_ctxt = &mhi_dev_ctxt->mhi_ctrl_seg->mhi_cc_list[chan];
+	ring_local_addr = dma_alloc_coherent(NULL,
+				 nr_desc * sizeof(union mhi_xfer_pkt),
+				 &ring_dma_addr, GFP_KERNEL);
+
+	if (ring_local_addr == NULL)
+		return -ENOMEM;
+
+	mhi_init_chan_ctxt(chan_ctxt, ring_dma_addr,
+			   (uintptr_t)ring_local_addr,
+			   nr_desc,
+			   GET_CHAN_PROPS(CHAN_DIR,
+				client_handle->chan_info.flags),
+			   client_handle->chan_info.ev_ring,
+			   &mhi_dev_ctxt->mhi_local_chan_ctxt[chan],
+			   MHI_CHAN_STATE_ENABLED);
+
+	mhi_log(MHI_MSG_INFO, "Exited\n");
+	return 0;
+}
+
 enum MHI_STATUS mhi_open_channel(struct mhi_client_handle *client_handle)
 {
 	enum MHI_STATUS ret_val = MHI_STATUS_SUCCESS;
-	int chan = 0;
 	struct mhi_device_ctxt *mhi_dev_ctxt;
 	struct mhi_control_seg *mhi_ctrl_seg = NULL;
+	int r = 0;
+	int chan;
 
 	if (NULL == client_handle ||
 	    client_handle->magic != MHI_HANDLE_MAGIC)
 		return MHI_STATUS_ERROR;
-	chan = client_handle->chan;
+
+	mhi_dev_ctxt = client_handle->mhi_dev_ctxt;
+	r = get_chan_props(mhi_dev_ctxt,
+			    client_handle->chan_info.chan_nr,
+			   &client_handle->chan_info);
+	if (r)
+		return MHI_STATUS_ERROR;
+
+	chan = client_handle->chan_info.chan_nr;
 	mhi_log(MHI_MSG_INFO,
 		"Entered: Client opening chan 0x%x\n", chan);
-	mhi_dev_ctxt = client_handle->mhi_dev_ctxt;
-	switch (mhi_dev_ctxt->dev_exec_env) {
-	case MHI_EXEC_ENV_PBL:
+	if (mhi_dev_ctxt->dev_exec_env <
+		GET_CHAN_PROPS(CHAN_BRINGUP_STAGE,
+				    client_handle->chan_info.flags)) {
 		mhi_log(MHI_MSG_INFO,
-			"Chan %d MHI exec_env %d, not ready!\n",
+			"Chan %d, MHI exec_env %d, not ready!\n",
 			chan, mhi_dev_ctxt->dev_exec_env);
 		return MHI_STATUS_DEVICE_NOT_READY;
-		break;
-	case MHI_EXEC_ENV_SBL:
-		if (chan != MHI_CLIENT_SAHARA_OUT &&
-		    chan != MHI_CLIENT_SAHARA_IN) {
-			mhi_log(MHI_MSG_INFO,
-				"Chan %d, MHI exec_env %d, not ready!\n",
-				chan, mhi_dev_ctxt->dev_exec_env);
-			return MHI_STATUS_DEVICE_NOT_READY;
-		}
-	case MHI_EXEC_ENV_AMSS:
-	default:
-		break;
 	}
+
 	mhi_ctrl_seg = client_handle->mhi_dev_ctxt->mhi_ctrl_seg;
+
+	r = populate_tre_ring(client_handle);
+	if (r) {
+		mhi_log(MHI_MSG_ERROR,
+			"Failed to initialize tre ring chan %d ret %d\n",
+			chan, r);
+		return MHI_STATUS_ERROR;
+	}
 
 	client_handle->event_ring_index =
 		mhi_ctrl_seg->mhi_cc_list[chan].mhi_event_ring_index;
 	client_handle->msi_vec =
 		mhi_ctrl_seg->mhi_ec_list[
 			client_handle->event_ring_index].mhi_msi_vector;
+	client_handle->intmod_t = mhi_ctrl_seg->mhi_ec_list[
+			client_handle->event_ring_index].mhi_intmodt;
+
+	init_completion(&client_handle->chan_open_complete);
 	ret_val = start_chan_sync(client_handle);
+
 	if (MHI_STATUS_SUCCESS != ret_val)
 		mhi_log(MHI_MSG_ERROR,
 			"Failed to start chan 0x%x\n", chan);
@@ -273,51 +370,36 @@ EXPORT_SYMBOL(mhi_open_channel);
 
 enum MHI_STATUS mhi_register_channel(struct mhi_client_handle **client_handle,
 		enum MHI_CLIENT_CHANNEL chan, s32 device_index,
-		struct mhi_client_info_t *client_info, void *UserData)
+		struct mhi_client_info_t *client_info, void *user_data)
 {
-	enum MHI_STATUS ret_val = MHI_STATUS_SUCCESS;
-	struct mhi_device_ctxt *mhi_dev_ctxt =
-		&(mhi_devices.device_list[device_index].mhi_ctxt);
+	struct mhi_device_ctxt *mhi_dev_ctxt = NULL;
 
-	if (!VALID_CHAN_NR(chan)) {
-		ret_val = MHI_STATUS_INVALID_CHAN_ERR;
-		goto error_handle;
-	}
+	if (!VALID_CHAN_NR(chan))
+		return MHI_STATUS_INVALID_CHAN_ERR;
 
-	if (NULL == client_handle || device_index < 0) {
-		ret_val = MHI_STATUS_ERROR;
-		goto error_handle;
-	}
+	if (NULL == client_handle || device_index < 0)
+		return MHI_STATUS_ERROR;
+
+	mhi_dev_ctxt = &(mhi_devices.device_list[device_index].mhi_ctxt);
+
 	if (NULL != mhi_dev_ctxt->client_handle_list[chan])
 		return MHI_STATUS_ALREADY_REGISTERED;
 
 	mhi_log(MHI_MSG_INFO,
 			"Opened channel 0x%x for client\n", chan);
 
-	*client_handle = kmalloc(sizeof(struct mhi_client_handle), GFP_KERNEL);
-	if (NULL == *client_handle) {
-		ret_val = MHI_STATUS_ALLOC_ERROR;
-		goto error_handle;
-	}
-	memset(*client_handle, 0, sizeof(struct mhi_client_handle));
-	(*client_handle)->chan = chan;
-	(*client_handle)->mhi_dev_ctxt =
-		&mhi_devices.device_list[device_index].mhi_ctxt;
+	*client_handle = kzalloc(sizeof(struct mhi_client_handle), GFP_KERNEL);
+	if (NULL == *client_handle)
+		return MHI_STATUS_ALLOC_ERROR;
 
+	mhi_dev_ctxt->client_handle_list[chan] = *client_handle;
+	(*client_handle)->mhi_dev_ctxt = mhi_dev_ctxt;
+	(*client_handle)->user_data = user_data;
+	(*client_handle)->magic = MHI_HANDLE_MAGIC;
+	(*client_handle)->chan_info.chan_nr = chan;
 
-	(*client_handle)->mhi_dev_ctxt->client_handle_list[chan] =
-							*client_handle;
 	if (NULL != client_info)
 		(*client_handle)->client_info = *client_info;
-
-	(*client_handle)->user_data = UserData;
-
-	init_completion(&(*client_handle)->chan_reset_complete);
-	init_completion(&(*client_handle)->chan_open_complete);
-
-	(*client_handle)->cb_mod = 1;
-	(*client_handle)->chan_status = 0;
-	(*client_handle)->magic = MHI_HANDLE_MAGIC;
 
 	if (MHI_CLIENT_IP_HW_0_OUT  == chan)
 		(*client_handle)->intmod_t = 10;
@@ -333,42 +415,40 @@ enum MHI_STATUS mhi_register_channel(struct mhi_client_handle **client_handle,
 
 	mhi_log(MHI_MSG_VERBOSE,
 		"Successfuly registered chan 0x%x\n", chan);
-	return ret_val;
-
-error_handle:
-	return ret_val;
+	return MHI_STATUS_SUCCESS;
 }
 EXPORT_SYMBOL(mhi_register_channel);
 
-void mhi_close_channel(struct mhi_client_handle *mhi_handle)
+void mhi_close_channel(struct mhi_client_handle *client_handle)
 {
-	u32 index = 0;
-	u32 chan = 0;
+	u32 chan;
 	int r = 0;
 	enum MHI_STATUS ret_val = MHI_STATUS_SUCCESS;
-	if (NULL == mhi_handle ||
-	    mhi_handle->magic != MHI_HANDLE_MAGIC)
+
+	if (!client_handle ||
+	    client_handle->magic != MHI_HANDLE_MAGIC ||
+	    !client_handle->chan_status)
 		return;
-	chan = mhi_handle->chan;
+
+	chan = client_handle->chan_info.chan_nr;
+
 	mhi_log(MHI_MSG_INFO, "Client attempting to close chan 0x%x\n", chan);
-	index = mhi_handle->device_index;
-	if (!atomic_read(&mhi_handle->mhi_dev_ctxt->flags.pending_ssr)) {
-		ret_val = mhi_send_cmd(mhi_handle->mhi_dev_ctxt,
+	init_completion(&client_handle->chan_reset_complete);
+	if (!atomic_read(&client_handle->mhi_dev_ctxt->flags.pending_ssr)) {
+		ret_val = mhi_send_cmd(client_handle->mhi_dev_ctxt,
 					MHI_COMMAND_RESET_CHAN, chan);
 		if (ret_val != MHI_STATUS_SUCCESS) {
 			mhi_log(MHI_MSG_ERROR,
 				"Failed to send reset cmd for chan %d ret %d\n",
 				chan, ret_val);
 		}
-		r = wait_for_completion_interruptible_timeout(
-				&mhi_handle->chan_reset_complete,
+		r = wait_for_completion_timeout(
+				&client_handle->chan_reset_complete,
 				msecs_to_jiffies(MHI_MAX_CMD_TIMEOUT));
-
-		if (0 == r || -ERESTARTSYS == r) {
+		if (!r)
 			mhi_log(MHI_MSG_ERROR,
 					"Failed to reset chan %d ret %d\n",
 					chan, r);
-		}
 	} else {
 		/*
 		 * Assumption: Device is not playing with our
@@ -378,180 +458,109 @@ void mhi_close_channel(struct mhi_client_handle *mhi_handle)
 			"Pending SSR local free only chan %d.\n", chan);
 	}
 
+	mhi_log(MHI_MSG_INFO, "Freeing ring for chan 0x%x\n", chan);
+	free_tre_ring(client_handle);
 	mhi_log(MHI_MSG_INFO, "Chan 0x%x confirmed closed.\n", chan);
-	atomic_dec(&(mhi_devices.device_list[index].ref_count));
-	mhi_handle->chan_status = 0;
+	client_handle->chan_status = 0;
 }
 EXPORT_SYMBOL(mhi_close_channel);
 
-void ring_ev_db(struct mhi_device_ctxt *mhi_dev_ctxt, u32 event_ring_index)
+void mhi_update_chan_db(struct mhi_device_ctxt *mhi_dev_ctxt,
+					  u32 chan)
 {
-	struct mhi_ring *event_ctxt = NULL;
-	u64 db_value = 0;
-	event_ctxt =
-		&mhi_dev_ctxt->mhi_local_event_ctxt[event_ring_index];
-	db_value = mhi_v2p_addr(mhi_dev_ctxt->mhi_ctrl_seg_info,
-			(uintptr_t)event_ctxt->wp);
-	mhi_process_db(mhi_dev_ctxt, mhi_dev_ctxt->event_db_addr,
-					event_ring_index, db_value);
+	struct mhi_ring *chan_ctxt;
+	u64 db_value;
+
+	chan_ctxt = &mhi_dev_ctxt->mhi_local_chan_ctxt[chan];
+	db_value = virt_to_dma(NULL, chan_ctxt->wp);
+	mhi_dev_ctxt->mhi_chan_db_order[chan]++;
+	if (IS_HARDWARE_CHANNEL(chan) && chan_ctxt->dir == MHI_IN) {
+		if ((mhi_dev_ctxt->counters.chan_pkts_xferd[chan] %
+					MHI_XFER_DB_INTERVAL) == 0)
+			mhi_process_db(mhi_dev_ctxt,
+				mhi_dev_ctxt->mmio_info.chan_db_addr,
+					chan, db_value);
+	} else {
+		mhi_process_db(mhi_dev_ctxt,
+				mhi_dev_ctxt->mmio_info.chan_db_addr,
+				chan, db_value);
+	}
 }
 
-enum MHI_STATUS mhi_add_elements_to_event_rings(
-					struct mhi_device_ctxt *mhi_dev_ctxt,
-					enum STATE_TRANSITION new_state)
+enum MHI_STATUS mhi_check_m2_transition(struct mhi_device_ctxt *mhi_dev_ctxt)
 {
 	enum MHI_STATUS ret_val = MHI_STATUS_SUCCESS;
-	enum MHI_EVENT_RING_STATE event_ring_state = MHI_EVENT_RING_UINIT;
-	switch (new_state) {
-	case STATE_TRANSITION_READY:
-		MHI_GET_EVENT_RING_INFO(EVENT_RING_STATE_FIELD,
-				mhi_dev_ctxt->ev_ring_props[PRIMARY_EVENT_RING],
-				event_ring_state);
-			ret_val = mhi_init_event_ring(mhi_dev_ctxt,
-				EV_EL_PER_RING,
-				mhi_dev_ctxt->
-					alloced_ev_rings[PRIMARY_EVENT_RING]);
-			if (MHI_STATUS_SUCCESS != ret_val) {
-
-				mhi_log(MHI_MSG_ERROR,
-					"Failed to add ev el on event ring\n");
-				return MHI_STATUS_ERROR;
-				}
-				MHI_SET_EVENT_RING_INFO(EVENT_RING_STATE_FIELD,
-					mhi_dev_ctxt->
-					ev_ring_props[PRIMARY_EVENT_RING],
-					MHI_EVENT_RING_INIT);
-		mhi_log(MHI_MSG_ERROR,
-			"Event ring initialized ringing, EV DB to resume\n");
-		ring_ev_db(mhi_dev_ctxt,
-			mhi_dev_ctxt->alloced_ev_rings[PRIMARY_EVENT_RING]);
-		break;
-	case STATE_TRANSITION_AMSS:
-		MHI_GET_EVENT_RING_INFO(EVENT_RING_STATE_FIELD,
-			mhi_dev_ctxt->ev_ring_props[IPA_OUT_EV_RING],
-			event_ring_state);
-		if (MHI_EVENT_RING_UINIT == event_ring_state) {
-			ret_val = mhi_init_event_ring(mhi_dev_ctxt,
-				EV_EL_PER_RING,
-				mhi_dev_ctxt->
-					alloced_ev_rings[IPA_OUT_EV_RING]);
-			if (MHI_STATUS_SUCCESS != ret_val) {
-				mhi_log(MHI_MSG_ERROR,
-					"Failed to add ev el on event ring\n");
-				return MHI_STATUS_ERROR;
+	mhi_log(MHI_MSG_VERBOSE, "state = %d\n", mhi_dev_ctxt->mhi_state);
+	if (mhi_dev_ctxt->mhi_state == MHI_STATE_M2) {
+		mhi_log(MHI_MSG_INFO, "M2 Transition flag value = %d\n",
+			(atomic_read(&mhi_dev_ctxt->flags.m2_transition)));
+		if ((atomic_read(&mhi_dev_ctxt->flags.m2_transition)) == 0) {
+			if (mhi_dev_ctxt->flags.link_up) {
+				mhi_assert_device_wake(mhi_dev_ctxt);
+				ret_val = MHI_STATUS_CHAN_NOT_READY;
 			}
-			ret_val = mhi_init_event_ring(mhi_dev_ctxt,
-				EV_EL_PER_RING,
-				mhi_dev_ctxt->alloced_ev_rings[IPA_IN_EV_RING]);
-			if (MHI_STATUS_SUCCESS != ret_val) {
-				mhi_log(MHI_MSG_ERROR,
-					"Failed to add ev el on event ring\n");
-				return MHI_STATUS_ERROR;
-			}
-			MHI_SET_EVENT_RING_INFO(EVENT_RING_STATE_FIELD,
-				mhi_dev_ctxt->ev_ring_props[IPA_OUT_EV_RING],
-				MHI_EVENT_RING_INIT);
-			MHI_SET_EVENT_RING_INFO(EVENT_RING_STATE_FIELD,
-				mhi_dev_ctxt->ev_ring_props[IPA_IN_EV_RING],
-				MHI_EVENT_RING_INIT);
+		} else{
+			mhi_log(MHI_MSG_INFO, "M2 transition flag is set\n");
+			ret_val = MHI_STATUS_CHAN_NOT_READY;
 		}
-		ring_ev_db(mhi_dev_ctxt,
-			mhi_dev_ctxt->alloced_ev_rings[SOFTWARE_EV_RING]);
-		ring_ev_db(mhi_dev_ctxt,
-			mhi_dev_ctxt->alloced_ev_rings[IPA_OUT_EV_RING]);
-		ring_ev_db(mhi_dev_ctxt,
-			mhi_dev_ctxt->alloced_ev_rings[IPA_IN_EV_RING]);
-		break;
-	default:
-		mhi_log(MHI_MSG_ERROR,
-			"Unrecognized event stage, %d\n", new_state);
-		ret_val = MHI_STATUS_ERROR;
-		break;
+	} else {
+	   ret_val = MHI_STATUS_SUCCESS;
 	}
+
 	return ret_val;
 }
 
-static enum MHI_STATUS mhi_wake_dev_from_m3(
-		struct mhi_device_ctxt *mhi_dev_ctxt)
+static inline enum MHI_STATUS mhi_queue_tre(struct mhi_device_ctxt
+							*mhi_dev_ctxt,
+					    u32 chan,
+					    enum MHI_RING_TYPE type)
 {
-	int r = 0;
-	if (!atomic_cmpxchg(&mhi_dev_ctxt->flags.m0_work_enabled, 0, 1)) {
-		mhi_log(MHI_MSG_INFO,
-			"Initiating M0 work...\n");
-		if (atomic_read(&mhi_dev_ctxt->flags.pending_resume)) {
-			mhi_log(MHI_MSG_INFO,
-			"Resume is pending, quitting ...\n");
-			atomic_set(&mhi_dev_ctxt->flags.m0_work_enabled, 0);
-			__pm_stay_awake(&mhi_dev_ctxt->w_lock);
-			__pm_relax(&mhi_dev_ctxt->w_lock);
-			return MHI_STATUS_SUCCESS;
-		}
-		r = queue_work(mhi_dev_ctxt->work_queue,
-		     &mhi_dev_ctxt->m0_work);
-		if (!r)
-			mhi_log(MHI_MSG_CRITICAL,
-				"Failed to start M0 work.\n");
-	} else {
-		mhi_log(MHI_MSG_VERBOSE,
-			"M0 work pending.\n");
-	}
-	return MHI_STATUS_SUCCESS;
-}
-
-static enum MHI_STATUS mhi_notify_device(
-			struct mhi_device_ctxt *mhi_dev_ctxt, u32 chan)
-{
-	unsigned long flags = 0;
-	u64 db_value;
 	struct mhi_chan_ctxt *chan_ctxt;
+	unsigned long flags = 0;
+	enum MHI_STATUS ret_val = MHI_STATUS_SUCCESS;
+	u64 db_value = 0;
 	chan_ctxt = &mhi_dev_ctxt->mhi_ctrl_seg->mhi_cc_list[chan];
-	spin_lock_irqsave(&mhi_dev_ctxt->db_write_lock[chan], flags);
-	if (likely(((MHI_STATE_M0 == mhi_dev_ctxt->mhi_state) ||
-		(MHI_STATE_M1 == mhi_dev_ctxt->mhi_state)) &&
-		(chan_ctxt->mhi_chan_state != MHI_CHAN_STATE_ERROR) &&
-		!mhi_dev_ctxt->flags.pending_M3)) {
+	mhi_dev_ctxt->counters.m1_m0++;
+	mhi_log(MHI_MSG_VERBOSE, "Entered");
 
-		mhi_dev_ctxt->mhi_chan_db_order[chan]++;
-		db_value = mhi_v2p_addr(mhi_dev_ctxt->mhi_ctrl_seg_info,
-			(uintptr_t)mhi_dev_ctxt->mhi_local_chan_ctxt[chan].wp);
-		if (IS_HARDWARE_CHANNEL(chan) && (chan % 2)) {
-			if (unlikely(mhi_xfer_db_interval != 0)) {
-				if ((mhi_dev_ctxt->
-					mhi_chan_cntr[chan].pkts_xferd %
-						mhi_xfer_db_interval) == 0) {
-					mhi_process_db(mhi_dev_ctxt,
-						mhi_dev_ctxt->channel_db_addr,
-							chan, db_value);
-				}
-			} else {
-				if ((mhi_dev_ctxt->
-					mhi_chan_cntr[chan].pkts_xferd %
-						MHI_XFER_DB_INTERVAL) == 0) {
-					mhi_process_db(mhi_dev_ctxt,
-						mhi_dev_ctxt->channel_db_addr,
-							chan, db_value);
-				}
-			}
-		} else {
+	if (type == MHI_RING_TYPE_CMD_RING)
+		atomic_inc(&mhi_dev_ctxt->counters.outbound_acks);
+
+	ret_val = mhi_check_m2_transition(mhi_dev_ctxt);
+	if (likely(((ret_val == MHI_STATUS_SUCCESS) &&
+	    (((mhi_dev_ctxt->mhi_state == MHI_STATE_M0) ||
+	      (mhi_dev_ctxt->mhi_state == MHI_STATE_M1))) &&
+	    (chan_ctxt->mhi_chan_state != MHI_CHAN_STATE_ERROR)) &&
+	    (!mhi_dev_ctxt->flags.pending_M3))) {
+		if (likely(type == MHI_RING_TYPE_XFER_RING)) {
+			spin_lock_irqsave(&mhi_dev_ctxt->db_write_lock[chan],
+					   flags);
+			db_value = virt_to_dma(NULL,
+				mhi_dev_ctxt->mhi_local_chan_ctxt[chan].wp);
+			mhi_dev_ctxt->mhi_chan_db_order[chan]++;
+			mhi_update_chan_db(mhi_dev_ctxt, chan);
+			spin_unlock_irqrestore(
+			   &mhi_dev_ctxt->db_write_lock[chan], flags);
+		} else if (type == MHI_RING_TYPE_CMD_RING) {
+			db_value = virt_to_dma(NULL,
+				mhi_dev_ctxt->mhi_local_cmd_ctxt->wp);
+			mhi_dev_ctxt->cmd_ring_order++;
 			mhi_process_db(mhi_dev_ctxt,
-			     mhi_dev_ctxt->channel_db_addr,
-			     chan, db_value);
+				mhi_dev_ctxt->mmio_info.cmd_db_addr,
+				0, db_value);
+		} else {
+			mhi_log(MHI_MSG_VERBOSE,
+			"Wrong type of packet = %d\n", type);
+			ret_val = MHI_STATUS_ERROR;
 		}
 	} else {
 		mhi_log(MHI_MSG_VERBOSE,
-			"Wakeup, pending data MHI state %d, chan state %d\n",
-			mhi_dev_ctxt->mhi_state, chan_ctxt->mhi_chan_state);
-		if (mhi_dev_ctxt->flags.pending_M3 ||
-		    mhi_dev_ctxt->mhi_state == MHI_STATE_M3) {
-			mhi_wake_dev_from_m3(mhi_dev_ctxt);
-		}
+			"Wakeup, pending data state %d chan state %d\n",
+						 mhi_dev_ctxt->mhi_state,
+						 chan_ctxt->mhi_chan_state);
+			ret_val = MHI_STATUS_SUCCESS;
 	}
-	spin_unlock_irqrestore(&mhi_dev_ctxt->db_write_lock[chan], flags);
-	/*
-	 * If there are no clients still sending we can trigger our
-	 * inactivity timer
-	 */
-	return MHI_STATUS_SUCCESS;
+	return ret_val;
 }
 
 enum MHI_STATUS mhi_queue_xfer(struct mhi_client_handle *client_handle,
@@ -562,42 +571,22 @@ enum MHI_STATUS mhi_queue_xfer(struct mhi_client_handle *client_handle,
 	enum MHI_CLIENT_CHANNEL chan;
 	struct mhi_device_ctxt *mhi_dev_ctxt;
 	unsigned long flags;
-	uintptr_t trb_index;
 
-	if (NULL == client_handle || !VALID_CHAN_NR(client_handle->chan) ||
-		0 == buf || 0 == buf_len) {
+	if (!client_handle || !buf || !buf_len) {
 		mhi_log(MHI_MSG_CRITICAL, "Bad input args\n");
 		return MHI_STATUS_ERROR;
 	}
 	MHI_ASSERT(VALID_BUF(buf, buf_len),
 			"Client buffer is of invalid length\n");
 	mhi_dev_ctxt = client_handle->mhi_dev_ctxt;
-	chan = client_handle->chan;
+	chan = client_handle->chan_info.chan_nr;
+	pm_runtime_get(&mhi_dev_ctxt->dev_info->plat_dev->dev);
 
-	/* Bump up the vote for pending data */
-	read_lock_irqsave(&mhi_dev_ctxt->xfer_lock, flags);
-
-	atomic_inc(&mhi_dev_ctxt->flags.data_pending);
-	mhi_dev_ctxt->counters.m1_m0++;
-	if (mhi_dev_ctxt->flags.link_up)
-		mhi_assert_device_wake(mhi_dev_ctxt);
-	read_unlock_irqrestore(&mhi_dev_ctxt->xfer_lock, flags);
-
-	/* Add the TRB to the correct transfer ring */
-	ret_val = ctxt_add_element(&mhi_dev_ctxt->mhi_local_chan_ctxt[chan],
-				(void *)&pkt_loc);
-	if (unlikely(MHI_STATUS_SUCCESS != ret_val)) {
-		mhi_log(MHI_MSG_CRITICAL,
-				"Failed to insert trb in xfer ring\n");
-		goto error;
-	}
-
+	pkt_loc = mhi_dev_ctxt->mhi_local_chan_ctxt[chan].wp;
 	pkt_loc->data_tx_pkt.buffer_ptr = buf;
-
-	get_element_index(&mhi_dev_ctxt->mhi_local_chan_ctxt[chan],
-				pkt_loc, &trb_index);
-
 	pkt_loc->type.info = mhi_flags;
+	trace_mhi_tre(pkt_loc, chan, 0);
+
 	if (likely(0 != client_handle->intmod_t))
 		MHI_TRB_SET_INFO(TX_TRB_BEI, pkt_loc, 1);
 	else
@@ -605,21 +594,37 @@ enum MHI_STATUS mhi_queue_xfer(struct mhi_client_handle *client_handle,
 
 	MHI_TRB_SET_INFO(TX_TRB_TYPE, pkt_loc, MHI_PKT_TYPE_TRANSFER);
 	MHI_TX_TRB_SET_LEN(TX_TRB_LEN, pkt_loc, buf_len);
+
+	/* Ensure writes to descriptor are flushed */
+	wmb();
+
 	mhi_log(MHI_MSG_VERBOSE,
 		"Channel %d Has buf size of %d and buf addr %lx, flags 0x%x\n",
 				chan, buf_len, (uintptr_t)buf, mhi_flags);
 
-	if (chan % 2 == 0) {
-		atomic_inc(&mhi_dev_ctxt->counters.outbound_acks);
+	/* Add the TRB to the correct transfer ring */
+	ret_val = ctxt_add_element(&mhi_dev_ctxt->mhi_local_chan_ctxt[chan],
+				(void *)&pkt_loc);
+	if (unlikely(MHI_STATUS_SUCCESS != ret_val)) {
 		mhi_log(MHI_MSG_VERBOSE,
-			"Queued outbound pkt. Pending Acks %d\n",
-		atomic_read(&mhi_dev_ctxt->counters.outbound_acks));
+				"Failed to insert trb in xfer ring\n");
+		goto error;
 	}
-	mhi_notify_device(mhi_dev_ctxt, chan);
+
+	read_lock_irqsave(&mhi_dev_ctxt->xfer_lock, flags);
+	atomic_inc(&mhi_dev_ctxt->flags.data_pending);
+	if (MHI_OUT ==
+	    GET_CHAN_PROPS(CHAN_DIR, client_handle->chan_info.flags))
+		atomic_inc(&mhi_dev_ctxt->counters.outbound_acks);
+	ret_val = mhi_queue_tre(mhi_dev_ctxt, chan, MHI_RING_TYPE_XFER_RING);
+	if (unlikely(MHI_STATUS_SUCCESS != ret_val))
+		mhi_log(MHI_MSG_VERBOSE, "Failed queue TRE.\n");
 	atomic_dec(&mhi_dev_ctxt->flags.data_pending);
-	return MHI_STATUS_SUCCESS;
+	read_unlock_irqrestore(&mhi_dev_ctxt->xfer_lock, flags);
+
 error:
-	atomic_dec(&mhi_dev_ctxt->flags.data_pending);
+	pm_runtime_mark_last_busy(&mhi_dev_ctxt->dev_info->plat_dev->dev);
+	pm_runtime_put_noidle(&mhi_dev_ctxt->dev_info->plat_dev->dev);
 	return ret_val;
 }
 EXPORT_SYMBOL(mhi_queue_xfer);
@@ -627,38 +632,43 @@ EXPORT_SYMBOL(mhi_queue_xfer);
 enum MHI_STATUS mhi_send_cmd(struct mhi_device_ctxt *mhi_dev_ctxt,
 			enum MHI_COMMAND cmd, u32 chan)
 {
-	u64 db_value = 0;
+	unsigned long flags = 0;
 	union mhi_cmd_pkt *cmd_pkt = NULL;
 	enum MHI_CHAN_STATE from_state = MHI_CHAN_STATE_DISABLED;
 	enum MHI_CHAN_STATE to_state = MHI_CHAN_STATE_DISABLED;
 	enum MHI_PKT_TYPE ring_el_type = MHI_PKT_TYPE_NOOP_CMD;
 	struct mutex *chan_mutex = NULL;
+	enum MHI_STATUS ret_val = MHI_STATUS_SUCCESS;
+
+	if (chan >= MHI_MAX_CHANNELS ||
+		cmd >= MHI_COMMAND_MAX_NR || mhi_dev_ctxt == NULL) {
+		mhi_log(MHI_MSG_ERROR,
+			"Invalid channel id, received id: 0x%x", chan);
+		return MHI_STATUS_ERROR;
+	}
 
 	mhi_log(MHI_MSG_INFO,
 		"Entered, MHI state %d dev_exec_env %d chan %d cmd %d\n",
 			mhi_dev_ctxt->mhi_state,
 			mhi_dev_ctxt->dev_exec_env,
 			chan, cmd);
-	if (chan >= MHI_MAX_CHANNELS ||
-		cmd >= MHI_COMMAND_MAX_NR || NULL == mhi_dev_ctxt) {
-		mhi_log(MHI_MSG_ERROR,
-			"Invalid channel id, received id: 0x%x", chan);
-		goto error_general;
-	}
-	mhi_assert_device_wake(mhi_dev_ctxt);
+
+	pm_runtime_get(&mhi_dev_ctxt->dev_info->plat_dev->dev);
 	/*
-	 * If there is a cmd pending a struct device confirmation,
+	 * If there is a cmd pending a device confirmation,
 	 * do not send anymore for this channel
 	 */
-	if (MHI_CMD_PENDING == mhi_dev_ctxt->mhi_chan_pend_cmd_ack[chan])
-		return MHI_STATUS_CMD_PENDING;
+	if (MHI_CMD_PENDING == mhi_dev_ctxt->mhi_chan_pend_cmd_ack[chan]) {
+		mhi_log(MHI_MSG_ERROR, "Cmd Pending on chan %d", chan);
+		ret_val = MHI_STATUS_CMD_PENDING;
+		goto error_invalid;
+	}
 
+	atomic_inc(&mhi_dev_ctxt->flags.data_pending);
 	from_state =
 		mhi_dev_ctxt->mhi_ctrl_seg->mhi_cc_list[chan].mhi_chan_state;
 
 	switch (cmd) {
-	case MHI_COMMAND_NOOP:
-		ring_el_type = MHI_PKT_TYPE_NOOP_CMD;
 		break;
 	case MHI_COMMAND_RESET_CHAN:
 		to_state = MHI_CHAN_STATE_DISABLED;
@@ -666,6 +676,7 @@ enum MHI_STATUS mhi_send_cmd(struct mhi_device_ctxt *mhi_dev_ctxt,
 		break;
 	case MHI_COMMAND_START_CHAN:
 		switch (from_state) {
+		case MHI_CHAN_STATE_DISABLED:
 		case MHI_CHAN_STATE_ENABLED:
 		case MHI_CHAN_STATE_STOP:
 			to_state = MHI_CHAN_STATE_RUNNING;
@@ -675,72 +686,44 @@ enum MHI_STATUS mhi_send_cmd(struct mhi_device_ctxt *mhi_dev_ctxt,
 				"Invalid state transition for "
 				"cmd 0x%x, from_state 0x%x\n",
 				cmd, from_state);
-			goto error_general;
-		}
-		ring_el_type = MHI_PKT_TYPE_START_CHAN_CMD;
-		break;
-	case MHI_COMMAND_STOP_CHAN:
-		switch (from_state) {
-		case MHI_CHAN_STATE_RUNNING:
-		case MHI_CHAN_STATE_SUSPENDED:
-			to_state = MHI_CHAN_STATE_STOP;
-			break;
-		default:
-			mhi_log(MHI_MSG_ERROR,
-				"Invalid state transition for "
-				"cmd 0x%x, from_state 0x%x\n",
-					cmd, from_state);
+			ret_val = MHI_STATUS_BAD_STATE;
 			goto error_invalid;
 		}
-		ring_el_type = MHI_PKT_TYPE_STOP_CHAN_CMD;
+		ring_el_type = MHI_PKT_TYPE_START_CHAN_CMD;
 		break;
 	default:
 		mhi_log(MHI_MSG_ERROR, "Bad command received\n");
 	}
 
 	mutex_lock(&mhi_dev_ctxt->mhi_cmd_mutex_list[PRIMARY_CMD_RING]);
-
-	if (MHI_STATUS_SUCCESS !=
-			ctxt_add_element(mhi_dev_ctxt->mhi_local_cmd_ctxt,
-			(void *)&cmd_pkt)) {
+	ret_val = ctxt_add_element(mhi_dev_ctxt->mhi_local_cmd_ctxt,
+			(void *)&cmd_pkt);
+	if (ret_val) {
 		mhi_log(MHI_MSG_ERROR, "Failed to insert element\n");
 		goto error_general;
 	}
 	chan_mutex = &mhi_dev_ctxt->mhi_chan_mutex[chan];
-	if (MHI_COMMAND_NOOP != cmd) {
-		mutex_lock(chan_mutex);
-		MHI_TRB_SET_INFO(CMD_TRB_TYPE, cmd_pkt, ring_el_type);
-		MHI_TRB_SET_INFO(CMD_TRB_CHID, cmd_pkt, chan);
-		mutex_unlock(chan_mutex);
-	}
-	db_value = mhi_v2p_addr(mhi_dev_ctxt->mhi_ctrl_seg_info,
-			(uintptr_t)mhi_dev_ctxt->mhi_local_cmd_ctxt->wp);
+	mutex_lock(chan_mutex);
+	MHI_TRB_SET_INFO(CMD_TRB_TYPE, cmd_pkt, ring_el_type);
+	MHI_TRB_SET_INFO(CMD_TRB_CHID, cmd_pkt, chan);
+	mutex_unlock(chan_mutex);
 	mhi_dev_ctxt->mhi_chan_pend_cmd_ack[chan] = MHI_CMD_PENDING;
 
-	if (MHI_STATE_M0 == mhi_dev_ctxt->mhi_state ||
-		MHI_STATE_M1 == mhi_dev_ctxt->mhi_state) {
-		mhi_dev_ctxt->cmd_ring_order++;
-		mhi_process_db(mhi_dev_ctxt, mhi_dev_ctxt->cmd_db_addr, 0,
-								db_value);
-	} else {
-		mhi_log(MHI_MSG_INFO,
-			"Waking dev from M3 for cmd %d on chan %d\n",
-			 cmd, chan);
-		mhi_wake_dev_from_m3(mhi_dev_ctxt);
-	}
+	read_lock_irqsave(&mhi_dev_ctxt->xfer_lock, flags);
+	mhi_queue_tre(mhi_dev_ctxt, 0, MHI_RING_TYPE_CMD_RING);
+	read_unlock_irqrestore(&mhi_dev_ctxt->xfer_lock, flags);
 
 	mhi_log(MHI_MSG_VERBOSE, "Sent command 0x%x for chan %d\n",
 								cmd, chan);
-	mutex_unlock(&mhi_dev_ctxt->mhi_cmd_mutex_list[PRIMARY_CMD_RING]);
-
-	mhi_log(MHI_MSG_INFO, "Exited.\n");
-	return MHI_STATUS_SUCCESS;
-
 error_general:
 	mutex_unlock(&mhi_dev_ctxt->mhi_cmd_mutex_list[PRIMARY_CMD_RING]);
 error_invalid:
-	mhi_log(MHI_MSG_INFO, "Exited due to error.\n");
-	return MHI_STATUS_ERROR;
+	pm_runtime_mark_last_busy(&mhi_dev_ctxt->dev_info->plat_dev->dev);
+	pm_runtime_put_noidle(&mhi_dev_ctxt->dev_info->plat_dev->dev);
+
+	atomic_dec(&mhi_dev_ctxt->flags.data_pending);
+	mhi_log(MHI_MSG_INFO, "Exited ret %d.\n", ret_val);
+	return ret_val;
 }
 
 static enum MHI_STATUS parse_outbound(struct mhi_device_ctxt *mhi_dev_ctxt,
@@ -755,24 +738,15 @@ static enum MHI_STATUS parse_outbound(struct mhi_device_ctxt *mhi_dev_ctxt,
 	client_handle = mhi_dev_ctxt->client_handle_list[chan];
 
 	/* If ring is empty */
-	if (mhi_dev_ctxt->mhi_local_chan_ctxt[chan].rp ==
-	    mhi_dev_ctxt->mhi_local_chan_ctxt[chan].wp) {
-		mhi_dev_ctxt->mhi_chan_cntr[chan].empty_ring_removal++;
-		mhi_wait_for_mdm(mhi_dev_ctxt);
-		return mhi_send_cmd(mhi_dev_ctxt,
-					MHI_COMMAND_RESET_CHAN,
-					chan);
-	}
+	MHI_ASSERT(!unlikely(mhi_dev_ctxt->mhi_local_chan_ctxt[chan].rp ==
+	    mhi_dev_ctxt->mhi_local_chan_ctxt[chan].wp), "Empty Event Ring\n");
 
 	if (NULL != client_handle) {
 		result = &mhi_dev_ctxt->client_handle_list[chan]->result;
 
-		if (NULL != (&client_handle->client_info.mhi_client_cb) &&
-		   (0 == (client_handle->pkt_count % client_handle->cb_mod))) {
+		if (NULL != (&client_handle->client_info.mhi_client_cb)) {
 			cb_info.cb_reason = MHI_CB_XFER;
 			cb_info.result = &client_handle->result;
-			cb_info.result->transaction_status =
-					MHI_STATUS_SUCCESS;
 			cb_info.chan = chan;
 			client_handle->client_info.mhi_client_cb(&cb_info);
 		}
@@ -797,14 +771,8 @@ static enum MHI_STATUS parse_inbound(struct mhi_device_ctxt *mhi_dev_ctxt,
 	client_handle = mhi_dev_ctxt->client_handle_list[chan];
 	local_chan_ctxt = &mhi_dev_ctxt->mhi_local_chan_ctxt[chan];
 
-	if (unlikely(mhi_dev_ctxt->mhi_local_chan_ctxt[chan].rp ==
-	    mhi_dev_ctxt->mhi_local_chan_ctxt[chan].wp)) {
-		mhi_dev_ctxt->mhi_chan_cntr[chan].empty_ring_removal++;
-		mhi_wait_for_mdm(mhi_dev_ctxt);
-		return mhi_send_cmd(mhi_dev_ctxt,
-				    MHI_COMMAND_RESET_CHAN,
-				    chan);
-	}
+	MHI_ASSERT(!unlikely(mhi_dev_ctxt->mhi_local_chan_ctxt[chan].rp ==
+	    mhi_dev_ctxt->mhi_local_chan_ctxt[chan].wp), "Empty Event Ring\n");
 
 	if (NULL != mhi_dev_ctxt->client_handle_list[chan])
 		result = &mhi_dev_ctxt->client_handle_list[chan]->result;
@@ -815,14 +783,14 @@ static enum MHI_STATUS parse_inbound(struct mhi_device_ctxt *mhi_dev_ctxt,
 		local_ev_trb_loc,
 		xfer_len);
 		ctxt_del_element(local_chan_ctxt, NULL);
-		if (NULL != client_handle->client_info.mhi_client_cb &&
-		   (0 == (client_handle->pkt_count % client_handle->cb_mod))) {
+		if (NULL != client_handle->client_info.mhi_client_cb) {
 			cb_info.cb_reason = MHI_CB_XFER;
 			cb_info.result = &client_handle->result;
-			cb_info.result->transaction_status =
-					MHI_STATUS_SUCCESS;
 			cb_info.chan = chan;
 			client_handle->client_info.mhi_client_cb(&cb_info);
+		} else {
+			mhi_log(MHI_MSG_VERBOSE,
+				"No client registered chan %d\n", chan);
 		}
 	} else  {
 		/* IN Hardware channel with no client
@@ -863,19 +831,30 @@ enum MHI_STATUS parse_xfer_event(struct mhi_device_ctxt *ctxt,
 	union mhi_xfer_pkt *local_trb_loc;
 	struct mhi_chan_ctxt *chan_ctxt;
 	u32 nr_trb_to_parse;
-	u32 i;
+	u32 i = 0;
+	u32 ev_code;
 
-	switch (MHI_EV_READ_CODE(EV_TRB_CODE, event)) {
-	case MHI_EVENT_CC_EOB:
-		chan = MHI_EV_READ_CHID(EV_CHID, event);
-		phy_ev_trb_loc = MHI_EV_READ_PTR(EV_PTR, event);
-		mhi_log(MHI_MSG_VERBOSE, "IEOB condition detected\n");
+	trace_mhi_ev(event);
+	chan = MHI_EV_READ_CHID(EV_CHID, event);
+	if (unlikely(!VALID_CHAN_NR(chan))) {
+		mhi_log(MHI_MSG_ERROR, "Bad ring id.\n");
+		return MHI_STATUS_ERROR;
+	}
+	ev_code = MHI_EV_READ_CODE(EV_TRB_CODE, event);
+	client_handle = mhi_dev_ctxt->client_handle_list[chan];
+	client_handle->pkt_count++;
+	result = &client_handle->result;
+	mhi_log(MHI_MSG_VERBOSE,
+		"Event Received, chan %d, cc_code %d\n",
+		chan, ev_code);
+	if (ev_code == MHI_EVENT_CC_OVERFLOW)
+		result->transaction_status = MHI_STATUS_OVERFLOW;
+	else
+		result->transaction_status = MHI_STATUS_SUCCESS;
+
+	switch (ev_code) {
 	case MHI_EVENT_CC_OVERFLOW:
-		chan = MHI_EV_READ_CHID(EV_CHID, event);
-		phy_ev_trb_loc = MHI_EV_READ_PTR(EV_PTR, event);
-		mhi_log(MHI_MSG_VERBOSE,
-			"Overflow condition detected chan %d, ptr 0x%lx\n",
-			chan, phy_ev_trb_loc);
+	case MHI_EVENT_CC_EOB:
 	case MHI_EVENT_CC_EOT:
 	{
 		dma_addr_t trb_data_loc;
@@ -883,15 +862,10 @@ enum MHI_STATUS parse_xfer_event(struct mhi_device_ctxt *ctxt,
 		enum MHI_STATUS ret_val;
 		struct mhi_ring *local_chan_ctxt;
 
-		chan = MHI_EV_READ_CHID(EV_CHID, event);
 		local_chan_ctxt =
 			&mhi_dev_ctxt->mhi_local_chan_ctxt[chan];
 		phy_ev_trb_loc = MHI_EV_READ_PTR(EV_PTR, event);
 
-		if (unlikely(!VALID_CHAN_NR(chan))) {
-			mhi_log(MHI_MSG_ERROR, "Bad ring id.\n");
-			break;
-		}
 		chan_ctxt = &mhi_dev_ctxt->mhi_ctrl_seg->mhi_cc_list[chan];
 		ret_val = validate_xfer_el_addr(chan_ctxt,
 						phy_ev_trb_loc);
@@ -902,11 +876,10 @@ enum MHI_STATUS parse_xfer_event(struct mhi_device_ctxt *ctxt,
 		}
 
 		/* Get the TRB this event points to */
-		local_ev_trb_loc =
-			(union mhi_xfer_pkt *)mhi_p2v_addr(
-					mhi_dev_ctxt->mhi_ctrl_seg_info,
-							phy_ev_trb_loc);
+		local_ev_trb_loc = dma_to_virt(NULL, phy_ev_trb_loc);
 		local_trb_loc = (union mhi_xfer_pkt *)local_chan_ctxt->rp;
+
+		trace_mhi_tre(local_trb_loc, chan, 1);
 
 		ret_val = get_nr_enclosed_el(local_chan_ctxt,
 				      local_trb_loc,
@@ -923,7 +896,7 @@ enum MHI_STATUS parse_xfer_event(struct mhi_device_ctxt *ctxt,
 			MHI_TRB_GET_INFO(TX_TRB_IEOT, local_trb_loc, ieot_flag);
 			phy_buf_loc = local_trb_loc->data_tx_pkt.buffer_ptr;
 			trb_data_loc = (dma_addr_t)phy_buf_loc;
-			if (chan % 2)
+			if (local_chan_ctxt->dir == MHI_IN)
 				xfer_len = MHI_EV_READ_LEN(EV_LEN, event);
 			else
 				xfer_len = MHI_TX_TRB_GET_LEN(TX_TRB_LEN,
@@ -936,22 +909,19 @@ enum MHI_STATUS parse_xfer_event(struct mhi_device_ctxt *ctxt,
 				return MHI_STATUS_ERROR;
 			}
 
-			client_handle = mhi_dev_ctxt->client_handle_list[chan];
 			if (NULL != client_handle) {
-				client_handle->pkt_count++;
-				result = &client_handle->result;
 				result->payload_buf = trb_data_loc;
 				result->bytes_xferd = xfer_len;
 				result->user_data = client_handle->user_data;
 			}
-			if (chan % 2) {
+			if (local_chan_ctxt->dir == MHI_IN) {
 				parse_inbound(mhi_dev_ctxt, chan,
 						local_ev_trb_loc, xfer_len);
 			} else {
 				parse_outbound(mhi_dev_ctxt, chan,
 						local_ev_trb_loc, xfer_len);
 			}
-			mhi_dev_ctxt->mhi_chan_cntr[chan].pkts_xferd++;
+			mhi_dev_ctxt->counters.chan_pkts_xferd[chan]++;
 			if (local_trb_loc ==
 				(union mhi_xfer_pkt *)local_chan_ctxt->rp) {
 				mhi_log(MHI_MSG_CRITICAL,
@@ -964,7 +934,7 @@ enum MHI_STATUS parse_xfer_event(struct mhi_device_ctxt *ctxt,
 					rp;
 			}
 			i++;
-		} while (i <= nr_trb_to_parse);
+		} while (i < nr_trb_to_parse);
 		break;
 	} /* CC_EOT */
 	case MHI_EVENT_CC_OOB:
@@ -972,17 +942,16 @@ enum MHI_STATUS parse_xfer_event(struct mhi_device_ctxt *ctxt,
 	{
 		struct mhi_ring *chan_ctxt = NULL;
 		u64 db_value = 0;
-		mhi_dev_ctxt->uldl_enabled = 1;
+		mhi_dev_ctxt->flags.uldl_enabled = 1;
 		chan = MHI_EV_READ_CHID(EV_CHID, event);
-		mhi_dev_ctxt->db_mode[chan] = 1;
+		mhi_dev_ctxt->flags.db_mode[chan] = 1;
 		chan_ctxt =
 			&mhi_dev_ctxt->mhi_local_chan_ctxt[chan];
 		mhi_log(MHI_MSG_INFO, "DB_MODE/OOB Detected chan %d.\n", chan);
 		if (chan_ctxt->wp != chan_ctxt->rp) {
-			db_value = mhi_v2p_addr(mhi_dev_ctxt->mhi_ctrl_seg_info,
-						(uintptr_t)chan_ctxt->wp);
+			db_value = virt_to_dma(NULL, chan_ctxt->wp);
 			mhi_process_db(mhi_dev_ctxt,
-				     mhi_dev_ctxt->channel_db_addr, chan,
+				     mhi_dev_ctxt->mmio_info.chan_db_addr, chan,
 				     db_value);
 		}
 		client_handle = mhi_dev_ctxt->client_handle_list[chan];
@@ -1010,13 +979,8 @@ enum MHI_STATUS recycle_trb_and_ring(struct mhi_device_ctxt *mhi_dev_ctxt,
 	void *removed_element = NULL;
 	void *added_element = NULL;
 
-	if (NULL == mhi_dev_ctxt || NULL == ring ||
-		ring_type > (MHI_RING_TYPE_MAX - 1) ||
-		ring_index > (MHI_MAX_CHANNELS - 1)) {
-		mhi_log(MHI_MSG_ERROR, "Bad input params\n");
-		return ret_val;
-	}
 	ret_val = ctxt_del_element(ring, &removed_element);
+
 	if (MHI_STATUS_SUCCESS != ret_val) {
 		mhi_log(MHI_MSG_ERROR, "Could not remove element from ring\n");
 		return MHI_STATUS_ERROR;
@@ -1024,8 +988,7 @@ enum MHI_STATUS recycle_trb_and_ring(struct mhi_device_ctxt *mhi_dev_ctxt,
 	ret_val = ctxt_add_element(ring, &added_element);
 	if (MHI_STATUS_SUCCESS != ret_val)
 		mhi_log(MHI_MSG_ERROR, "Could not add element to ring\n");
-	db_value = mhi_v2p_addr(mhi_dev_ctxt->mhi_ctrl_seg_info,
-				(uintptr_t)ring->wp);
+	db_value = virt_to_dma(NULL, ring->wp);
 	if (MHI_STATUS_SUCCESS != ret_val)
 		return ret_val;
 	if (MHI_RING_TYPE_XFER_RING == ring_type) {
@@ -1035,6 +998,25 @@ enum MHI_STATUS recycle_trb_and_ring(struct mhi_device_ctxt *mhi_dev_ctxt,
 			(union mhi_xfer_pkt *)added_element;
 		added_xfer_pkt->data_tx_pkt =
 				*(struct mhi_tx_pkt *)removed_xfer_pkt;
+	} else if (MHI_RING_TYPE_EVENT_RING == ring_type &&
+		   mhi_dev_ctxt->counters.m0_m3 > 0 &&
+		   IS_HARDWARE_CHANNEL(ring_index)) {
+		spinlock_t *lock;
+		unsigned long flags;
+
+		if (ring_index >= mhi_dev_ctxt->mmio_info.nr_event_rings)
+			return MHI_STATUS_ERROR;
+
+		lock = &mhi_dev_ctxt->mhi_ev_spinlock_list[ring_index];
+		spin_lock_irqsave(lock, flags);
+		db_value = virt_to_dma(NULL, ring->wp);
+		mhi_update_ctxt(mhi_dev_ctxt,
+				mhi_dev_ctxt->mmio_info.event_db_addr,
+				ring_index, db_value);
+
+		mhi_dev_ctxt->mhi_ev_db_order[ring_index] = 1;
+		mhi_dev_ctxt->counters.ev_counter[ring_index]++;
+		spin_unlock_irqrestore(lock, flags);
 	}
 	atomic_inc(&mhi_dev_ctxt->flags.data_pending);
 	/* Asserting Device Wake here, will imediately wake mdm */
@@ -1050,8 +1032,9 @@ enum MHI_STATUS recycle_trb_and_ring(struct mhi_device_ctxt *mhi_dev_ctxt,
 				mhi_cmd_mutex_list[PRIMARY_CMD_RING];
 			mutex_lock(cmd_mutex);
 			mhi_dev_ctxt->cmd_ring_order = 1;
-			mhi_process_db(mhi_dev_ctxt, mhi_dev_ctxt->cmd_db_addr,
-					ring_index, db_value);
+			mhi_process_db(mhi_dev_ctxt,
+				mhi_dev_ctxt->mmio_info.cmd_db_addr,
+				ring_index, db_value);
 			mutex_unlock(cmd_mutex);
 			break;
 		}
@@ -1062,13 +1045,13 @@ enum MHI_STATUS recycle_trb_and_ring(struct mhi_device_ctxt *mhi_dev_ctxt,
 			lock = &mhi_dev_ctxt->mhi_ev_spinlock_list[ring_index];
 			spin_lock_irqsave(lock, flags);
 			mhi_dev_ctxt->mhi_ev_db_order[ring_index] = 1;
-			if ((mhi_dev_ctxt->ev_counter[ring_index] %
+			if ((mhi_dev_ctxt->counters.ev_counter[ring_index] %
 						MHI_EV_DB_INTERVAL) == 0) {
+				db_value = virt_to_dma(NULL, ring->wp);
 				mhi_process_db(mhi_dev_ctxt,
-						mhi_dev_ctxt->event_db_addr,
-						ring_index, db_value);
+					mhi_dev_ctxt->mmio_info.event_db_addr,
+					ring_index, db_value);
 			}
-			mhi_dev_ctxt->ev_counter[ring_index]++;
 			spin_unlock_irqrestore(lock, flags);
 			break;
 		}
@@ -1080,7 +1063,7 @@ enum MHI_STATUS recycle_trb_and_ring(struct mhi_device_ctxt *mhi_dev_ctxt,
 				flags);
 			mhi_dev_ctxt->mhi_chan_db_order[ring_index] = 1;
 			mhi_process_db(mhi_dev_ctxt,
-					mhi_dev_ctxt->channel_db_addr,
+					mhi_dev_ctxt->mmio_info.chan_db_addr,
 					ring_index, db_value);
 			spin_unlock_irqrestore(
 				&mhi_dev_ctxt->db_write_lock[ring_index],
@@ -1095,25 +1078,6 @@ enum MHI_STATUS recycle_trb_and_ring(struct mhi_device_ctxt *mhi_dev_ctxt,
 	return ret_val;
 }
 
-enum MHI_STATUS mhi_change_chan_state(struct mhi_device_ctxt *mhi_dev_ctxt,
-				u32 chan_id, enum MHI_CHAN_STATE new_state)
-{
-	struct mutex *chan_mutex = &mhi_dev_ctxt->mhi_chan_mutex[chan_id];
-	if (chan_id > (MHI_MAX_CHANNELS - 1) || NULL == mhi_dev_ctxt ||
-		new_state > MHI_CHAN_STATE_LIMIT) {
-		mhi_log(MHI_MSG_ERROR, "Bad input parameters\n");
-		return MHI_STATUS_ERROR;
-	}
-
-	 mutex_lock(chan_mutex);
-
-	/* Set the new state of the channel context */
-	mhi_dev_ctxt->mhi_ctrl_seg->mhi_cc_list[chan_id].mhi_chan_state =
-						MHI_CHAN_STATE_ENABLED;
-	mutex_unlock(chan_mutex);
-	return MHI_STATUS_SUCCESS;
-}
-
 static enum MHI_STATUS reset_chan_cmd(struct mhi_device_ctxt *mhi_dev_ctxt,
 						union mhi_cmd_pkt *cmd_pkt)
 {
@@ -1123,6 +1087,8 @@ static enum MHI_STATUS reset_chan_cmd(struct mhi_device_ctxt *mhi_dev_ctxt,
 	struct mhi_chan_ctxt *chan_ctxt;
 	struct mhi_client_handle *client_handle = NULL;
 	struct mutex *chan_mutex;
+	int pending_el = 0;
+	struct mhi_ring *ring;
 
 	MHI_TRB_GET_INFO(CMD_TRB_CHID, cmd_pkt, chan);
 
@@ -1139,13 +1105,26 @@ static enum MHI_STATUS reset_chan_cmd(struct mhi_device_ctxt *mhi_dev_ctxt,
 	chan_ctxt = &mhi_dev_ctxt->mhi_ctrl_seg->mhi_cc_list[chan];
 	mhi_log(MHI_MSG_INFO, "Processed cmd reset event\n");
 
+	/*
+	 * If outbound elements are pending, they must be cleared since
+	 * they will never be acked after a channel reset.
+	 */
+	ring = &mhi_dev_ctxt->mhi_local_chan_ctxt[chan];
+	if (ring->dir == MHI_OUT)
+		get_nr_enclosed_el(ring, ring->rp, ring->wp, &pending_el);
+
+	mhi_log(MHI_MSG_INFO, "Decrementing chan %d out acks by %d.\n",
+				chan, pending_el);
+
+	atomic_sub(pending_el, &mhi_dev_ctxt->counters.outbound_acks);
+
 	/* Reset the local channel context */
 	local_chan_ctxt->rp = local_chan_ctxt->base;
 	local_chan_ctxt->wp = local_chan_ctxt->base;
 	local_chan_ctxt->ack_rp = local_chan_ctxt->base;
 
 	/* Reset the mhi channel context */
-	chan_ctxt->mhi_chan_state = MHI_CHAN_STATE_ENABLED;
+	chan_ctxt->mhi_chan_state = MHI_CHAN_STATE_DISABLED;
 	chan_ctxt->mhi_trb_read_ptr = chan_ctxt->mhi_trb_ring_base_addr;
 	chan_ctxt->mhi_trb_write_ptr = chan_ctxt->mhi_trb_ring_base_addr;
 
@@ -1173,22 +1152,27 @@ static enum MHI_STATUS start_chan_cmd(struct mhi_device_ctxt *mhi_dev_ctxt,
 	return MHI_STATUS_SUCCESS;
 }
 
-enum MHI_STATUS parse_cmd_event(struct mhi_device_ctxt *mhi_dev_ctxt,
-						union mhi_event_pkt *ev_pkt)
+enum MHI_EVENT_CCS get_cmd_pkt(union mhi_event_pkt *ev_pkt,
+			       union mhi_cmd_pkt **cmd_pkt)
 {
-	enum MHI_STATUS ret_val = MHI_STATUS_SUCCESS;
-	union mhi_cmd_pkt *cmd_pkt = NULL;
 	uintptr_t phy_trb_loc = 0;
 	if (NULL != ev_pkt)
 		phy_trb_loc = (uintptr_t)MHI_EV_READ_PTR(EV_PTR,
 							ev_pkt);
 	else
 		return MHI_STATUS_ERROR;
+	*cmd_pkt = dma_to_virt(NULL, phy_trb_loc);
+	return MHI_EV_READ_CODE(EV_TRB_CODE, ev_pkt);
+}
 
-	cmd_pkt = (union mhi_cmd_pkt *)mhi_p2v_addr(
-			mhi_dev_ctxt->mhi_ctrl_seg_info, phy_trb_loc);
-
-	switch (MHI_EV_READ_CODE(EV_TRB_CODE, ev_pkt)) {
+enum MHI_STATUS parse_cmd_event(struct mhi_device_ctxt *mhi_dev_ctxt,
+						union mhi_event_pkt *ev_pkt)
+{
+	enum MHI_STATUS ret_val = MHI_STATUS_SUCCESS;
+	union mhi_cmd_pkt *cmd_pkt = NULL;
+	u32 event_code;
+	event_code = get_cmd_pkt(ev_pkt, &cmd_pkt);
+	switch (event_code) {
 	case MHI_EVENT_CC_SUCCESS:
 	{
 		u32 chan;
@@ -1217,9 +1201,6 @@ enum MHI_STATUS parse_cmd_event(struct mhi_device_ctxt *mhi_dev_ctxt,
 								cmd_pkt))
 				mhi_log(MHI_MSG_INFO,
 					"Failed to process reset cmd\n");
-			atomic_dec(&mhi_dev_ctxt->start_cmd_pending_ack);
-			wake_up_interruptible(
-				mhi_dev_ctxt->chan_start_complete);
 			break;
 		default:
 			mhi_log(MHI_MSG_INFO,
@@ -1228,6 +1209,8 @@ enum MHI_STATUS parse_cmd_event(struct mhi_device_ctxt *mhi_dev_ctxt,
 			break;
 		}
 		mhi_dev_ctxt->mhi_chan_pend_cmd_ack[chan] = MHI_CMD_NOT_PENDING;
+		atomic_dec(&mhi_dev_ctxt->counters.outbound_acks);
+		BUG_ON(atomic_read(&mhi_dev_ctxt->counters.outbound_acks) >= 0);
 		break;
 	}
 	default:
@@ -1252,7 +1235,7 @@ int mhi_poll_inbound(struct mhi_client_handle *client_handle,
 			NULL == client_handle->mhi_dev_ctxt)
 		return -EINVAL;
 	mhi_dev_ctxt = client_handle->mhi_dev_ctxt;
-	chan = client_handle->chan;
+	chan = client_handle->chan_info.chan_nr;
 	local_chan_ctxt = &mhi_dev_ctxt->mhi_local_chan_ctxt[chan];
 	chan_mutex = &mhi_dev_ctxt->mhi_chan_mutex[chan];
 	mutex_lock(chan_mutex);
@@ -1262,21 +1245,21 @@ int mhi_poll_inbound(struct mhi_client_handle *client_handle,
 		result->bytes_xferd = MHI_TX_TRB_GET_LEN(TX_TRB_LEN,
 					(union mhi_xfer_pkt *)pending_trb);
 		result->flags = pending_trb->info;
-		result->transaction_status = MHI_STATUS_SUCCESS;
+		ret_val = delete_element(local_chan_ctxt,
+					&local_chan_ctxt->ack_rp,
+					&local_chan_ctxt->rp, NULL);
+		if (ret_val != MHI_STATUS_SUCCESS) {
+			mhi_log(MHI_MSG_ERROR,
+				"Internal Failure, inconsistent ring state, ret %d chan %d\n",
+				ret_val, chan);
+			result->payload_buf = 0;
+			result->bytes_xferd = 0;
+			result->transaction_status = MHI_STATUS_ERROR;
+		}
 	} else {
 		result->payload_buf = 0;
 		result->bytes_xferd = 0;
-		result->transaction_status = MHI_STATUS_SUCCESS;
-	}
-	ret_val = delete_element(local_chan_ctxt, &local_chan_ctxt->ack_rp,
-				&local_chan_ctxt->rp, NULL);
-	if (ret_val != MHI_STATUS_SUCCESS) {
-		mhi_log(MHI_MSG_ERROR,
-			"Failed to remove from inbound ring ret %d chan %d\n",
-			ret_val, chan);
-		result->payload_buf = 0;
-		result->bytes_xferd = 0;
-		result->transaction_status = MHI_STATUS_SUCCESS;
+		ret_val = MHI_STATUS_RING_EMPTY;
 	}
 	mutex_unlock(chan_mutex);
 	return ret_val;
@@ -1303,8 +1286,9 @@ enum MHI_STATUS validate_ring_el_addr(struct mhi_ring *ring, uintptr_t addr)
 enum MHI_STATUS mhi_wait_for_mdm(struct mhi_device_ctxt *mhi_dev_ctxt)
 {
 	u32 j = 0;
-	while (readl_relaxed((void *)(mhi_dev_ctxt->mmio_addr +
-					     MHIREGLEN)) == 0xFFFFFFFF
+
+	while (mhi_reg_read(mhi_dev_ctxt->mmio_info.mmio_addr, MHIREGLEN)
+			== 0xFFFFFFFF
 			&& j <= MHI_MAX_LINK_RETRIES) {
 		mhi_log(MHI_MSG_CRITICAL,
 				"Could not access MDM retry %d\n", j);
@@ -1319,17 +1303,9 @@ enum MHI_STATUS mhi_wait_for_mdm(struct mhi_device_ctxt *mhi_dev_ctxt)
 	return MHI_STATUS_SUCCESS;
 }
 
-int mhi_get_chan_max_buffers(u32 chan)
-{
-	if (IS_SOFTWARE_CHANNEL(chan))
-		return MAX_NR_TRBS_PER_SOFT_CHAN - 1;
-	else
-		return MAX_NR_TRBS_PER_HARD_CHAN - 1;
-}
-
 int mhi_get_max_desc(struct mhi_client_handle *client_handle)
 {
-	return mhi_get_chan_max_buffers(client_handle->chan);
+	return client_handle->chan_info.max_desc - 1;
 }
 EXPORT_SYMBOL(mhi_get_max_desc);
 
@@ -1340,21 +1316,38 @@ int mhi_get_epid(struct mhi_client_handle *client_handle)
 
 int mhi_assert_device_wake(struct mhi_device_ctxt *mhi_dev_ctxt)
 {
-	mhi_log(MHI_MSG_VERBOSE, "GPIO %d\n",
-			mhi_dev_ctxt->dev_props->device_wake_gpio);
-	gpio_direction_output(mhi_dev_ctxt->dev_props->device_wake_gpio, 1);
+	if ((mhi_dev_ctxt->mmio_info.chan_db_addr) &&
+	       (mhi_dev_ctxt->flags.link_up)) {
+			mhi_log(MHI_MSG_VERBOSE, "LPM %d\n",
+				mhi_dev_ctxt->enable_lpm);
+			atomic_set(&mhi_dev_ctxt->flags.device_wake, 1);
+			mhi_write_db(mhi_dev_ctxt,
+				     mhi_dev_ctxt->mmio_info.chan_db_addr,
+				     MHI_DEV_WAKE_DB, 1);
+			mhi_dev_ctxt->device_wake_asserted = 1;
+	} else {
+		mhi_log(MHI_MSG_VERBOSE, "LPM %d\n", mhi_dev_ctxt->enable_lpm);
+	}
 	return 0;
 }
 
 inline int mhi_deassert_device_wake(struct mhi_device_ctxt *mhi_dev_ctxt)
 {
-	mhi_log(MHI_MSG_VERBOSE, "GPIO %d\n",
-			mhi_dev_ctxt->dev_props->device_wake_gpio);
-	if (mhi_dev_ctxt->enable_lpm)
-		gpio_direction_output(
-			mhi_dev_ctxt->dev_props->device_wake_gpio, 0);
-	else
-		mhi_log(MHI_MSG_VERBOSE, "LPM Enabled\n");
+	if ((mhi_dev_ctxt->enable_lpm) &&
+	    (atomic_read(&mhi_dev_ctxt->flags.device_wake)) &&
+	    (mhi_dev_ctxt->mmio_info.chan_db_addr != NULL) &&
+	    (mhi_dev_ctxt->flags.link_up)) {
+		mhi_log(MHI_MSG_VERBOSE, "LPM %d\n", mhi_dev_ctxt->enable_lpm);
+		atomic_set(&mhi_dev_ctxt->flags.device_wake, 0);
+		mhi_write_db(mhi_dev_ctxt, mhi_dev_ctxt->mmio_info.chan_db_addr,
+				MHI_DEV_WAKE_DB, 0);
+		mhi_dev_ctxt->device_wake_asserted = 0;
+	} else {
+		mhi_log(MHI_MSG_VERBOSE, "LPM %d DEV_WAKE %d link %d\n",
+				mhi_dev_ctxt->enable_lpm,
+				atomic_read(&mhi_dev_ctxt->flags.device_wake),
+				mhi_dev_ctxt->flags.link_up);
+	}
 	return 0;
 }
 
@@ -1375,14 +1368,17 @@ int mhi_set_bus_request(struct mhi_device_ctxt *mhi_dev_ctxt,
 
 enum MHI_STATUS mhi_deregister_channel(struct mhi_client_handle
 							*client_handle) {
-	if (NULL == client_handle ||
-	    client_handle->magic != MHI_HANDLE_MAGIC)
+	enum MHI_STATUS ret_val = MHI_STATUS_SUCCESS;
+	int chan;
+	if (!client_handle || client_handle->magic != MHI_HANDLE_MAGIC)
 		return MHI_STATUS_ERROR;
-	client_handle->mhi_dev_ctxt->client_handle_list[client_handle->chan] =
-									NULL;
+	chan = client_handle->chan_info.chan_nr;
+	client_handle->magic = 0;
+	client_handle->mhi_dev_ctxt->client_handle_list[chan] = NULL;
 	kfree(client_handle);
-	return MHI_STATUS_SUCCESS;
+	return ret_val;
 }
+
 EXPORT_SYMBOL(mhi_deregister_channel);
 
 void mhi_process_db(struct mhi_device_ctxt *mhi_dev_ctxt,
@@ -1396,24 +1392,24 @@ void mhi_process_db(struct mhi_device_ctxt *mhi_dev_ctxt,
 	mhi_update_ctxt(mhi_dev_ctxt, io_addr, chan, val);
 
 	/* Channel Doorbell and Polling Mode Disabled or Software Channel*/
-	if (io_addr == mhi_dev_ctxt->channel_db_addr) {
+	if (io_addr == mhi_dev_ctxt->mmio_info.chan_db_addr) {
 		if (!(IS_HARDWARE_CHANNEL(chan) &&
-		    mhi_dev_ctxt->uldl_enabled &&
-		    !mhi_dev_ctxt->db_mode[chan])) {
+		    mhi_dev_ctxt->flags.uldl_enabled &&
+		    !mhi_dev_ctxt->flags.db_mode[chan])) {
 			mhi_write_db(mhi_dev_ctxt, io_addr, chan, val);
-			mhi_dev_ctxt->db_mode[chan] = 0;
+			mhi_dev_ctxt->flags.db_mode[chan] = 0;
 		}
 	/* Event Doorbell and Polling mode Disabled */
-	} else if (io_addr == mhi_dev_ctxt->event_db_addr) {
+	} else if (io_addr == mhi_dev_ctxt->mmio_info.event_db_addr) {
 		/* Only ring for software channel */
 		if (IS_SOFTWARE_CHANNEL(chan) ||
-		    !mhi_dev_ctxt->uldl_enabled) {
+		    !mhi_dev_ctxt->flags.uldl_enabled) {
 			mhi_write_db(mhi_dev_ctxt, io_addr, chan, val);
-			mhi_dev_ctxt->db_mode[chan] = 0;
+			mhi_dev_ctxt->flags.db_mode[chan] = 0;
 		}
 	} else {
 		mhi_write_db(mhi_dev_ctxt, io_addr, chan, val);
-		mhi_dev_ctxt->db_mode[chan] = 0;
+		mhi_dev_ctxt->flags.db_mode[chan] = 0;
 	}
 }
 
@@ -1437,10 +1433,6 @@ void mhi_reg_write(struct mhi_device_ctxt *mhi_dev_ctxt,
 					io_addr, io_offset, val);
 	iowrite32(val, io_addr + io_offset);
 	wmb();
-	msm_pcie_pm_control(MSM_PCIE_REQ_EXIT_L1,
-			mhi_dev_ctxt->dev_info->pcie_device->bus->number,
-			mhi_dev_ctxt->dev_info->pcie_device,
-			NULL, 0);
 }
 
 u32 mhi_reg_read_field(void __iomem *io_addr, uintptr_t io_offset,

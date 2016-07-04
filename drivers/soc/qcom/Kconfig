@@ -13,6 +13,25 @@ config CP_ACCESS64
 
           If unsure, say N.
 
+config MSM_GLADIATOR_ERP
+	tristate "GLADIATOR coherency interconnect error reporting driver"
+	help
+	  Support dumping debug information for the GLADIATOR
+	  cache interconnect in the error interrupt handler.
+	  Meant to be used for debug scenarios only.
+
+	  If unsure, say N.
+
+config PANIC_ON_GLADIATOR_ERROR
+	depends on MSM_GLADIATOR_ERP
+	bool "Panic on GLADIATOR error report"
+	help
+	  Panic upon detection of an Gladiator coherency interconnect error
+	  in order to support dumping debug information.
+	  Meant to be used for debug scenarios only.
+
+	  If unsure, say N.
+
 config MSM_BAM_DMUX
 	bool "BAM Data Mux Driver"
 	depends on SPS
@@ -29,6 +48,54 @@ config MSM_EVENT_TIMER
 	  need to be monitored by the PM. The enables the PM code to monitor
 	  events that require the core to be awake and ready to handle the
 	  event.
+
+config MSM_GLINK
+	bool "Generic Link (G-Link)"
+	help
+	  G-Link is a generic link transport that replaces SMD.  It is used
+	  within a System-on-Chip (SoC) for communication between both internal
+	  processors and external peripherals.  The actual physical transport
+	  is handled by transport plug-ins that can be individually enabled and
+	  configured separately.
+
+config MSM_GLINK_LOOPBACK_SERVER
+	bool "Generic Link (G-Link) Loopback Server"
+	help
+	  G-Link Loopback Server that enable loopback test framework to test
+	  and validate the G-Link protocol stack. It support both local and
+	  remote clients to configure the loopback server and echo back the
+	  data received from the clients.
+
+config MSM_GLINK_SMD_XPRT
+	depends on MSM_SMD
+	depends on MSM_GLINK
+	bool "Generic Link (G-Link) SMD Transport"
+	help
+	  G-Link SMD Transport is a G-Link Transport plug-in.  It allows G-Link
+	  communication to remote entities through a SMD physical transport
+	  channel.  The remote side is assumed to be pure SMD.  The nature of
+	  SMD limits this G-Link transport to only connecting with entities
+	  internal to the System-on-Chip.
+
+config MSM_GLINK_SMEM_NATIVE_XPRT
+	depends on MSM_SMEM
+	depends on MSM_GLINK
+	bool "Generic Link (G-Link) SMEM Native Transport"
+	help
+	  G-Link SMEM Native Transport is a G-Link Transport plug-in.  It allows
+	  G-Link communication to remote entities through a shared memory
+	  physical transport.  The nature of shared memory limits this G-Link
+	  transport to only connecting with entities internal to the
+	  System-on-Chip.
+
+config MSM_GLINK_PKT
+	bool "Enable device interface for GLINK packet channels"
+	depends on MSM_GLINK
+	help
+	  G-link packet driver provides the interface for the userspace
+	  clients to communicate over G-Link via deivce nodes.
+	  This enable the usersapce clients to read and write to
+	  some glink packets channel.
 
 config MSM_IPC_ROUTER_SMD_XPRT
 	depends on MSM_SMD
@@ -47,6 +114,26 @@ config MSM_IPC_ROUTER_HSIC_XPRT
 	help
 	  HSIC Transport Layer that enables off-chip communication of
 	  IPC Router. When the HSIC endpoint becomes available, this layer
+	  registers the transport with IPC Router and enable message
+	  exchange.
+
+config MSM_IPC_ROUTER_GLINK_XPRT
+	depends on MSM_GLINK
+	depends on IPC_ROUTER
+	bool "MSM GLINK XPRT Layer"
+	help
+	  GLINK Transport Layer that enables IPC Router communication within
+	  a System-on-Chip(SoC). When the GLINK channels become available,
+	  this layer registers a transport with IPC Router and enable
+	  message exchange.
+
+config MSM_IPC_ROUTER_MHI_XPRT
+	depends on MSM_MHI
+	depends on IPC_ROUTER
+	bool "MSM MHI XPRT Layer"
+	help
+	  MHI Transport Layer that enables off-chip communication of
+	  IPC Router. When the MHI endpoint becomes available, this layer
 	  registers the transport with IPC Router and enable message
 	  exchange.
 
@@ -242,19 +329,10 @@ config MSM_QDSP6_APRV2
 	  used by audio driver to configure QDSP6's
 	  ASM, ADM and AFE.
 
-config MSM_QDSP6_APRV3
-	bool "Audio QDSP6 APRv3 support"
-	depends on MSM_SMD
-	help
-	  Enable APRv2 IPC protocol support between
-	  application processor and QDSP6. APR is
-	  used by audio driver to configure QDSP6v2's
-	  ASM, ADM and AFE.
-
 config MSM_ADSP_LOADER
 	tristate "ADSP loader support"
 	select SND_SOC_MSM_APRV2_INTF
-	depends on MSM_QDSP6_APRV2 || MSM_QDSP6_APRV3
+	depends on MSM_QDSP6_APRV2
 	help
 	  Enable ADSP image loader.
 	  The ADSP loader brings ADSP out of reset
@@ -310,18 +388,6 @@ config MSM_WATCHDOG_V2
 	  deadlocks. It does not run during the bootup process, so it will
 	  not catch any early lockups.
 
-config MSM_WATCHDOG_CTX_PRINT
-	bool "Print context dump saved by secure mode watchdog handler"
-	default n
-	depends on MSM_WATCHDOG_V2
-	depends on MSM_MEMORY_DUMP_V2
-	depends on PSTORE_RAM_ANNOTATION_APPEND
-	help
-	  After enabling this option, kernel will reserve bigger buffer
-	  for secure mode watchdog handler to save info. And kernel will
-	  try to print the info if it looks valid.
-	  If unsure, say N
-
 config MSM_FORCE_WDOG_BITE_ON_PANIC
 	bool "MSM force watchdog bite"
 	depends on MSM_WATCHDOG_V2
@@ -329,6 +395,13 @@ config MSM_FORCE_WDOG_BITE_ON_PANIC
 	  This forces a watchdog bite when the device restarts due to a
 	  kernel panic. On certain MSM SoCs, this provides us
 	  additional debugging information.
+
+config MSM_DCC
+	bool "MSM Data Capture and Compare enigne support"
+	help
+	  This option enables driver for Data Capture and Compare engine. DCC
+	  driver provides interface to configure DCC block and read back
+	  captured data from DCC's internal SRAM.
 
 config MSM_HVC
 	bool "MSM Hypervisor Call Support"
@@ -396,11 +469,11 @@ config MSM_PIL_MSS_QDSP6V5
 	  If unsure, say N.
 
 config MSM_PIL_FEMTO
-	tristate "FSM99XX Boot Support"
-	depends on MSM_PIL && ARCH_FSM9900
+	tristate "FSM9900 and FSM9010 Boot Support"
+	depends on MSM_PIL && (ARCH_FSM9900 || ARCH_FSM9010)
 	help
 	  Support for loading and booting firmware images for multiple
-	  modems on the FSM9900 family targets.
+	  modems on the FSM9900 and FSM9010 family targets.
 	  Select Y if you want the modems to boot.
 	  If unsure, select N.
 
@@ -558,11 +631,25 @@ config MSM_PACMAN
 	  This driver allows reconfiguration of the Bus Access Manager
 	  Low Speed Peripheral (BLSP) ownership.
 
+config MSM_TEST_PACMAN
+	bool "Enable the Peripheral Access Control Manager (PACMan) TEST DRIVER"
+	depends on MSM_PACMAN
+	help
+	  Add support for the Peripheral Access Control Manager (PACMan)
+	  test driver. This driver helps to understand the Bus Access Manager
+	  Low Speed Peripheral (BLSP) ownership transfer from one subsystem
+	  to another.
+
+config MSM_CORE_CTL
+	tristate "Core control module"
+	help
+	  Add support for the Qualcomm core control module
+
 config MSM_CORE_CTL_HELPER
 	tristate "Core control helper functions for dynamically hotplug CPUs"
 	help
 	  Provide helper functions for core control driver. Core control
-	  driver dynamicatlly hotplugs CPUs from kernel based on current
+	  driver dynamically hotplugs CPUs from kernel based on current
 	  system load and state. It also supports limiting min and
 	  max online CPUs from userspace.
 
@@ -583,32 +670,43 @@ config MSM_PERFORMANCE_HOTPLUG_ON
           compile out the nodes needed for core-control functionality through
           msm_performance.
 
+config QCOM_NPA_DUMP
+	bool "Read NPA dump from the RPM memory"
+	depends on DEBUG_FS
+	help
+	  Read the NPA dump from RPM memory through debugfs.
+
+config KERNEL_TEXT_MPU_PROT
+	bool "Enable xpu protection of kernel r/o sections"
+	help
+	  Enables xpu protection of kernel code and read-only data
+	  sections early in boot. Read access is permitted to
+	  all masters; Write access is only permited to the
+	  secure world.
+
+config MSM_ONTARIO
+	bool "MSM Ontario SenseID clock driver"
+	help
+	  Enables clock and bus for SPI bus communication to SenseID ASIC
+
+config TRACER_PKT
+	bool "Tracer Packet"
+	help
+	  Tracer Packet helps in profiling the performance of inter-
+	  processor communication protocols. The profiling information
+	  can be logged into the tracer packet itself.
+
+config MSM_VSENS
+	bool "Voltage Sensor Monitoring"
+	help
+          Enable support for Voltage Sensing Block available on certain MSM
+	  chipsets. Voltage Sensing Block monitors the voltage at certain points
+	  in the chip and makes recent readings available via FIFO registers.
+	  It can also be configured to trigger an interrupt when a min or max threshold is
+	  crossed.
+
+	  Say yes to support these devices.
+
 source "drivers/soc/qcom/memshare/Kconfig"
-
-config BOOTINFO
-	bool "Boot Information Feature"
-	default n
-	help
-	  This feature provides access to certain boot information
-	  from both kernel context (via function call) and user
-	  context (via /proc/bootinfo).
-
-config MMI_SOC_INFO
-	default n
-	bool "Motorola Mobility SOC Info"
-	help
-	  Provide mechanism to export MSM SOC info.
-
-config MMI_RAM_INFO
-	default n
-	bool "Motorola Mobility RAM Info"
-	help
-	Provide mechanism to access RAM size and MR registers values via sysfs.
-
-config MMI_UNIT_INFO
-	default n
-	bool "Motorola Mobility Unit Info"
-	help
-	Provide mechanism to expose unit information to other cpu via smem.
 
 endif # ARCH_MSM

@@ -1,4 +1,4 @@
-/* Copyright (c) 2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2014-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -28,6 +28,7 @@ struct link_node {
 	struct device *next_dev;
 	struct list_head link;
 	uint32_t in_use;
+	const char *cl_name;
 };
 
 /* New types introduced for adhoc topology */
@@ -40,13 +41,18 @@ struct msm_bus_noc_ops {
 			uint32_t qos_delta, uint32_t qos_freq);
 	int (*limit_mport)(struct msm_bus_node_device_type *dev,
 			void __iomem *qos_base, uint32_t qos_off,
-			uint32_t qos_delta, uint32_t qos_freq, bool enable_lim,
+			uint32_t qos_delta, uint32_t qos_freq, int enable_lim,
 			uint64_t lim_bw);
+	bool (*update_bw_reg)(int mode);
 };
 
 struct nodebw {
-	uint64_t ab[NUM_CTX];
-	bool dirty;
+	uint64_t sum_ab;
+	uint64_t last_sum_ab;
+	uint64_t max_ib;
+	uint64_t cur_clk_hz;
+	uint32_t util_used;
+	uint32_t vrail_used;
 };
 
 struct msm_bus_fab_device_type {
@@ -56,8 +62,6 @@ struct msm_bus_fab_device_type {
 	uint32_t base_offset;
 	uint32_t qos_freq;
 	uint32_t qos_off;
-	uint32_t util_fact;
-	uint32_t vrail_comp;
 	struct msm_bus_noc_ops noc_ops;
 	enum msm_bus_hw_sel bus_type;
 	bool bypass_qos_prg;
@@ -70,11 +74,27 @@ struct qos_params_type {
 	unsigned int prio_wr;
 	unsigned int prio1;
 	unsigned int prio0;
+	unsigned int reg_prio1;
+	unsigned int reg_prio0;
 	unsigned int gp;
 	unsigned int thmp;
 	unsigned int ws;
 	int cur_mode;
 	u64 bw_buffer;
+};
+
+struct node_util_levels_type {
+	uint64_t threshold;
+	uint32_t util_fact;
+};
+
+struct node_agg_params_type {
+	uint32_t agg_scheme;
+	uint32_t num_aggports;
+	unsigned int buswidth;
+	uint32_t vrail_comp;
+	uint32_t num_util_levels;
+	struct node_util_levels_type *util_levels;
 };
 
 struct msm_bus_node_info_type {
@@ -97,9 +117,10 @@ struct msm_bus_node_info_type {
 	struct device **black_connections;
 	unsigned int bus_device_id;
 	struct device *bus_device;
-	unsigned int buswidth;
 	struct rule_update_path_info rule;
 	uint64_t lim_bw;
+	bool defer_qos;
+	struct node_agg_params_type agg_params;
 };
 
 struct msm_bus_node_device_type {
@@ -107,21 +128,29 @@ struct msm_bus_node_device_type {
 	struct msm_bus_fab_device_type *fabdev;
 	int num_lnodes;
 	struct link_node *lnode_list;
-	uint64_t cur_clk_hz[NUM_CTX];
-	struct nodebw node_ab;
+	struct nodebw node_bw[NUM_CTX];
 	struct list_head link;
 	unsigned int ap_owned;
 	struct nodeclk clk[NUM_CTX];
-	struct nodeclk qos_clk;
+	struct nodeclk bus_qos_clk;
+	uint32_t num_node_qos_clks;
+	struct nodeclk *node_qos_clks;
+	struct device_node *of_node;
+	struct device dev;
+	bool dirty;
+	struct list_head dev_link;
+	struct list_head devlist;
 };
 
+static inline struct msm_bus_node_device_type *to_msm_bus_node(struct device *d)
+{
+	return container_of(d, struct msm_bus_node_device_type, dev);
+}
+
+
 int msm_bus_enable_limiter(struct msm_bus_node_device_type *nodedev,
-				bool throttle_en, uint64_t lim_bw);
-int msm_bus_update_clks(struct msm_bus_node_device_type *nodedev,
-	int ctx, int **dirty_nodes, int *num_dirty);
-int msm_bus_commit_data(int *dirty_nodes, int ctx, int num_dirty);
-int msm_bus_update_bw(struct msm_bus_node_device_type *nodedev, int ctx,
-	int64_t add_bw, int **dirty_nodes, int *num_dirty);
+				int throttle_en, uint64_t lim_bw);
+int msm_bus_commit_data(struct list_head *clist);
 void *msm_bus_realloc_devmem(struct device *dev, void *p, size_t old_size,
 					size_t new_size, gfp_t flags);
 
@@ -135,4 +164,12 @@ extern int msm_bus_of_get_static_rules(struct platform_device *pdev,
 extern int msm_rules_update_path(struct list_head *input_list,
 				struct list_head *output_list);
 extern void print_all_rules(void);
+#ifdef CONFIG_DEBUG_BUS_VOTER
+int msm_bus_floor_init(struct device *dev);
+#else
+static inline int msm_bus_floor_init(struct device *dev)
+{
+	return 0;
+}
+#endif /* CONFIG_DBG_BUS_VOTER */
 #endif /* _ARCH_ARM_MACH_MSM_BUS_ADHOC_H */

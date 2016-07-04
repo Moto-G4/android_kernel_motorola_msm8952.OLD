@@ -1,7 +1,7 @@
 /*
  * f_qdss.c -- QDSS function Driver
  *
- * Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
 
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -24,11 +24,13 @@
 #include "u_qdss.c"
 #include "usb_gadget_xport.h"
 #include "u_data_ipa.h"
+#include "u_rmnet.h"
 
 static unsigned int nr_qdss_ports;
-static unsigned int no_data_bam_ports;
+static unsigned int no_qdss_data_bam_ports;
 static unsigned int data_hsic_ports_no;
 static unsigned int no_ipa_ports;
+static unsigned int no_bam_dmux_ports;
 
 static struct qdss_ports {
 	enum transport_type		data_xport;
@@ -38,6 +40,7 @@ static struct qdss_ports {
 	unsigned	char		port_num;
 	struct f_qdss			*port;
 	struct gadget_ipa_port		ipa_port;
+	struct grmnet			bam_dmux_port;
 } qdss_ports[NR_QDSS_PORTS];
 
 
@@ -545,6 +548,10 @@ static void usb_qdss_disconnect_work(struct work_struct *work)
 		gp = &qdss_ports[qdss->port_num].ipa_port;
 		ipa_data_disconnect(gp, qdss->port_num);
 		break;
+	case USB_GADGET_XPORT_BAM_DMUX:
+		gbam_disconnect(&qdss_ports[qdss->port_num].bam_dmux_port,
+				portno, USB_GADGET_XPORT_BAM);
+		break;
 	case USB_GADGET_XPORT_HSIC:
 		pr_debug("usb_qdss_disconnect_work: HSIC transport\n");
 		ghsic_data_disconnect(&qdss->port, portno);
@@ -557,6 +564,11 @@ static void usb_qdss_disconnect_work(struct work_struct *work)
 	}
 
 	msm_bam_set_qdss_usb_active(false);
+	/*
+	 * Decrement usage count which was incremented
+	 * before calling connect work
+	 */
+	usb_gadget_autopm_put_async(qdss->gadget);
 }
 
 static void qdss_disable(struct usb_function *f)
@@ -583,7 +595,14 @@ static void qdss_disable(struct usb_function *f)
 	qdss->usb_connected = 0;
 	switch (dxport) {
 	case USB_GADGET_XPORT_BAM2BAM_IPA:
+	case USB_GADGET_XPORT_BAM_DMUX:
 		spin_unlock_irqrestore(&qdss->lock, flags);
+		/* Disable usb irq for CI gadget. It will be enabled in
+		 * usb_bam_disconnect_pipe() after disconnecting all pipes
+		 * and USB BAM reset is done.
+		 */
+		if (!gadget_is_dwc3(qdss->cdev->gadget))
+			msm_usb_irq_disable(true);
 		usb_qdss_disconnect_work(&qdss->disconnect_w);
 		return;
 	default:
@@ -595,6 +614,8 @@ static void qdss_disable(struct usb_function *f)
 	/*cancell all active xfers*/
 	qdss_eps_disable(f);
 	msm_bam_set_qdss_usb_active(true);
+	if (!gadget_is_dwc3(qdss->cdev->gadget))
+		msm_usb_irq_disable(true);
 	queue_work(qdss->wq, &qdss->disconnect_w);
 }
 
@@ -673,7 +694,7 @@ static void usb_qdss_connect_work(struct work_struct *work)
 
 	if (ctrl_xport == USB_GADGET_XPORT_QTI) {
 		status = gqti_ctrl_connect(&qdss->port, DPL_QTI_CTRL_PORT_NO,
-					qdss->data_iface_id, ctrl_xport,
+					qdss->data_iface_id, dxport,
 					USB_GADGET_DPL);
 		if (status) {
 			pr_err("%s: gqti_ctrl_connect failed: err:%d\n",
@@ -718,6 +739,16 @@ static void usb_qdss_connect_work(struct work_struct *work)
 		}
 		qdss->data_enabled = 1;
 		break;
+	case USB_GADGET_XPORT_BAM_DMUX:
+		qdss_ports[qdss->port_num].bam_dmux_port.gadget =
+						qdss->cdev->gadget;
+		qdss_ports[qdss->port_num].bam_dmux_port.in =
+						qdss->port.data;
+		status = gbam_connect(&qdss_ports[qdss->port_num].bam_dmux_port,
+				port_num, USB_GADGET_XPORT_BAM, 0, 0);
+		if (status)
+			pr_err("BAM_DMUX connect failed with %d\n", status);
+		break;
 	case USB_GADGET_XPORT_HSIC:
 		pr_debug("usb_qdss_connect_work: HSIC transport\n");
 		status = ghsic_data_connect(&qdss->port, port_num);
@@ -750,22 +781,29 @@ static int qdss_set_alt(struct usb_function *f, unsigned intf, unsigned alt)
 
 	pr_debug("qdss_set_alt qdss pointer = %p\n", qdss);
 
+	qdss->gadget = gadget;
+
 	if (alt != 0)
-		goto fail;
+		goto fail1;
 
 	if (gadget->speed != USB_SPEED_SUPER &&
 		gadget->speed != USB_SPEED_HIGH) {
 		pr_err("qdss_st_alt: qdss supportes HS or SS only\n");
 		ret = -EINVAL;
-		goto fail;
+		goto fail1;
 	}
 
 	if (intf == qdss->data_iface_id) {
+		/* Increment usage count on connect */
+		usb_gadget_autopm_get_async(qdss->gadget);
 
-		if (config_ep_by_speed(gadget, f, qdss->port.data))
-			return -EINVAL;
+		if (config_ep_by_speed(gadget, f, qdss->port.data)) {
+			ret = -EINVAL;
+			goto fail;
+		}
 
-		if (dxport == USB_GADGET_XPORT_BAM2BAM_IPA) {
+		if (dxport == USB_GADGET_XPORT_BAM2BAM_IPA ||
+				dxport == USB_GADGET_XPORT_BAM_DMUX) {
 			qdss->usb_connected = 1;
 			usb_qdss_connect_work(&qdss->connect_w);
 			return 0;
@@ -782,23 +820,27 @@ static int qdss_set_alt(struct usb_function *f, unsigned intf, unsigned alt)
 	} else if ((intf == qdss->ctrl_iface_id) &&
 	(qdss->debug_inface_enabled)) {
 
-		if (config_ep_by_speed(gadget, f, qdss->port.ctrl_in))
-			return -EINVAL;
+		if (config_ep_by_speed(gadget, f, qdss->port.ctrl_in)) {
+			ret = -EINVAL;
+			goto fail1;
+		}
 
 		ret = usb_ep_enable(qdss->port.ctrl_in);
 		if (ret)
-			goto fail;
+			goto fail1;
 
 		qdss->port.ctrl_in->driver_data = qdss;
 		qdss->ctrl_in_enabled = 1;
 
-		if (config_ep_by_speed(gadget, f, qdss->port.ctrl_out))
-			return -EINVAL;
+		if (config_ep_by_speed(gadget, f, qdss->port.ctrl_out)) {
+			ret = -EINVAL;
+			goto fail1;
+		}
 
 
 		ret = usb_ep_enable(qdss->port.ctrl_out);
 		if (ret)
-			goto fail;
+			goto fail1;
 
 		qdss->port.ctrl_out->driver_data = qdss;
 		qdss->ctrl_out_enabled = 1;
@@ -823,6 +865,9 @@ static int qdss_set_alt(struct usb_function *f, unsigned intf, unsigned alt)
 	}
 	return 0;
 fail:
+	/* Decrement usage count in case of failure */
+	usb_gadget_autopm_put_async(qdss->gadget);
+fail1:
 	pr_err("qdss_set_alt failed\n");
 	qdss_eps_disable(f);
 	return ret;
@@ -1151,6 +1196,9 @@ static int qdss_init_port(const char *ctrl_name, const char *data_name,
 		return -EINVAL;
 	}
 
+	pr_debug("ctrl name = %s data_name %s port_name %s\n",
+			ctrl_name, data_name, port_name);
+
 	pr_debug("%s: port#:%d, data port: %s\n",
 		__func__, nr_qdss_ports, data_name);
 
@@ -1184,9 +1232,9 @@ static int qdss_init_port(const char *ctrl_name, const char *data_name,
 
 	switch (qdss_port->data_xport) {
 	case USB_GADGET_XPORT_BAM:
-		qdss_port->data_xport_num = no_data_bam_ports;
-		no_data_bam_ports++;
-		pr_debug("USB_GADGET_XPORT_BAM %d\n", no_data_bam_ports);
+		qdss_port->data_xport_num = no_qdss_data_bam_ports;
+		no_qdss_data_bam_ports++;
+		pr_debug("USB_GADGET_XPORT_BAM %d\n", no_qdss_data_bam_ports);
 		break;
 	case USB_GADGET_XPORT_BAM2BAM_IPA:
 		qdss_port->data_xport_num = no_ipa_ports;
@@ -1198,6 +1246,11 @@ static int qdss_init_port(const char *ctrl_name, const char *data_name,
 		ghsic_data_set_port_name(port_name, data_name);
 		qdss_port->data_xport_num = data_hsic_ports_no;
 		data_hsic_ports_no++;
+		break;
+	case USB_GADGET_XPORT_BAM_DMUX:
+		qdss_port->data_xport_num = no_bam_dmux_ports;
+		no_bam_dmux_ports++;
+		pr_debug("USB_GADGET_XPORT_BAM_DMUX %u\n", no_bam_dmux_ports);
 		break;
 	case USB_GADGET_XPORT_NONE:
 		break;
@@ -1215,9 +1268,10 @@ fail_probe:
 		kfree(qdss_ports[i].port);
 
 	nr_qdss_ports = 0;
-	no_data_bam_ports = 0;
+	no_qdss_data_bam_ports = 0;
 	data_hsic_ports_no = 0;
 	no_ipa_ports = 0;
+	no_bam_dmux_ports = 0;
 	return ret;
 }
 
@@ -1226,9 +1280,9 @@ static int qdss_gport_setup(void)
 	int	port_idx;
 	int	i;
 
-	pr_debug("%s: bam ports: %u data hsic ports: %u nr_qdss_ports: %u ipa_ports:%u\n",
-			__func__, no_data_bam_ports, data_hsic_ports_no,
-			nr_qdss_ports, no_ipa_ports);
+	pr_debug("%s: bam ports: %u data hsic ports: %u ipa_ports:%u bam_dmux_port:%u nr_qdss_ports:%u\n",
+			__func__, no_qdss_data_bam_ports, data_hsic_ports_no,
+			no_ipa_ports, no_bam_dmux_ports, nr_qdss_ports);
 
 	if (data_hsic_ports_no) {
 		pr_debug("%s: go to setup hsic data\n", __func__);
@@ -1261,6 +1315,25 @@ static int qdss_gport_setup(void)
 					USB_GADGET_XPORT_BAM2BAM_IPA) {
 				qdss_ports[i].data_xport_num = port_idx;
 				pr_debug("%s: DPL data_xport_num = %d\n",
+					__func__, qdss_ports[i].data_xport_num);
+				port_idx++;
+			}
+		}
+	}
+
+	if (no_bam_dmux_ports) {
+		port_idx = gbam_setup(no_bam_dmux_ports);
+		if (port_idx < 0) {
+			pr_err("%s(): gbam_setup failed with %d\n",
+					__func__, port_idx);
+			return port_idx;
+		}
+
+		for (i = 0; i < no_bam_dmux_ports; i++) {
+			if (qdss_ports[i].data_xport ==
+					USB_GADGET_XPORT_BAM_DMUX) {
+				qdss_ports[i].data_xport_num = port_idx;
+				pr_debug("%s: BAM-DMUX data_xport_num = %d\n",
 					__func__, qdss_ports[i].data_xport_num);
 				port_idx++;
 			}

@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -15,16 +15,12 @@
 #include <linux/device.h>
 #include <linux/pci.h>
 
-#ifdef CONFIG_WCNSS_MEM_PRE_ALLOC
-#define WCNSS_PRE_ALLOC_GET_THRESHOLD (4*1024)
-#endif
-
 /* max 20mhz channel count */
 #define CNSS_MAX_CH_NUM       45
 
 #define CNSS_MAX_FILE_NAME	  20
 
-#define MAX_FIRMWARE_SIZE (512 * 1024)
+#define MAX_FIRMWARE_SIZE (1 * 1024 * 1024)
 
 enum cnss_bus_width_type {
 	CNSS_BUS_WIDTH_NONE,
@@ -44,6 +40,11 @@ struct cnss_fw_files {
 	char evicted_data[CNSS_MAX_FILE_NAME];
 };
 
+struct cnss_wlan_runtime_ops {
+	int (*runtime_suspend)(struct pci_dev *pdev);
+	int (*runtime_resume)(struct pci_dev *pdev);
+};
+
 struct cnss_wlan_driver {
 	char *name;
 	int  (*probe)(struct pci_dev *pdev, const struct pci_device_id *id);
@@ -54,6 +55,7 @@ struct cnss_wlan_driver {
 	int  (*suspend)(struct pci_dev *pdev, pm_message_t state);
 	int  (*resume)(struct pci_dev *pdev);
 	void (*modem_status)(struct pci_dev *, int state);
+	struct cnss_wlan_runtime_ops *runtime_ops;
 	const struct pci_device_id *id_table;
 };
 
@@ -98,8 +100,19 @@ enum cnss_driver_status {
 	CNSS_LOAD_UNLOAD
 };
 
-extern int cnss_get_fw_image(struct image_desc_info *image_desc_info);
+enum cnss_runtime_request {
+	CNSS_PM_RUNTIME_GET,
+	CNSS_PM_RUNTIME_PUT,
+	CNSS_PM_RUNTIME_MARK_LAST_BUSY,
+	CNSS_PM_RUNTIME_RESUME,
+	CNSS_PM_RUNTIME_PUT_NOIDLE,
+	CNSS_PM_REQUEST_RESUME,
+	CNSS_PM_RUNTIME_PUT_AUTO,
+};
 
+extern int cnss_get_fw_image(struct image_desc_info *image_desc_info);
+extern void cnss_runtime_init(struct device *dev, int auto_delay);
+extern void cnss_runtime_exit(struct device *dev);
 extern void cnss_device_crashed(void);
 extern void cnss_device_self_recovery(void);
 extern int cnss_get_ramdump_mem(unsigned long *address, unsigned long *size);
@@ -149,10 +162,23 @@ extern void cnss_remove_pm_qos(void);
 extern int cnss_get_platform_cap(struct cnss_platform_cap *cap);
 extern void cnss_set_driver_status(enum cnss_driver_status driver_status);
 
-#ifdef CONFIG_WCNSS_MEM_PRE_ALLOC
-extern void *wcnss_prealloc_get(unsigned int size);
-extern int wcnss_prealloc_put(void *ptr);
+#ifndef CONFIG_WCNSS_MEM_PRE_ALLOC
+static inline int wcnss_pre_alloc_reset(void) { return 0; }
 #endif
 
+#if !defined(CONFIG_WCNSS_MEM_PRE_ALLOC) || !defined(CONFIG_SLUB_DEBUG)
+static inline void wcnss_prealloc_check_memory_leak(void) {}
+#endif
+
+
 extern int msm_pcie_enumerate(u32 rc_idx);
+extern int cnss_auto_suspend(void);
+extern int cnss_auto_resume(void);
+extern int cnss_prevent_auto_suspend(const char *caller_func);
+extern int cnss_allow_auto_suspend(const char *caller_func);
+extern int cnss_is_auto_suspend_allowed(const char *caller_func);
+
+extern int cnss_pm_runtime_request(struct device *dev, enum
+		cnss_runtime_request request);
+
 #endif /* _NET_CNSS_H_ */

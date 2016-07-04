@@ -143,7 +143,7 @@ asmlinkage void __cpuinit secondary_start_kernel(void)
 	cpumask_set_cpu(cpu, mm_cpumask(mm));
 
 	set_my_cpu_offset(per_cpu_offset(smp_processor_id()));
-	printk("CPU%u: Booted secondary processor\n", cpu);
+	pr_debug("CPU%u: Booted secondary processor\n", cpu);
 
 	/*
 	 * TTBR0 is only used for the identity mapping at this stage. Make it
@@ -259,7 +259,7 @@ void __cpu_die(unsigned int cpu)
 		pr_crit("CPU%u: cpu didn't die\n", cpu);
 		return;
 	}
-	pr_notice("CPU%u: shutdown\n", cpu);
+	pr_debug("CPU%u: shutdown\n", cpu);
 
 	/*
 	 * Now that the dying CPU is beyond the point of no return w.r.t.
@@ -573,7 +573,7 @@ static void ipi_cpu_stop(unsigned int cpu, struct pt_regs *regs)
 		raw_spin_unlock(&stop_lock);
 	}
 
-	set_cpu_online(cpu, false);
+	set_cpu_active(cpu, false);
 
 	flush_cache_all();
 	local_irq_disable();
@@ -588,7 +588,11 @@ static DEFINE_RAW_SPINLOCK(backtrace_lock);
 /* "in progress" flag of arch_trigger_all_cpu_backtrace */
 static unsigned long backtrace_flag;
 
+#if defined(CONFIG_HTC_DEBUG_WATCHDOG)
+static void smp_send_all_cpu_backtrace(unsigned int backtrace_timeout)
+#else
 static void smp_send_all_cpu_backtrace(void)
+#endif
 {
 	unsigned int this_cpu = smp_processor_id();
 	int i;
@@ -611,11 +615,21 @@ static void smp_send_all_cpu_backtrace(void)
 		smp_cross_call_common(&backtrace_mask, IPI_CPU_BACKTRACE);
 
 	/* Wait for up to 10 seconds for all other CPUs to do the backtrace */
-	for (i = 0; i < 10 * 1000; i++) {
+#if defined(CONFIG_HTC_DEBUG_WATCHDOG)
+	for (i = 0; i < backtrace_timeout * 1000; i++)
+#else
+	for (i = 0; i < 10 * 1000; i++)
+#endif
+	{
 		if (cpumask_empty(&backtrace_mask))
 			break;
 		mdelay(1);
 	}
+
+#if defined(CONFIG_HTC_DEBUG_WATCHDOG)
+	if(i == backtrace_timeout)
+		pr_info( " dump cpu backtrace timeout \n");
+#endif
 
 	clear_bit(0, &backtrace_flag);
 	smp_mb__after_atomic();
@@ -638,7 +652,11 @@ static void ipi_cpu_backtrace(unsigned int cpu, struct pt_regs *regs)
 #ifdef CONFIG_SMP
 void arch_trigger_all_cpu_backtrace(void)
 {
+#if defined(CONFIG_HTC_DEBUG_WATCHDOG)
+	smp_send_all_cpu_backtrace(10);
+#else
 	smp_send_all_cpu_backtrace();
+#endif
 }
 #else
 void arch_trigger_all_cpu_backtrace(void)
@@ -647,6 +665,13 @@ void arch_trigger_all_cpu_backtrace(void)
 }
 #endif
 
+#if defined(CONFIG_HTC_DEBUG_WATCHDOG)
+void arch_trigger_different_cpu_backtrace_dump_timeout(unsigned int time_out)
+{
+	pr_info(" dump cpu backtrace with timeout %u sec \n", time_out);
+	smp_send_all_cpu_backtrace(time_out);
+}
+#endif
 
 /*
  * Main handler for inter-processor interrupts
@@ -740,10 +765,10 @@ void smp_send_stop(void)
 
 	/* Wait up to one second for other CPUs to stop */
 	timeout = USEC_PER_SEC;
-	while (num_online_cpus() > 1 && timeout--)
+	while (num_active_cpus() > 1 && timeout--)
 		udelay(1);
 
-	if (num_online_cpus() > 1)
+	if (num_active_cpus() > 1)
 		pr_warning("SMP: failed to stop secondary CPUs\n");
 }
 

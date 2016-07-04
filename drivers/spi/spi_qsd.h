@@ -125,6 +125,10 @@
 #define SPI_OP_STATE                  0x00000003
 
 #define SPI_OP_STATE_CLEAR_BITS       0x2
+
+#define SPI_PINCTRL_STATE_DEFAULT "spi_default"
+#define SPI_PINCTRL_STATE_SLEEP "spi_sleep"
+
 enum msm_spi_state {
 	SPI_OP_STATE_RESET = 0x00000000,
 	SPI_OP_STATE_RUN   = 0x00000001,
@@ -178,8 +182,8 @@ enum msm_spi_clk_path_vec_idx {
 	MSM_SPI_CLK_PATH_SUSPEND_VEC = 0,
 	MSM_SPI_CLK_PATH_RESUME_VEC  = 1,
 };
-#define MSM_SPI_CLK_PATH_AVRG_BW(dd) (80000000)
-#define MSM_SPI_CLK_PATH_BRST_BW(dd) (80000000)
+#define MSM_SPI_CLK_PATH_AVRG_BW(dd) (76800000)
+#define MSM_SPI_CLK_PATH_BRST_BW(dd) (76800000)
 
 static char const * const spi_rsrcs[] = {
 	"spi_clk",
@@ -379,6 +383,7 @@ struct msm_spi {
 	struct pinctrl		*pinctrl;
 	struct pinctrl_state	*pins_active;
 	struct pinctrl_state	*pins_sleep;
+	bool			is_init_complete;
 };
 
 /* Forward declaration */

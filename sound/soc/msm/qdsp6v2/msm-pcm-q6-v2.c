@@ -37,6 +37,7 @@
 
 #include "msm-pcm-q6-v2.h"
 #include "msm-pcm-routing-v2.h"
+#include <linux/ratelimit.h>
 
 enum stream_state {
 	IDLE = 0,
@@ -61,7 +62,7 @@ struct snd_msm {
 #define PLAYBACK_MIN_PERIOD_SIZE    128
 #define CAPTURE_MIN_NUM_PERIODS     2
 #define CAPTURE_MAX_NUM_PERIODS     8
-#define CAPTURE_MAX_PERIOD_SIZE     4096
+#define CAPTURE_MAX_PERIOD_SIZE     16384
 #define CAPTURE_MIN_PERIOD_SIZE     320
 #define CMD_EOS_MIN_TIMEOUT_LENGTH  50
 #define CMD_EOS_TIMEOUT_MULTIPLIER  (HZ * 50)
@@ -382,11 +383,16 @@ static int msm_pcm_capture_prepare(struct snd_pcm_substream *substream)
 		if (params_format(params) == SNDRV_PCM_FORMAT_S24_LE)
 			bits_per_sample = 24;
 
-		prtd->audio_client->perf_mode = pdata->perf_mode;
-		pr_debug("%s: perf_mode: 0x%x\n", __func__, pdata->perf_mode);
+		/* ULL mode is not supported in capture path */
+		if (pdata->perf_mode == LEGACY_PCM_MODE)
+			prtd->audio_client->perf_mode = LEGACY_PCM_MODE;
+		else
+			prtd->audio_client->perf_mode = LOW_LATENCY_PCM_MODE;
 
-		pr_debug("%s Opening %d-ch PCM read stream\n",
-				__func__, params_channels(params));
+		pr_debug("%s Opening %d-ch PCM read stream, perf_mode %d\n",
+				__func__, params_channels(params),
+				prtd->audio_client->perf_mode);
+
 		ret = q6asm_open_read_v2(prtd->audio_client, FORMAT_LINEAR_PCM,
 				bits_per_sample);
 		if (ret < 0) {
@@ -497,6 +503,7 @@ static int msm_pcm_open(struct snd_pcm_substream *substream)
 	struct snd_soc_pcm_runtime *soc_prtd = substream->private_data;
 	struct msm_audio *prtd;
 	int ret = 0;
+	static DEFINE_RATELIMIT_STATE(rl, HZ/2, 1);
 
 	prtd = kzalloc(sizeof(struct msm_audio), GFP_KERNEL);
 	if (prtd == NULL) {
@@ -507,7 +514,8 @@ static int msm_pcm_open(struct snd_pcm_substream *substream)
 	prtd->audio_client = q6asm_audio_client_alloc(
 				(app_cb)event_handler, prtd);
 	if (!prtd->audio_client) {
-		pr_info("%s: Could not allocate memory\n", __func__);
+		if (__ratelimit(&rl))
+			pr_err("%s: Could not allocate memory\n", __func__);
 		kfree(prtd);
 		return -ENOMEM;
 	}
@@ -1194,9 +1202,37 @@ static int msm_asoc_pcm_new(struct snd_soc_pcm_runtime *rtd)
 	return ret;
 }
 
+static snd_pcm_sframes_t msm_pcm_delay_blk(struct snd_pcm_substream *substream,
+		struct snd_soc_dai *dai)
+{
+	struct snd_pcm_runtime *runtime = substream->runtime;
+	struct msm_audio *prtd = runtime->private_data;
+	struct audio_client *ac = prtd->audio_client;
+	snd_pcm_sframes_t frames;
+	int ret;
+
+	ret = q6asm_get_path_delay(prtd->audio_client);
+	if (ret) {
+		pr_err("%s: get_path_delay failed, ret=%d\n", __func__, ret);
+		return 0;
+	}
+
+	/* convert microseconds to frames */
+	frames = ac->path_delay / 1000 * runtime->rate / 1000;
+
+	/* also convert the remainder from the initial division */
+	frames += ac->path_delay % 1000 * runtime->rate / 1000000;
+
+	/* overcompensate for the loss of precision (empirical) */
+	frames += 2;
+
+	return frames;
+}
+
 static struct snd_soc_platform_driver msm_soc_platform = {
 	.ops		= &msm_pcm_ops,
 	.pcm_new	= msm_asoc_pcm_new,
+	.delay_blk      = msm_pcm_delay_blk,
 };
 
 static int msm_pcm_probe(struct platform_device *pdev)

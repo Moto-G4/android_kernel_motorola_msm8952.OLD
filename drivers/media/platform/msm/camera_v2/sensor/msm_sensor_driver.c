@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -624,262 +624,22 @@ static void msm_sensor_fill_sensor_info(struct msm_sensor_ctrl_t *s_ctrl,
 	strlcpy(entity_name, s_ctrl->msm_sd.sd.entity.name, MAX_SENSOR_NAME);
 }
 
-static int msm_sensor_read_eeprom(struct msm_sensor_ctrl_t *s_ctrl)
+/* static function definition */
+static int32_t msm_sensor_driver_is_special_support(
+	struct msm_sensor_ctrl_t *s_ctrl,
+	char *sensor_name)
 {
-	int8_t eeprom_page_no = 0;
 	int32_t rc = 0;
-	uint16_t eeprom_slave_addr;
-	struct msm_camera_sensor_slave_info *camera_info;
-	struct msm_sensor_otp_cal_info_t *eeprom_cal_info;
-	struct otp_info_t *eeprom_data_info;
-	uint16_t cam_slave_addr =
-		s_ctrl->sensordata->slave_info->sensor_slave_addr;
-	int cam_addr_type = s_ctrl->sensor_i2c_client->addr_type;
-
-	camera_info = s_ctrl->sensordata->cam_slave_info;
-	if (!camera_info) {
-		pr_err("%s: camera slave info is null\n", __func__);
-		return -EAGAIN;
-	}
-
-	eeprom_cal_info = &camera_info->sensor_init_params.sensor_otp;
-	eeprom_data_info = &camera_info->sensor_otp;
-	if (!eeprom_cal_info || !eeprom_data_info) {
-		pr_err("%s: eeprom info is null\n", __func__);
-		return -EAGAIN;
-	} else if (!eeprom_cal_info->eeprom_enable ||
-		eeprom_cal_info->num_of_pages == 0) {
-		pr_err("%s: %s EEPROM disabled in sensor lib\n", __func__,
-			s_ctrl->sensordata->sensor_name);
-		return 0;
-	}
-
-	/* Read eeprom only once */
-	if (eeprom_data_info->otp_read) {
-		pr_debug("%s: eeprom block already read", __func__);
-		return 0;
-	}
-	pr_debug("%s sensor eeprom initialization block:\n"
-			" - page size: %d\n"
-			" - pages count: %d\n"
-			" - addr type: %d\n"
-			" - eeprom enable: %d\n"
-			" - eeprom slave address: 0%x\n"
-			" - eeprom mem address: 0%x\n",
-			s_ctrl->sensordata->sensor_name,
-			eeprom_cal_info->page_size,
-			eeprom_cal_info->num_of_pages,
-			eeprom_cal_info->addr_type,
-			eeprom_cal_info->eeprom_enable,
-			eeprom_cal_info->eeprom_slave_addr,
-			eeprom_cal_info->eeprom_mem_addr
-			);
-	/* Allocate eeprom memory */
-	eeprom_data_info->otp_info = kzalloc(eeprom_cal_info->page_size*
-					eeprom_cal_info->num_of_pages,
-					GFP_KERNEL);
-	if (eeprom_data_info->otp_info == NULL) {
-		pr_err("%s: Unable to allocate memory for eeprom!\n", __func__);
-		return -ENOMEM;
-	}
-
-	for (eeprom_page_no = 0; eeprom_page_no < eeprom_cal_info->num_of_pages;
-		eeprom_page_no++) {
-		eeprom_slave_addr = eeprom_cal_info->eeprom_slave_addr +
-			eeprom_page_no * 2;
-		s_ctrl->sensor_i2c_client->addr_type =
-			eeprom_cal_info->addr_type;
-		s_ctrl->sensordata->slave_info->sensor_slave_addr =
-			eeprom_slave_addr;
-		s_ctrl->sensor_i2c_client->cci_client->sid =
-			(eeprom_slave_addr >> 1);
-
-		/* read eeprom buffer */
-		rc = s_ctrl->sensor_i2c_client->i2c_func_tbl->
-			i2c_read_seq(s_ctrl->sensor_i2c_client,
-			eeprom_cal_info->eeprom_mem_addr,
-			(eeprom_data_info->otp_info) +
-			eeprom_page_no*eeprom_cal_info->page_size,
-			eeprom_cal_info->page_size);
-		if (rc < 0) {
-			pr_err("%s: Unable to read eeprom\n", __func__);
-			goto exit;
+	int32_t i = 0;
+	struct msm_camera_sensor_board_info *sensordata = s_ctrl->sensordata;
+	for (i = 0; i < sensordata->special_support_size; i++) {
+		if (!strcmp(sensordata->special_support_sensors[i],
+						 sensor_name)) {
+			rc = TRUE;
+			break;
 		}
-
 	}
-exit:
-	/* Restore sensor defaults */
-	s_ctrl->sensordata->slave_info->sensor_slave_addr =
-		cam_slave_addr;
-	s_ctrl->sensor_i2c_client->cci_client->sid =
-		(cam_slave_addr >> 1);
-	s_ctrl->sensor_i2c_client->addr_type = cam_addr_type;
-
-	/* set read flag to read only once */
-	eeprom_data_info->otp_read = 1;
-
 	return rc;
-}
-
-static int msm_sensor_read_otp(struct msm_sensor_ctrl_t *s_ctrl)
-{
-	int8_t otp_page_no = 0;
-	int32_t rc = 0;
-	struct msm_camera_sensor_slave_info *camera_info;
-	struct msm_sensor_otp_cal_info_t *otp_cal_info;
-	struct otp_info_t *otp_data_info;
-
-	camera_info = s_ctrl->sensordata->cam_slave_info;
-	if (!camera_info) {
-		pr_err("%s: camera slave info is null\n", __func__);
-		return -EAGAIN;
-	}
-
-	otp_cal_info = &camera_info->sensor_init_params.sensor_otp;
-	otp_data_info = &camera_info->sensor_otp;
-	if (!otp_cal_info || !otp_data_info) {
-		pr_err("%s: otp info is null\n", __func__);
-		return -EAGAIN;
-	} else if (!otp_cal_info->enable || otp_cal_info->num_of_pages == 0) {
-		pr_err("%s: %s OTP disabled in sensor lib\n", __func__,
-			s_ctrl->sensordata->sensor_name);
-		return 0;
-	}
-
-	/* Read otp only once */
-	if (otp_data_info->otp_read) {
-		pr_debug("%s: OTP block already read", __func__);
-		return 0;
-	}
-	pr_debug("%s sensor OTP initialization block:\n"
-			" - page size: %d\n"
-			" - pages count: %d\n"
-			" - page register address: 0x%x\n"
-			" - first page base address: 0x%x\n"
-			" - control register address: 0x%x\n"
-			" - Initial mode setting: 0x%x\n"
-			" - read mode setting: 0x%x\n"
-			" - read mode disable: 0x%x\n"
-			" - reset register address: 0x%x\n"
-			" - stream on: 0x%x\n"
-			" - stream off: 0x%x\n"
-			" - data segment address: 0x%x\n"
-			" - data size: %d\n"
-			" - otp enable: %d\n"
-			" - %s endian\n",
-
-			s_ctrl->sensordata->sensor_name,
-
-			otp_cal_info->page_size,
-			otp_cal_info->num_of_pages,
-			otp_cal_info->page_reg_addr,
-			otp_cal_info->page_reg_base_addr,
-			otp_cal_info->ctrl_reg_addr,
-			otp_cal_info->ctrl_reg_initial_mode,
-			otp_cal_info->ctrl_reg_read_mode,
-			otp_cal_info->ctrl_reg_read_mode_disable,
-
-			otp_cal_info->reset_reg_addr,
-			otp_cal_info->reset_reg_stream_on,
-			otp_cal_info->reset_reg_stream_off,
-
-			otp_cal_info->data_seg_addr,
-			otp_cal_info->data_size,
-			otp_cal_info->enable,
-			otp_cal_info->big_endian ? "big" : "little"
-			);
-	/* Allocate OTP memory */
-	otp_data_info->otp_info = kzalloc(otp_cal_info->page_size*
-					otp_cal_info->num_of_pages,
-					GFP_KERNEL);
-	if (otp_data_info->otp_info == NULL) {
-		pr_err("%s: Unable to allocate memory for OTP!\n", __func__);
-		return -ENOMEM;
-	}
-
-	/* Disable Streaming */
-	rc = s_ctrl->sensor_i2c_client->i2c_func_tbl->i2c_write(
-		s_ctrl->sensor_i2c_client,
-		otp_cal_info->reset_reg_addr,
-		otp_cal_info->reset_reg_stream_off,
-		otp_cal_info->data_size);
-	if (rc < 0)
-		pr_err("%s: Fail to stream off sensor\n", __func__);
-
-	for (otp_page_no = 0; otp_page_no < otp_cal_info->num_of_pages;
-		otp_page_no++) {
-		/* Make initial state */
-		rc = s_ctrl->sensor_i2c_client->i2c_func_tbl->i2c_write(
-			s_ctrl->sensor_i2c_client,
-			otp_cal_info->ctrl_reg_addr,
-			otp_cal_info->ctrl_reg_initial_mode,
-			otp_cal_info->data_size);
-		if (rc < 0) {
-			pr_err("%s: Unable to set Initial state !\n", __func__);
-			break;
-		}
-
-		/* Set page number */
-		rc = s_ctrl->sensor_i2c_client->i2c_func_tbl->i2c_write(
-			s_ctrl->sensor_i2c_client,
-			otp_cal_info->page_reg_addr,
-			otp_page_no,
-			otp_cal_info->data_size);
-		if (rc < 0) {
-			pr_err("%s: Unable to set otp page no: %d !\n",
-				__func__, otp_page_no);
-			break;
-		}
-
-		/* set read mode */
-		rc = s_ctrl->sensor_i2c_client->i2c_func_tbl->i2c_write(
-			s_ctrl->sensor_i2c_client,
-			otp_cal_info->ctrl_reg_addr,
-			otp_cal_info->ctrl_reg_read_mode,
-			otp_cal_info->data_size);
-		if (rc < 0) {
-			pr_err("%s: Unable to set read mode !\n", __func__);
-			break;
-		}
-
-		/* Transfer page data from OTP to buffer */
-		rc = s_ctrl->sensor_i2c_client->i2c_func_tbl->i2c_read_seq(
-			s_ctrl->sensor_i2c_client,
-			otp_cal_info->data_seg_addr,
-			(otp_data_info->otp_info) +
-			otp_page_no*otp_cal_info->page_size,
-			otp_cal_info->page_size);
-		if (rc < 0) {
-			pr_err("%s: Fail to read OTP page data: otp_page_no: %d\n",
-				__func__, otp_page_no);
-			break;
-		}
-	}
-
-	/* Make initial state */
-	rc = s_ctrl->sensor_i2c_client->i2c_func_tbl->i2c_write(
-		s_ctrl->sensor_i2c_client,
-		otp_cal_info->ctrl_reg_addr,
-		otp_cal_info->ctrl_reg_initial_mode,
-		otp_cal_info->data_size);
-	if (rc < 0)
-		pr_err("%s: Unable to set Initial state !\n", __func__);
-
-	/* Disable NVM controller */
-	rc = s_ctrl->sensor_i2c_client->i2c_func_tbl->i2c_write(
-		s_ctrl->sensor_i2c_client,
-		otp_cal_info->ctrl_reg_addr,
-		otp_cal_info->ctrl_reg_read_mode_disable,
-		otp_cal_info->data_size);
-	if (rc < 0) {
-		pr_err("%s: Unable to disable NVM controller !\n",
-			__func__);
-	}
-
-	/* set otp read flag to read otp only once */
-	otp_data_info->otp_read = 1;
-
-	return 0;
 }
 
 /* static function definition */
@@ -893,6 +653,7 @@ int32_t msm_sensor_driver_probe(void *setting,
 	struct msm_camera_slave_info        *camera_info = NULL;
 
 	unsigned long                        mount_pos = 0;
+	uint32_t                             is_yuv;
 
 	/* Validate input parameters */
 	if (!setting) {
@@ -908,51 +669,63 @@ int32_t msm_sensor_driver_probe(void *setting,
 	}
 #ifdef CONFIG_COMPAT
 	if (is_compat_task()) {
-		struct msm_camera_sensor_slave_info32 setting32;
-		if (copy_from_user((void *)&setting32, setting,
-			sizeof(setting32))) {
+		struct msm_camera_sensor_slave_info32 *slave_info32 =
+			kzalloc(sizeof(*slave_info32), GFP_KERNEL);
+		if (!slave_info32) {
+			pr_err("failed: no memory for slave_info32 %p\n",
+				slave_info32);
+			rc = -ENOMEM;
+			goto free_slave_info;
+		}
+		if (copy_from_user((void *)slave_info32, setting,
+			sizeof(*slave_info32))) {
 				pr_err("failed: copy_from_user");
 				rc = -EFAULT;
+				kfree(slave_info32);
 				goto free_slave_info;
 			}
 
-		strlcpy(slave_info->actuator_name, setting32.actuator_name,
+		strlcpy(slave_info->actuator_name, slave_info32->actuator_name,
 			sizeof(slave_info->actuator_name));
 
-		strlcpy(slave_info->eeprom_name, setting32.eeprom_name,
+		strlcpy(slave_info->eeprom_name, slave_info32->eeprom_name,
 			sizeof(slave_info->eeprom_name));
 
-		strlcpy(slave_info->sensor_name, setting32.sensor_name,
+		strlcpy(slave_info->sensor_name, slave_info32->sensor_name,
 			sizeof(slave_info->sensor_name));
 
-		strlcpy(slave_info->ois_name, setting32.ois_name,
+		strlcpy(slave_info->ois_name, slave_info32->ois_name,
 			sizeof(slave_info->ois_name));
 
-		strlcpy(slave_info->flash_name, setting32.flash_name,
+		strlcpy(slave_info->flash_name, slave_info32->flash_name,
 			sizeof(slave_info->flash_name));
 
-		slave_info->addr_type = setting32.addr_type;
-		slave_info->camera_id = setting32.camera_id;
+		slave_info->addr_type = slave_info32->addr_type;
+		slave_info->camera_id = slave_info32->camera_id;
 
-		slave_info->i2c_freq_mode = setting32.i2c_freq_mode;
-		slave_info->sensor_id_info = setting32.sensor_id_info;
+		slave_info->i2c_freq_mode = slave_info32->i2c_freq_mode;
+		slave_info->sensor_id_info = slave_info32->sensor_id_info;
 
-		slave_info->slave_addr = setting32.slave_addr;
+		slave_info->slave_addr = slave_info32->slave_addr;
 		slave_info->power_setting_array.size =
-			setting32.power_setting_array.size;
+			slave_info32->power_setting_array.size;
 		slave_info->power_setting_array.size_down =
-			setting32.power_setting_array.size_down;
+			slave_info32->power_setting_array.size_down;
 		slave_info->power_setting_array.size_down =
-			setting32.power_setting_array.size_down;
+			slave_info32->power_setting_array.size_down;
 		slave_info->power_setting_array.power_setting =
-			compat_ptr(setting32.power_setting_array.power_setting);
+			compat_ptr(slave_info32->
+				power_setting_array.power_setting);
 		slave_info->power_setting_array.power_down_setting =
-			compat_ptr(setting32.
+			compat_ptr(slave_info32->
 				power_setting_array.power_down_setting);
 		slave_info->is_init_params_valid =
-			setting32.is_init_params_valid;
-		slave_info->sensor_init_params = setting32.sensor_init_params;
-		slave_info->is_flash_supported = setting32.is_flash_supported;
+			slave_info32->is_init_params_valid;
+		slave_info->sensor_init_params =
+			slave_info32->sensor_init_params;
+		slave_info->output_format =
+			slave_info32->output_format;
+		kfree(slave_info32);
 	} else
 #endif
 	{
@@ -965,14 +738,16 @@ int32_t msm_sensor_driver_probe(void *setting,
 	}
 
 	/* Print slave info */
-	CDBG("camera id %d", slave_info->camera_id);
-	CDBG("slave_addr 0x%x", slave_info->slave_addr);
-	CDBG("addr_type %d", slave_info->addr_type);
-	CDBG("sensor_id_reg_addr 0x%x",
-		slave_info->sensor_id_info.sensor_id_reg_addr);
-	CDBG("sensor_id 0x%x", slave_info->sensor_id_info.sensor_id);
-	CDBG("size %d", slave_info->power_setting_array.size);
-	CDBG("size down %d", slave_info->power_setting_array.size_down);
+	CDBG("camera id %d Slave addr 0x%X addr_type %d\n",
+		slave_info->camera_id, slave_info->slave_addr,
+		slave_info->addr_type);
+	CDBG("sensor_id_reg_addr 0x%X sensor_id 0x%X sensor id mask %d",
+		slave_info->sensor_id_info.sensor_id_reg_addr,
+		slave_info->sensor_id_info.sensor_id,
+		slave_info->sensor_id_info.sensor_id_mask);
+	CDBG("power up size %d power down size %d\n",
+		slave_info->power_setting_array.size,
+		slave_info->power_setting_array.size_down);
 
 	if (slave_info->is_init_params_valid) {
 		CDBG("position %d",
@@ -1000,6 +775,16 @@ int32_t msm_sensor_driver_probe(void *setting,
 
 	CDBG("s_ctrl[%d] %p", slave_info->camera_id, s_ctrl);
 
+	if (s_ctrl->sensordata->special_support_size > 0) {
+		if (!msm_sensor_driver_is_special_support(s_ctrl,
+			slave_info->sensor_name)) {
+			pr_err("%s:%s is not support on this board\n",
+				__func__, slave_info->sensor_name);
+			rc = 0;
+			goto free_slave_info;
+		}
+	}
+
 	if (s_ctrl->is_probe_succeed == 1) {
 		/*
 		 * Different sensor on this camera slot has been connected
@@ -1021,6 +806,12 @@ int32_t msm_sensor_driver_probe(void *setting,
 
 		rc = 0;
 		goto free_slave_info;
+	}
+
+	if (slave_info->power_setting_array.size == 0 &&
+		slave_info->slave_addr == 0) {
+		s_ctrl->is_csid_tg_mode = 1;
+		goto CSID_TG;
 	}
 
 	rc = msm_sensor_get_power_settings(setting, slave_info,
@@ -1045,6 +836,7 @@ int32_t msm_sensor_driver_probe(void *setting,
 	camera_info->sensor_id_reg_addr =
 		slave_info->sensor_id_info.sensor_id_reg_addr;
 	camera_info->sensor_id = slave_info->sensor_id_info.sensor_id;
+	camera_info->sensor_id_mask = slave_info->sensor_id_info.sensor_id_mask;
 
 	/* Fill CCI master, slave address and CCI default params */
 	if (!s_ctrl->sensor_i2c_client) {
@@ -1094,6 +886,7 @@ int32_t msm_sensor_driver_probe(void *setting,
 		goto free_camera_info;
 	}
 
+CSID_TG:
 	/* Update sensor, actuator and eeprom name in
 	*  sensor control structure */
 	s_ctrl->sensordata->sensor_name = slave_info->sensor_name;
@@ -1123,31 +916,15 @@ int32_t msm_sensor_driver_probe(void *setting,
 		goto free_camera_info;
 	}
 
-	/* Save sensor info*/
-	s_ctrl->sensordata->cam_slave_info = slave_info;
-
 	/* Power up and probe sensor */
 	rc = s_ctrl->func_tbl->sensor_power_up(s_ctrl);
 	if (rc < 0) {
 		pr_err("%s power up failed", slave_info->sensor_name);
-		s_ctrl->sensordata->cam_slave_info = NULL;
 		goto free_camera_info;
 	}
 
 	pr_err("%s probe succeeded", slave_info->sensor_name);
 
-	if (slave_info->sensor_init_params.sensor_otp.enable) {
-		/* Read OTP */
-		rc = msm_sensor_read_otp(s_ctrl);
-		if (rc < 0)
-			pr_err("%s OTP read failed", slave_info->sensor_name);
-	} else if (slave_info->sensor_init_params.sensor_otp.eeprom_enable) {
-		/* read eeprom */
-		msm_sensor_read_eeprom(s_ctrl);
-		if (rc < 0)
-			pr_err("%s eeprom read failed",
-				slave_info->sensor_name);
-	}
 	/*
 	  Set probe succeeded flag to 1 so that no other camera shall
 	 * probed on this slot
@@ -1157,7 +934,7 @@ int32_t msm_sensor_driver_probe(void *setting,
 	/*
 	 * Update the subdevice id of flash-src based on availability in kernel.
 	 */
-	if (slave_info->is_flash_supported == 0) {
+	if (strlen(slave_info->flash_name) == 0) {
 		s_ctrl->sensordata->sensor_info->
 			subdev_id[SUB_MODULE_LED_FLASH] = -1;
 	}
@@ -1193,9 +970,12 @@ int32_t msm_sensor_driver_probe(void *setting,
 		goto free_camera_info;
 	}
 	/* Update sensor mount angle and position in media entity flag */
-	mount_pos = s_ctrl->sensordata->sensor_info->position << 16;
-	mount_pos = mount_pos | ((s_ctrl->sensordata->sensor_info->
-		sensor_mount_angle / 90) << 8);
+	is_yuv = (slave_info->output_format == MSM_SENSOR_YCBCR) ? 1 : 0;
+	mount_pos = is_yuv << 25 |
+		(s_ctrl->sensordata->sensor_info->position << 16) |
+		((s_ctrl->sensordata->
+		sensor_info->sensor_mount_angle / 90) << 8);
+
 	s_ctrl->msm_sd.sd.entity.flags = mount_pos | MEDIA_ENT_FL_DEFAULT;
 
 	/*Save sensor info*/
@@ -1283,7 +1063,8 @@ static int32_t msm_sensor_driver_get_dt_data(struct msm_sensor_ctrl_t *s_ctrl)
 	int32_t                              rc = 0;
 	struct msm_camera_sensor_board_info *sensordata = NULL;
 	struct device_node                  *of_node = s_ctrl->of_node;
-	uint32_t cell_id;
+	uint32_t                             cell_id;
+	int32_t                              i;
 
 	s_ctrl->sensordata = kzalloc(sizeof(*sensordata), GFP_KERNEL);
 	if (!s_ctrl->sensordata) {
@@ -1316,6 +1097,35 @@ static int32_t msm_sensor_driver_get_dt_data(struct msm_sensor_ctrl_t *s_ctrl)
 		pr_err("failed: sctrl already filled for cell_id %d", cell_id);
 		rc = -EINVAL;
 		goto FREE_SENSOR_DATA;
+	}
+
+	sensordata->special_support_size =
+		of_property_count_strings(of_node,
+				 "qcom,special-support-sensors");
+
+	if (sensordata->special_support_size < 0)
+		sensordata->special_support_size = 0;
+
+	if (sensordata->special_support_size > MAX_SPECIAL_SUPPORT_SIZE) {
+		pr_err("%s:support_size exceed max support size\n", __func__);
+		sensordata->special_support_size = MAX_SPECIAL_SUPPORT_SIZE;
+	}
+
+	if (sensordata->special_support_size) {
+		for (i = 0; i < sensordata->special_support_size; i++) {
+			rc = of_property_read_string_index(of_node,
+				"qcom,special-support-sensors", i,
+				&(sensordata->special_support_sensors[i]));
+			if (rc < 0) {
+				/* if read sensor support names failed,
+				*   set support all sensors, break;
+				*/
+				sensordata->special_support_size = 0;
+				break;
+			}
+			CDBG("%s special_support_sensors[%d] = %s\n", __func__,
+				i, sensordata->special_support_sensors[i]);
+		}
 	}
 
 	/* Read subdev info */

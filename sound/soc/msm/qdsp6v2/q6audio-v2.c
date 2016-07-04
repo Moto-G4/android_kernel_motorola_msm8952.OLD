@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -55,6 +55,7 @@ int q6audio_get_port_index(u16 port_id)
 	case SLIMBUS_3_TX: return IDX_SLIMBUS_3_TX;
 	case SLIMBUS_4_RX: return IDX_SLIMBUS_4_RX;
 	case SLIMBUS_4_TX: return IDX_SLIMBUS_4_TX;
+	case SLIMBUS_5_RX: return IDX_SLIMBUS_5_RX;
 	case SLIMBUS_5_TX: return IDX_SLIMBUS_5_TX;
 	case SLIMBUS_6_RX: return IDX_SLIMBUS_6_RX;
 	case SLIMBUS_6_TX: return IDX_SLIMBUS_6_TX;
@@ -85,6 +86,12 @@ int q6audio_get_port_index(u16 port_id)
 		return IDX_AUDIO_PORT_ID_I2S_RX;
 	case AFE_PORT_ID_SECONDARY_MI2S_RX_SD1:
 		return IDX_AFE_PORT_ID_SECONDARY_MI2S_RX_SD1;
+	case AFE_PORT_ID_QUINARY_MI2S_RX:
+		return IDX_AFE_PORT_ID_QUINARY_MI2S_RX;
+	case AFE_PORT_ID_QUINARY_MI2S_TX:
+		return IDX_AFE_PORT_ID_QUINARY_MI2S_TX;
+	case AFE_PORT_ID_SENARY_MI2S_TX:
+		return IDX_AFE_PORT_ID_SENARY_MI2S_TX;
 	default: return -EINVAL;
 	}
 }
@@ -125,6 +132,7 @@ int q6audio_get_port_id(u16 port_id)
 	case SLIMBUS_3_TX: return AFE_PORT_ID_SLIMBUS_MULTI_CHAN_3_TX;
 	case SLIMBUS_4_RX: return AFE_PORT_ID_SLIMBUS_MULTI_CHAN_4_RX;
 	case SLIMBUS_4_TX: return AFE_PORT_ID_SLIMBUS_MULTI_CHAN_4_TX;
+	case SLIMBUS_5_RX: return AFE_PORT_ID_SLIMBUS_MULTI_CHAN_5_RX;
 	case SLIMBUS_5_TX: return AFE_PORT_ID_SLIMBUS_MULTI_CHAN_5_TX;
 	case SLIMBUS_6_RX: return AFE_PORT_ID_SLIMBUS_MULTI_CHAN_6_RX;
 	case SLIMBUS_6_TX: return AFE_PORT_ID_SLIMBUS_MULTI_CHAN_6_TX;
@@ -155,6 +163,12 @@ int q6audio_get_port_id(u16 port_id)
 			return AUDIO_PORT_ID_I2S_RX;
 	case AFE_PORT_ID_SECONDARY_MI2S_RX_SD1:
 			     return AFE_PORT_ID_SECONDARY_MI2S_RX_SD1;
+	case AFE_PORT_ID_QUINARY_MI2S_RX:
+			     return AFE_PORT_ID_QUINARY_MI2S_RX;
+	case AFE_PORT_ID_QUINARY_MI2S_TX:
+			     return AFE_PORT_ID_QUINARY_MI2S_TX;
+	case AFE_PORT_ID_SENARY_MI2S_TX:
+			     return AFE_PORT_ID_SENARY_MI2S_TX;
 	default:
 		pr_warn("%s: Invalid port_id %d\n", __func__, port_id);
 		return -EINVAL;
@@ -164,9 +178,6 @@ int q6audio_convert_virtual_to_portid(u16 port_id)
 {
 	int ret;
 
-	/* if port_id is virtual, convert to physical..
-	 * if port_id is already physical, return physical
-	 */
 	if (q6audio_validate_port(port_id) < 0) {
 		if (port_id == RT_PROXY_DAI_001_RX ||
 			port_id == RT_PROXY_DAI_001_TX ||
@@ -206,6 +217,9 @@ int q6audio_is_digital_pcm_interface(u16 port_id)
 	case AFE_PORT_ID_SECONDARY_MI2S_TX:
 	case AUDIO_PORT_ID_I2S_RX:
 	case AFE_PORT_ID_SECONDARY_MI2S_RX_SD1:
+	case AFE_PORT_ID_QUINARY_MI2S_RX:
+	case AFE_PORT_ID_QUINARY_MI2S_TX:
+	case AFE_PORT_ID_SENARY_MI2S_TX:
 		break;
 	default:
 		ret = -EINVAL;
@@ -247,6 +261,7 @@ int q6audio_validate_port(u16 port_id)
 	case SLIMBUS_3_TX:
 	case SLIMBUS_4_RX:
 	case SLIMBUS_4_TX:
+	case SLIMBUS_5_RX:
 	case SLIMBUS_5_TX:
 	case SLIMBUS_6_RX:
 	case SLIMBUS_6_TX:
@@ -267,6 +282,9 @@ int q6audio_validate_port(u16 port_id)
 	case AFE_PORT_ID_TERTIARY_MI2S_RX:
 	case AFE_PORT_ID_TERTIARY_MI2S_TX:
 	case AFE_PORT_ID_SECONDARY_MI2S_RX_SD1:
+	case AFE_PORT_ID_QUINARY_MI2S_RX:
+	case AFE_PORT_ID_QUINARY_MI2S_TX:
+	case AFE_PORT_ID_SENARY_MI2S_TX:
 	{
 		ret = 0;
 		break;

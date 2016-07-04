@@ -149,9 +149,11 @@ struct ci13xxx_udc_driver {
 #define CI13XXX_CONTROLLER_ERROR_EVENT			7
 
 	void	(*notify_event) (struct ci13xxx *udc, unsigned event);
+	bool (*cancel_pending_suspend)(struct ci13xxx *udc);
 	bool    (*in_lpm) (struct ci13xxx *udc);
 	void    (*set_fpr_flag) (struct ci13xxx *udc);
 	struct clk *system_clk;
+	struct clk *pclk;
 };
 
 /* CI13XXX UDC descriptor & global resources */
@@ -181,9 +183,16 @@ struct ci13xxx {
 	unsigned long dTD_update_fail_count;
 	struct usb_phy            *transceiver; /* Transceiver struct */
 	struct clk                *system_clk;
+	struct clk                *pclk;
 	bool                      skip_flush; /* skip flushing remaining EP
 						upon flush timeout for the
 						first EP. */
+	u32			  max_nominal_system_clk_rate;	/* max freq to
+						be voted for system clock in
+						streaming mode */;
+	u32			  default_system_clk_rate;	/* max freq at
+						which system clock should run
+						in non streaming mode */;
 };
 
 /******************************************************************************

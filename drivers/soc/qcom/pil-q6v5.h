@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -25,6 +25,7 @@ struct q6v5_data {
 	void __iomem *rmb_base;
 	void __iomem *cxrail_bhs;  /* External BHS register */
 	struct clk *xo;		   /* XO clock source */
+	struct clk *pnoc_clk;	   /* PNOC bus clock source */
 	struct clk *ahb_clk;	   /* PIL access to registers */
 	struct clk *axi_clk;	   /* CPU access to memory */
 	struct clk *core_clk;	   /* CPU core */
@@ -47,10 +48,14 @@ struct q6v5_data {
 	phys_addr_t mba_phys;
 	void *mba_virt;
 	size_t mba_size;
+	phys_addr_t dp_phys;
+	void *dp_virt;
+	size_t dp_size;
 	bool qdsp6v55;
 	bool qdsp6v5_2_0;
 	bool qdsp6v56;
 	bool qdsp6v56_1_3;
+	bool qdsp6v56_1_8;
 	bool non_elf_image;
 	bool restart_reg_sec;
 	bool override_acc;

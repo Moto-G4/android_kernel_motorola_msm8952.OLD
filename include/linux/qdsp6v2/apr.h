@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2010-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -147,6 +147,18 @@ struct apr_client {
 	struct apr_svc svc[APR_SVC_MAX];
 };
 
+struct apr_func_dsp {
+	void (*apr_set_subsys_state)(void);
+	enum apr_subsys_state (*apr_get_adsp_state)(void);
+	const char * (*apr_get_adsp_subsys_name)(void);
+	u16 (*apr_get_data_src)(struct apr_hdr *hdr);
+	int (*apr_get_dest_id)(char *dest);
+	void (*subsys_notif_register)(struct notifier_block *mod_notif,
+		struct notifier_block *lp_notif);
+	u16 (*apr_get_reset_domain)(u16 proc);
+	bool (*apr_register_voice_svc)(void);
+};
+
 int apr_load_adsp_image(void);
 struct apr_client *apr_get_client(int dest_id, int client_id);
 int apr_wait_for_device_up(int dest_id);
@@ -155,13 +167,13 @@ int apr_get_svc(const char *svc_name, int dest_id, int *client_id,
 void apr_cb_func(void *buf, int len, void *priv);
 struct apr_svc *apr_register(char *dest, char *svc_name, apr_fn svc_fn,
 					uint32_t src_port, void *priv);
-int apr_fill_hdr(void *handle, uint32_t *buf, uint16_t src_port,
+inline int apr_fill_hdr(void *handle, uint32_t *buf, uint16_t src_port,
 			uint16_t msg_type, uint16_t dest_port,
 			uint32_t token, uint32_t opcode, uint16_t len);
 
 int apr_send_pkt(void *handle, uint32_t *buf);
 int apr_deregister(void *handle);
-void subsys_notif_register(struct notifier_block *mod_notif,
+int subsys_notif_register(struct notifier_block *mod_notif,
 				struct notifier_block *lp_notif);
 int apr_get_dest_id(char *dest);
 uint16_t apr_get_data_src(struct apr_hdr *hdr);
@@ -172,8 +184,12 @@ enum apr_subsys_state apr_get_modem_state(void);
 void apr_set_modem_state(enum apr_subsys_state state);
 enum apr_subsys_state apr_get_q6_state(void);
 int apr_set_q6_state(enum apr_subsys_state state);
-void apr_set_subsys_state(void);
+int apr_set_subsys_state(void);
+enum apr_subsys_state apr_get_adsp_state(void);
 const char *apr_get_lpass_subsys_name(void);
 bool apr_register_voice_svc(void);
 uint16_t apr_get_reset_domain(uint16_t proc);
+int apr_get_v2_ops(struct apr_func_dsp *ops);
+int apr_get_v3_ops(struct apr_func_dsp *ops);
+const char *apr_get_adsp_subsys_name(void);
 #endif

@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -19,6 +19,15 @@
 #define MAX_BUFFER_TYPES 32
 #define IDLE_TIME_WINDOW_SIZE 30
 
+struct clock_voltage_table {
+	u32 clock_freq;
+	u32 voltage_idx;
+};
+
+struct clock_voltage_info {
+	struct clock_voltage_table *cv_table;
+	u32 count;
+};
 
 struct load_freq_table {
 	u32 load;
@@ -39,6 +48,11 @@ struct reg_set {
 struct addr_range {
 	u32 start;
 	u32 size;
+};
+
+struct addr_set {
+	struct addr_range *addr_tbl;
+	int count;
 };
 
 struct iommu_info {
@@ -90,11 +104,19 @@ struct clock_set {
 	u32 count;
 };
 
+enum msm_vidc_power_mode {
+	VIDC_POWER_NORMAL = BIT(0),
+	VIDC_POWER_LOW = BIT(1),
+	VIDC_POWER_TURBO = BIT(2),
+	VIDC_POWER_LOW_LATENCY = BIT(3),
+};
+
 struct bus_info {
 	struct msm_bus_scale_pdata *pdata;
 	u32 priv;
 	u32 sessions_supported; /* bitmask */
 	bool passive;
+	enum msm_vidc_power_mode power_mode;
 };
 
 struct bus_set {
@@ -110,19 +132,27 @@ struct msm_vidc_platform_resources {
 	struct load_freq_table *load_freq_tbl;
 	uint32_t load_freq_tbl_size;
 	struct reg_set reg_set;
+	struct addr_set qdss_addr_set;
 	struct iommu_set iommu_group_set;
 	struct buffer_usage_set buffer_usage_set;
 	uint32_t ocmem_size;
 	uint32_t max_load;
+	uint32_t dcvs_min_load;
+	uint32_t dcvs_min_mbperframe;
 	struct platform_device *pdev;
 	struct regulator_set regulator_set;
 	struct clock_set clock_set;
+	struct clock_voltage_info cv_info;
+	struct clock_voltage_info cv_info_vp9d;
 	struct bus_set bus_set;
+	uint32_t power_modes;
 	bool dynamic_bw_update;
 	bool use_non_secure_pil;
 	bool sw_power_collapsible;
 	bool sys_idle_indicator;
 	bool early_fw_load;
+	bool thermal_mitigable;
+	const char *fw_name;
 };
 
 static inline int is_iommu_present(struct msm_vidc_platform_resources *res)

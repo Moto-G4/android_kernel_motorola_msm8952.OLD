@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -11,6 +11,7 @@
  */
 
 #include "skeleton.dtsi"
+#include <dt-bindings/clock/msm-clocks-a7.h>
 
 / {
 	model = "Qualcomm Technologies, Inc. MSM 8610";
@@ -150,6 +151,7 @@
 	restart@fc4ab000 {
 		compatible = "qcom,pshold";
 		reg = <0xfc4ab000 0x4>;
+		reg-names = "pshold-base";
 	};
 
 	timer {
@@ -534,7 +536,7 @@
 		qcom,ipi-ping;
 	};
 
-	qcom,clock-a7@f9011050 {
+	clock_cpu: qcom,clock-a7@f9011050 {
 		compatible = "qcom,clock-a7-8226";
 		reg = <0xf9011050 0x8>,
 		      <0xfc4b80b8 0x8>;
@@ -552,6 +554,7 @@
 			<1094400000 3>;
 
 		cpu-vdd-supply = <&apc_vreg_corner>;
+		#clock-cells = <1>;
 	};
 
 	cpubw: qcom,cpubw {
@@ -581,9 +584,15 @@
 		};
 	};
 
-	qcom,msm-cpufreq@0 {
+	qcom,msm-cpufreq {
 		reg = <0 4>;
 		compatible = "qcom,msm-cpufreq";
+		clocks = <&clock_cpu  clk_a7ssmux>,
+			 <&clock_cpu  clk_a7ssmux>,
+			 <&clock_cpu  clk_a7ssmux>,
+			 <&clock_cpu  clk_a7ssmux>;
+		clock-names = "cpu0_clk", "cpu1_clk",
+				"cpu2_clk", "cpu3_clk";
 		qcom,cpufreq-table =
 			<  300000 >,
 			<  384000 >,
@@ -749,6 +758,11 @@
 	sound {
 		compatible = "qcom,msm8x10-audio-codec";
 		qcom,model = "msm8x10-snd-card";
+	};
+
+	qcom,msmapr-audio {
+		compatible = "qcom,msmapr-audio";
+		qcom,apr-dest-type = "ADSP";
 	};
 
 	qcom,msm-pcm {
@@ -951,6 +965,7 @@
 
 		interrupts = <0 24 1>;
 		vdd_cx-supply = <&pm8110_s1_corner>;
+		vdd_cx-voltage = <7>;
 		vdd_mx-supply = <&pm8110_l3>;
 		vdd_mx-uV = <1050000>;
 		vdd_pll-supply = <&pm8110_l10>;
@@ -1024,10 +1039,10 @@
 		qcom,limit-temp = <60>;
 		qcom,temp-hysteresis = <10>;
 		qcom,freq-step = <2>;
-		qcom,freq-control-mask = <0xf>;
+		qcom,freq-control-list = <&CPU0 &CPU1 &CPU2 &CPU3>;
 		qcom,core-limit-temp = <80>;
 		qcom,core-temp-hysteresis = <10>;
-		qcom,core-control-mask = <0xe>;
+		qcom,core-control-list = <&CPU1 &CPU2 &CPU3>;
 		qcom,hotplug-temp = <110>;
 		qcom,hotplug-temp-hysteresis = <20>;
 		qcom,cpu-sensors = "tsens_tz_sensor5", "tsens_tz_sensor5",

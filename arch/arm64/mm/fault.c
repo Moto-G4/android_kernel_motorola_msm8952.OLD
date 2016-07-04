@@ -36,8 +36,13 @@
 #include <asm/system_misc.h>
 #include <asm/pgtable.h>
 #include <asm/tlbflush.h>
+#include <asm/edac.h>
 
 #include <trace/events/exception.h>
+
+#if defined(CONFIG_HTC_DEBUG_RTB)
+#include <linux/msm_rtb.h>
+#endif
 
 static const char *fault_name(unsigned int esr);
 
@@ -86,12 +91,25 @@ void show_pte(struct mm_struct *mm, unsigned long addr)
 static void __do_kernel_fault(struct mm_struct *mm, unsigned long addr,
 			      unsigned int esr, struct pt_regs *regs)
 {
+#if defined(CONFIG_HTC_DEBUG_RTB)
+	static int enable_logk_die = 1;
+#endif
 	/*
 	 * Are we prepared to handle this kernel fault?
 	 */
 	if (fixup_exception(regs))
 		return;
 
+#if defined(CONFIG_HTC_DEBUG_RTB)
+	if (enable_logk_die) {
+		uncached_logk(LOGK_DIE, (void *)regs->pc);
+		uncached_logk(LOGK_DIE, (void *)regs->regs[30]);
+		uncached_logk(LOGK_DIE, (void *)addr);
+		
+		msm_rtb_disable();
+		enable_logk_die = 0;
+	}
+#endif
 	/*
 	 * No handler, we'll have to terminate things with extreme prejudice.
 	 */
@@ -369,6 +387,7 @@ static int __kprobes do_translation_fault(unsigned long addr,
  */
 static int do_bad(unsigned long addr, unsigned int esr, struct pt_regs *regs)
 {
+	arm64_check_cache_ecc(NULL);
 	return 1;
 }
 
@@ -485,7 +504,7 @@ asmlinkage void __exception do_sp_pc_abort(unsigned long addr,
 	info.si_errno = 0;
 	info.si_code  = BUS_ADRALN;
 	info.si_addr  = (void __user *)addr;
-	arm64_notify_die("", regs, &info, esr);
+	arm64_notify_die("SP or PC abort", regs, &info, esr);
 }
 
 static struct fault_info debug_fault_info[] = {

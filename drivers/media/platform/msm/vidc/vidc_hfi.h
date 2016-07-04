@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -69,7 +69,6 @@
 
 #define HFI_FLUSH_INPUT (HFI_OX_BASE + 0x1)
 #define HFI_FLUSH_OUTPUT (HFI_OX_BASE + 0x2)
-#define HFI_FLUSH_OUTPUT2 (HFI_OX_BASE + 0x3)
 #define HFI_FLUSH_ALL (HFI_OX_BASE + 0x4)
 
 #define HFI_EXTRADATA_NONE					0x00000000
@@ -93,7 +92,6 @@
 #define HFI_EXTRADATA_METADATA_FILLER		0x7FE00002
 
 #define HFI_INDEX_EXTRADATA_INPUT_CROP		0x0700000E
-#define HFI_INDEX_EXTRADATA_DIGITAL_ZOOM	0x07000010
 #define HFI_INDEX_EXTRADATA_ASPECT_RATIO	0x7F100003
 
 struct hfi_buffer_alloc_mode {
@@ -149,6 +147,8 @@ struct hfi_extradata_header {
 	(HFI_PROPERTY_PARAM_OX_START + 0x00A)
 #define  HFI_PROPERTY_PARAM_BUFFER_ALLOC_MODE_SUPPORTED	\
 	(HFI_PROPERTY_PARAM_OX_START + 0x00B)
+#define  HFI_PROPERTY_PARAM_BUFFER_SIZE_MINIMUM			\
+	(HFI_PROPERTY_PARAM_OX_START + 0x00C)
 
 #define HFI_PROPERTY_CONFIG_OX_START					\
 	(HFI_DOMAIN_BASE_COMMON + HFI_ARCH_OX_OFFSET + 0x02000)
@@ -254,6 +254,11 @@ struct hfi_batch_info {
 struct hfi_buffer_count_actual {
 	u32 buffer_type;
 	u32 buffer_count_actual;
+};
+
+struct hfi_buffer_size_minimum {
+	u32 buffer_type;
+	u32 buffer_size;
 };
 
 struct hfi_buffer_requirements {
@@ -366,6 +371,7 @@ struct hfi_uncompressed_plane_actual_constraints_info {
 	(HFI_CMD_SESSION_OX_START + 0x00B)
 #define HFI_CMD_SESSION_RELEASE_RESOURCES	\
 	(HFI_CMD_SESSION_OX_START + 0x00C)
+#define  HFI_CMD_SESSION_CONTINUE  (HFI_CMD_SESSION_OX_START + 0x00D)
 
 #define HFI_MSG_SYS_OX_START			\
 (HFI_DOMAIN_BASE_COMMON + HFI_ARCH_OX_OFFSET + HFI_MSG_START_OFFSET + 0x0000)
@@ -849,9 +855,17 @@ struct hfi_extradata_recovery_point_sei_payload {
 	u32 flag;
 };
 
+struct hfi_cmd_session_continue_packet {
+	u32 size;
+	u32 packet_type;
+	u32 session_id;
+};
+
 struct hal_session {
 	struct list_head list;
 	void *session_id;
+	enum hal_video_codec codec;
+	enum hal_domain domain;
 	u32 is_decoder;
 	void *device;
 };
@@ -871,5 +885,14 @@ u32 hfi_process_msg_packet(msm_vidc_callback callback,
 
 struct hal_session *hfi_process_get_session(
 		struct list_head *sessions, u32 session_id);
+
+enum vidc_status hfi_process_sys_init_done_prop_read(
+	struct hfi_msg_sys_init_done_packet *pkt,
+	struct vidc_hal_sys_init_done *sys_init_done);
+
+enum vidc_status hfi_process_session_init_done_prop_read(
+	struct hfi_msg_sys_session_init_done_packet *pkt,
+	struct vidc_hal_session_init_done *session_init_done);
+
 #endif
 

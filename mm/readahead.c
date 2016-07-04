@@ -19,6 +19,7 @@
 #include <linux/pagemap.h>
 #include <linux/syscalls.h>
 #include <linux/file.h>
+#include <trace/events/mmcio.h>
 
 /*
  * Initialise a struct file's readahead state.  Assumes that the caller has
@@ -200,8 +201,10 @@ __do_page_cache_readahead(struct address_space *mapping, struct file *filp,
 	 * uptodate then the caller will launch readpage again, and
 	 * will then handle the error.
 	 */
-	if (ret)
+	if (ret) {
+		trace_readahead(filp, ret);
 		read_pages(mapping, filp, &page_pool, ret);
+	}
 	BUG_ON(!list_empty(&page_pool));
 out:
 	return ret;
@@ -376,10 +379,10 @@ static int try_context_readahead(struct address_space *mapping,
 	size = count_history_pages(mapping, ra, offset, max);
 
 	/*
-	 * not enough history pages:
+	 * no history pages:
 	 * it could be a random read
 	 */
-	if (size <= req_size)
+	if (!size)
 		return 0;
 
 	/*
@@ -390,8 +393,8 @@ static int try_context_readahead(struct address_space *mapping,
 		size *= 2;
 
 	ra->start = offset;
-	ra->size = min(size + req_size, max);
-	ra->async_size = 1;
+	ra->size = get_init_ra_size(size + req_size, max);
+	ra->async_size = ra->size;
 
 	return 1;
 }

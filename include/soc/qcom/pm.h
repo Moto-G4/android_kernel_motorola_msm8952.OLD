@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2007 Google, Inc.
- * Copyright (c) 2009-2014, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2009-2015, The Linux Foundation. All rights reserved.
  * Author: San Mehat <san@android.com>
  *
  * This software is licensed under the terms of the GNU General Public
@@ -45,6 +45,7 @@ enum msm_pm_l2_scm_flag {
 	MSM_SCM_L2_OFF = 1,
 	MSM_SCM_L2_RET = 2,
 	MSM_SCM_L2_GDHS = 3,
+	MSM_SCM_L3_PC_OFF = 4,
 };
 
 #define MSM_PM_MODE(cpu, mode_nr)  ((cpu) * MSM_PM_SLEEP_MODE_NR + (mode_nr))
@@ -169,4 +170,10 @@ static inline void msm_pm_l2_add_stat(uint32_t id, int64_t t) {}
 
 void msm_pm_set_cpr_ops(struct msm_pm_cpr_ops *ops);
 extern dma_addr_t msm_pc_debug_counters_phys;
+
+#ifdef CONFIG_HTC_POWER_DEBUG
+int print_gpio_buffer(struct seq_file *m);
+int free_gpio_buffer(void);
+#endif
+
 #endif  /* __ARCH_ARM_MACH_MSM_PM_H */

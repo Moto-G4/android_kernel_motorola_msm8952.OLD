@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -34,11 +34,14 @@
 #define LPASS_BE_INCALL_RECORD_TX "INCALL_RECORD_RX"
 #define LPASS_BE_SEC_I2S_RX "SECONDARY_I2S_RX"
 #define LPASS_BE_SPDIF_RX "SPDIF_RX"
+#define LPASS_BE_MI2S_HDMI_RX "MI2S_HDMI_RX"
 
 #define LPASS_BE_MI2S_RX "MI2S_RX"
 #define LPASS_BE_MI2S_TX "MI2S_TX"
 #define LPASS_BE_QUAT_MI2S_RX "QUAT_MI2S_RX"
 #define LPASS_BE_QUAT_MI2S_TX "QUAT_MI2S_TX"
+#define LPASS_BE_QUIN_MI2S_RX "QUIN_MI2S_RX"
+#define LPASS_BE_QUIN_MI2S_TX "QUIN_MI2S_TX"
 #define LPASS_BE_SEC_MI2S_RX "SEC_MI2S_RX"
 #define LPASS_BE_SEC_MI2S_RX_SD1 "SEC_MI2S_RX_SD1"
 #define LPASS_BE_SEC_MI2S_TX "SEC_MI2S_TX"
@@ -46,6 +49,7 @@
 #define LPASS_BE_PRI_MI2S_TX "PRI_MI2S_TX"
 #define LPASS_BE_TERT_MI2S_RX "TERTIARY_MI2S_RX"
 #define LPASS_BE_TERT_MI2S_TX "TERTIARY_MI2S_TX"
+#define LPASS_BE_SENARY_MI2S_TX "SENARY_MI2S_TX"
 #define LPASS_BE_AUDIO_I2S_RX "AUDIO_I2S_RX"
 #define LPASS_BE_STUB_RX "STUB_RX"
 #define LPASS_BE_STUB_TX "STUB_TX"
@@ -59,12 +63,8 @@
 #define LPASS_BE_SLIMBUS_5_TX "SLIMBUS_5_TX"
 #define LPASS_BE_SLIMBUS_6_RX "SLIMBUS_6_RX"
 #define LPASS_BE_SLIMBUS_6_TX "SLIMBUS_6_TX"
+#define LPASS_BE_SLIMBUS_5_RX "SLIMBUS_5_RX"
 
-/* For multimedia front-ends, asm session is allocated dynamically.
- * Hence, asm session/multimedia front-end mapping has to be maintained.
- * Due to this reason, additional multimedia front-end must be placed before
- * non-multimedia front-ends.
- */
 
 enum {
 	MSM_FRONTEND_DAI_MULTIMEDIA1 = 0,
@@ -103,6 +103,8 @@ enum {
 	MSM_FRONTEND_DAI_LSM8,
 	MSM_FRONTEND_DAI_VOICE2_STUB,
 	MSM_FRONTEND_DAI_VOWLAN,
+	MSM_FRONTEND_DAI_VOICEMMODE1,
+	MSM_FRONTEND_DAI_VOICEMMODE2,
 	MSM_FRONTEND_DAI_MAX,
 };
 
@@ -155,8 +157,15 @@ enum {
 	MSM_BACKEND_DAI_SLIMBUS_6_TX,
 	MSM_BACKEND_DAI_SPDIF_RX,
 	MSM_BACKEND_DAI_SECONDARY_MI2S_RX_SD1,
+	MSM_BACKEND_DAI_SLIMBUS_5_RX,
+	MSM_BACKEND_DAI_QUINARY_MI2S_RX,
+	MSM_BACKEND_DAI_QUINARY_MI2S_TX,
+	MSM_BACKEND_DAI_SENARY_MI2S_TX,
+	MSM_BACKEND_DAI_MI2S_HDMI_RX,
 	MSM_BACKEND_DAI_MAX,
 };
+
+#define MSM_SNDCARD_GENERIC_HW_DEP 999
 
 enum msm_pcm_routing_event {
 	MSM_PCM_RT_EVT_BUF_RECFG,
@@ -186,13 +195,10 @@ struct msm_pcm_routing_evt {
 };
 
 struct msm_pcm_routing_bdai_data {
-	u16 port_id; /* AFE port ID */
-	u8 active; /* track if this backend is enabled */
-	unsigned long fe_sessions; /* Front-end sessions */
-	u64 port_sessions; /* track Tx BE ports -> Rx BE
-			    * number of BE should not exceed
-			    * the size of this field
-			    */
+	u16 port_id; 
+	u8 active; 
+	unsigned long fe_sessions; 
+	u64 port_sessions; 
 	unsigned int  sample_rate;
 	unsigned int  channel;
 	unsigned int  format;
@@ -201,8 +207,8 @@ struct msm_pcm_routing_bdai_data {
 };
 
 struct msm_pcm_routing_fdai_data {
-	u16 be_srate; /* track prior backend sample rate for flushing purpose */
-	int strm_id; /* ASM stream ID */
+	u16 be_srate; 
+	int strm_id; 
 	int perf_mode;
 	struct msm_pcm_routing_evt event_info;
 };
@@ -220,19 +226,15 @@ struct msm_pcm_stream_app_type_cfg {
 	int sample_rate;
 };
 
-/* dai_id: front-end ID,
- * dspst_id:  DSP audio stream ID
- * stream_type: playback or capture
- */
 int msm_pcm_routing_reg_phy_stream(int fedai_id, int perf_mode, int dspst_id,
 				   int stream_type);
 void msm_pcm_routing_reg_psthr_stream(int fedai_id, int dspst_id,
 		int stream_type);
-int msm_pcm_routing_reg_phy_compr_stream(int fedai_id, bool perf_mode,
+int msm_pcm_routing_reg_phy_compr_stream(int fedai_id, int perf_mode,
 					  int dspst_id, int stream_type,
 					  uint32_t compr_passthr);
 
-int msm_pcm_routing_reg_phy_stream_v2(int fedai_id, bool perf_mode,
+int msm_pcm_routing_reg_phy_stream_v2(int fedai_id, int perf_mode,
 				      int dspst_id, int stream_type,
 				      struct msm_pcm_routing_evt event_info);
 
@@ -250,4 +252,5 @@ void msm_pcm_routing_release_lock(void);
 
 void msm_pcm_routing_reg_stream_app_type_cfg(int fedai_id, int app_type,
 					int acdb_dev_id, int sample_rate);
-#endif /*_MSM_PCM_H*/
+int msm_pcm_routing_get_port(struct snd_pcm_substream *substream, u16 *port_id);
+#endif 

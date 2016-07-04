@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2010-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -26,9 +26,12 @@ struct ci13xxx_udc_context {
 	int wake_irq;
 	bool wake_irq_state;
 	struct pinctrl *ci13xxx_pinctrl;
+	struct timer_list irq_enable_timer;
+	bool irq_disabled;
 };
 
 static struct ci13xxx_udc_context _udc_ctxt;
+#define IRQ_ENABLE_DELAY	(jiffies + msecs_to_jiffies(1000))
 
 static irqreturn_t msm_udc_irq(int irq, void *data)
 {
@@ -227,6 +230,21 @@ static void ci13xxx_msm_notify_event(struct ci13xxx *udc, unsigned event)
 	}
 }
 
+static bool ci13xxx_cancel_pending_suspend(struct ci13xxx *udc)
+{
+	struct msm_otg *otg;
+
+	if (udc == NULL)
+		return false;
+
+	if (udc->transceiver == NULL)
+		return false;
+
+	otg = container_of(udc->transceiver, struct msm_otg, phy);
+
+	return cancel_delayed_work_sync(&otg->suspend_work);
+}
+
 static bool ci13xxx_msm_in_lpm(struct ci13xxx *udc)
 {
 	struct msm_otg *otg;
@@ -279,6 +297,7 @@ static struct ci13xxx_udc_driver ci13xxx_msm_udc_driver = {
 				  CI13XXX_IS_OTG,
 	.nz_itc			= 0,
 	.notify_event		= ci13xxx_msm_notify_event,
+	.cancel_pending_suspend = ci13xxx_cancel_pending_suspend,
 	.in_lpm                 = ci13xxx_msm_in_lpm,
 	.set_fpr_flag           = ci13xxx_msm_set_fpr_flag,
 };
@@ -359,6 +378,7 @@ static void ci13xxx_msm_uninstall_wake_gpio(struct platform_device *pdev)
 	}
 }
 
+static void enable_usb_irq_timer_func(unsigned long data);
 static int ci13xxx_msm_probe(struct platform_device *pdev)
 {
 	struct resource *res;
@@ -382,6 +402,11 @@ static int ci13xxx_msm_probe(struct platform_device *pdev)
 		if (pdata->enable_ahb2ahb_bypass)
 			ci13xxx_msm_udc_driver.flags |=
 				CI13XXX_ENABLE_AHB2AHB_BYPASS;
+
+		/* Clear disable streaming flag if is requested. */
+		if (pdata->enable_streaming)
+			ci13xxx_msm_udc_driver.flags &=
+						~CI13XXX_DISABLE_STREAMING;
 	}
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
@@ -438,6 +463,9 @@ static int ci13xxx_msm_probe(struct platform_device *pdev)
 		goto gpio_uninstall;
 	}
 
+	setup_timer(&_udc_ctxt.irq_enable_timer, enable_usb_irq_timer_func,
+							(unsigned long)NULL);
+
 	pm_runtime_no_callbacks(&pdev->dev);
 	pm_runtime_enable(&pdev->dev);
 
@@ -479,6 +507,45 @@ void msm_hw_bam_disable(bool bam_disable)
 		val = readl_relaxed(USB_GENCONFIG) & ~GENCONFIG_BAM_DISABLE;
 
 	writel_relaxed(val, USB_GENCONFIG);
+}
+
+void msm_usb_irq_disable(bool disable)
+{
+	struct ci13xxx *udc = _udc;
+	unsigned long flags;
+
+	spin_lock_irqsave(udc->lock, flags);
+
+	if (_udc_ctxt.irq_disabled == disable) {
+		pr_debug("Interrupt state already disable = %d\n", disable);
+		if (disable)
+			mod_timer(&_udc_ctxt.irq_enable_timer,
+					IRQ_ENABLE_DELAY);
+		spin_unlock_irqrestore(udc->lock, flags);
+		return;
+	}
+
+	if (disable) {
+		disable_irq_nosync(_udc_ctxt.irq);
+		/* start timer here */
+		pr_debug("%s: Disabling interrupts\n", __func__);
+		mod_timer(&_udc_ctxt.irq_enable_timer, IRQ_ENABLE_DELAY);
+		_udc_ctxt.irq_disabled = true;
+
+	} else {
+		pr_debug("%s: Enabling interrupts\n", __func__);
+		del_timer(&_udc_ctxt.irq_enable_timer);
+		enable_irq(_udc_ctxt.irq);
+		_udc_ctxt.irq_disabled = false;
+	}
+
+	spin_unlock_irqrestore(udc->lock, flags);
+}
+
+static void enable_usb_irq_timer_func(unsigned long data)
+{
+	pr_debug("enabling interrupt from timer\n");
+	msm_usb_irq_disable(false);
 }
 
 static struct platform_driver ci13xxx_msm_driver = {

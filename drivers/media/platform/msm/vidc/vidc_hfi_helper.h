@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -86,7 +86,8 @@
 #define HFI_VIDEO_CODEC_SPARK				0x00000200
 #define HFI_VIDEO_CODEC_VP8				0x00001000
 #define HFI_VIDEO_CODEC_HEVC				0x00002000
-#define HFI_VIDEO_CODEC_HEVC_HYBRID			0x00004000
+#define HFI_VIDEO_CODEC_VP9				0x00004000
+#define HFI_VIDEO_CODEC_HEVC_HYBRID			0x80000000
 
 #define HFI_H264_PROFILE_BASELINE			0x00000001
 #define HFI_H264_PROFILE_MAIN				0x00000002
@@ -348,6 +349,8 @@ struct hfi_buffer_info {
 	(HFI_PROPERTY_PARAM_VENC_COMMON_START + 0x020)
 #define HFI_PROPERTY_PARAM_VENC_H264_VUI_BITSTREAM_RESTRC \
 	(HFI_PROPERTY_PARAM_VENC_COMMON_START + 0x021)
+#define HFI_PROPERTY_PARAM_VENC_LOW_LATENCY_MODE	\
+	(HFI_PROPERTY_PARAM_VENC_COMMON_START + 0x022)
 #define HFI_PROPERTY_PARAM_VENC_PRESERVE_TEXT_QUALITY \
 	(HFI_PROPERTY_PARAM_VENC_COMMON_START + 0x023)
 #define HFI_PROPERTY_PARAM_VENC_HIER_P_MAX_NUM_ENH_LAYER	\
@@ -362,6 +365,8 @@ struct hfi_buffer_info {
 	(HFI_PROPERTY_PARAM_VENC_COMMON_START + 0x02C)
 #define  HFI_PROPERTY_PARAM_VENC_HIER_P_HYBRID_MODE	\
 	(HFI_PROPERTY_PARAM_VENC_COMMON_START + 0x02F)
+#define  HFI_PROPERTY_PARAM_VENC_BITRATE_TYPE		\
+	(HFI_PROPERTY_PARAM_VENC_COMMON_START + 0x031)
 
 #define HFI_PROPERTY_CONFIG_VENC_COMMON_START				\
 	(HFI_DOMAIN_BASE_VENC + HFI_ARCH_COMMON_OFFSET + 0x6000)
@@ -414,9 +419,12 @@ struct hfi_bitrate {
 #define HFI_CAPABILITY_SCALE_Y				(HFI_COMMON_BASE + 0x7)
 #define HFI_CAPABILITY_BITRATE				(HFI_COMMON_BASE + 0x8)
 #define HFI_CAPABILITY_BFRAME				(HFI_COMMON_BASE + 0x9)
+#define HFI_CAPABILITY_PEAKBITRATE			(HFI_COMMON_BASE + 0xa)
 #define HFI_CAPABILITY_HIER_P_NUM_ENH_LAYERS		(HFI_COMMON_BASE + 0x10)
 #define HFI_CAPABILITY_ENC_LTR_COUNT			(HFI_COMMON_BASE + 0x11)
 #define HFI_CAPABILITY_CP_OUTPUT2_THRESH		(HFI_COMMON_BASE + 0x12)
+#define HFI_CAPABILITY_HIER_B_NUM_ENH_LAYERS	(HFI_COMMON_BASE + 0x13)
+#define HFI_CAPABILITY_LCU_SIZE				(HFI_COMMON_BASE + 0x14)
 #define HFI_CAPABILITY_HIER_P_HYBRID_NUM_ENH_LAYERS	(HFI_COMMON_BASE + 0x15)
 
 struct hfi_capability_supported {
@@ -491,6 +499,11 @@ struct hfi_intra_refresh {
 	u32 cir_mbs;
 };
 
+struct hfi_3x_intra_refresh {
+	u32 mode;
+	u32 mbs;
+};
+
 struct hfi_idr_period {
 	u32 idr_period;
 };
@@ -531,6 +544,11 @@ struct hfi_multi_stream {
 	u32 enable;
 	u32 width;
 	u32 height;
+};
+
+struct hfi_3x_multi_stream {
+	u32 buffer_type;
+	u32 enable;
 };
 
 struct hfi_multi_view_format {
@@ -649,6 +667,10 @@ struct hfi_h264_vui_timing_info {
 #define HFI_MAX_MATRIX_COEFFS 9
 #define HFI_MAX_BIAS_COEFFS 3
 #define HFI_MAX_LIMIT_COEFFS 6
+
+#define HFI_STATISTICS_MODE_DEFAULT 0x10
+#define HFI_STATISTICS_MODE_1 0x11
+#define HFI_STATISTICS_MODE_2 0x12
 
 struct hfi_uncompressed_format_select {
 	u32 buffer_type;

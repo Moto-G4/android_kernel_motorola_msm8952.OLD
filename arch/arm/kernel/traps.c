@@ -28,6 +28,7 @@
 #include <linux/bug.h>
 
 #include <linux/atomic.h>
+#include <asm/arch_timer.h>
 #include <asm/cacheflush.h>
 #include <asm/exception.h>
 #include <asm/unistd.h>
@@ -350,15 +351,17 @@ void arm_notify_die(const char *str, struct pt_regs *regs,
 int is_valid_bugaddr(unsigned long pc)
 {
 #ifdef CONFIG_THUMB2_KERNEL
-	unsigned short bkpt;
+	u16 bkpt;
+	u16 insn = __opcode_to_mem_thumb16(BUG_INSTR_VALUE);
 #else
-	unsigned long bkpt;
+	u32 bkpt;
+	u32 insn = __opcode_to_mem_arm(BUG_INSTR_VALUE);
 #endif
 
 	if (probe_kernel_address((unsigned *)pc, bkpt))
 		return 0;
 
-	return bkpt == BUG_INSTR_VALUE;
+	return bkpt == insn;
 }
 
 #endif
@@ -730,6 +733,42 @@ static int __init arm_mrc_hook_init(void)
 late_initcall(arm_mrc_hook_init);
 
 #endif
+
+static int get_pct_trap(struct pt_regs *regs, unsigned int instr)
+{
+	u64 cntpct;
+	unsigned int res;
+	int rd = (instr >> 12) & 0xF;
+	int rn =  (instr >> 16) & 0xF;
+
+	res = arm_check_condition(instr, regs->ARM_cpsr);
+	if (res == ARM_OPCODE_CONDTEST_FAIL) {
+		regs->ARM_pc += 4;
+		return 0;
+	}
+
+	if (rd == 15 || rn == 15)
+		return 1;
+	cntpct = arch_counter_get_cntpct();
+	regs->uregs[rd] = cntpct;
+	regs->uregs[rn] = cntpct >> 32;
+	regs->ARM_pc += 4;
+	return 0;
+}
+
+static struct undef_hook get_pct_hook = {
+	.instr_mask	= 0x0ff00fff,
+	.instr_val	= 0x0c500f0e,
+	.cpsr_mask	= MODE_MASK,
+	.cpsr_val	= USR_MODE,
+	.fn		= get_pct_trap,
+};
+
+void get_pct_hook_init(void)
+{
+	register_undef_hook(&get_pct_hook);
+}
+EXPORT_SYMBOL(get_pct_hook_init);
 
 void __bad_xchg(volatile void *ptr, int size)
 {

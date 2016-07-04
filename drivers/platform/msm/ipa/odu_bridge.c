@@ -1,4 +1,4 @@
-/* Copyright (c) 2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2014-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -108,7 +108,7 @@ struct odu_bridge_ctx {
 	u8 device_ethaddr[ETH_ALEN];
 	void *priv;
 	ipa_notify_cb tx_dp_notify;
-	int(*send_dl_skb)(void *priv, struct sk_buff *skb);
+	int (*send_dl_skb)(void *priv, struct sk_buff *skb);
 	struct stats stats;
 	bool is_connected;
 	enum odu_bridge_mode mode;
@@ -119,6 +119,7 @@ struct odu_bridge_ctx {
 	u32 odu_prod_hdl;
 	u32 odu_emb_cons_hdl;
 	u32 odu_teth_cons_hdl;
+	u32 ipa_sys_desc_size;
 };
 static struct odu_bridge_ctx *odu_bridge_ctx;
 
@@ -190,7 +191,7 @@ static int odu_bridge_connect_router(void)
 	odu_prod_params.client = IPA_CLIENT_ODU_PROD;
 	odu_prod_params.ipa_ep_cfg.hdr.hdr_len = ETH_HLEN;
 	odu_prod_params.ipa_ep_cfg.nat.nat_en = IPA_SRC_NAT;
-	odu_prod_params.desc_fifo_sz = IPA_ODU_SYS_DESC_FIFO_SZ;
+	odu_prod_params.desc_fifo_sz = odu_bridge_ctx->ipa_sys_desc_size;
 	odu_prod_params.priv = odu_bridge_ctx->priv;
 	odu_prod_params.notify = odu_bridge_ctx->tx_dp_notify;
 	odu_prod_params.keep_ipa_awake = true;
@@ -205,7 +206,7 @@ static int odu_bridge_connect_router(void)
 	odu_emb_cons_params.client = IPA_CLIENT_ODU_EMB_CONS;
 	odu_emb_cons_params.ipa_ep_cfg.hdr.hdr_len = ETH_HLEN;
 	odu_emb_cons_params.ipa_ep_cfg.nat.nat_en = IPA_BYPASS_NAT;
-	odu_emb_cons_params.desc_fifo_sz = IPA_ODU_SYS_DESC_FIFO_SZ;
+	odu_emb_cons_params.desc_fifo_sz = odu_bridge_ctx->ipa_sys_desc_size;
 	odu_emb_cons_params.priv = odu_bridge_ctx->priv;
 	odu_emb_cons_params.notify = odu_bridge_emb_cons_cb;
 	odu_emb_cons_params.keep_ipa_awake = true;
@@ -391,7 +392,7 @@ static int odu_bridge_disconnect_bridge(void)
  *
  * Return codes: 0- success, error otherwise
  */
-int odu_bridge_disconnect()
+int odu_bridge_disconnect(void)
 {
 	int res;
 
@@ -442,7 +443,7 @@ EXPORT_SYMBOL(odu_bridge_disconnect);
  *		-EPERM: Operation not permitted as the bridge is already
  *		connected
  */
-int odu_bridge_connect()
+int odu_bridge_connect(void)
 {
 	int res;
 
@@ -1006,11 +1007,13 @@ static int odu_bridge_register_properties(void)
 	ipv4_property = &tx_properties.prop[0];
 	ipv4_property->ip = IPA_IP_v4;
 	ipv4_property->dst_pipe = IPA_CLIENT_ODU_EMB_CONS;
+	ipv4_property->hdr_l2_type = IPA_HDR_L2_ETHERNET_II;
 	strlcpy(ipv4_property->hdr_name, ODU_BRIDGE_IPV4_HDR_NAME,
 			IPA_RESOURCE_NAME_MAX);
 	ipv6_property = &tx_properties.prop[1];
 	ipv6_property->ip = IPA_IP_v6;
 	ipv6_property->dst_pipe = IPA_CLIENT_ODU_EMB_CONS;
+	ipv6_property->hdr_l2_type = IPA_HDR_L2_ETHERNET_II;
 	strlcpy(ipv6_property->hdr_name, ODU_BRIDGE_IPV6_HDR_NAME,
 			IPA_RESOURCE_NAME_MAX);
 	tx_properties.num_props = 2;
@@ -1020,10 +1023,12 @@ static int odu_bridge_register_properties(void)
 	rx_ipv4_property->ip = IPA_IP_v4;
 	rx_ipv4_property->attrib.attrib_mask = 0;
 	rx_ipv4_property->src_pipe = IPA_CLIENT_ODU_PROD;
+	rx_ipv4_property->hdr_l2_type = IPA_HDR_L2_ETHERNET_II;
 	rx_ipv6_property = &rx_properties.prop[1];
 	rx_ipv6_property->ip = IPA_IP_v6;
 	rx_ipv6_property->attrib.attrib_mask = 0;
 	rx_ipv6_property->src_pipe = IPA_CLIENT_ODU_PROD;
+	rx_ipv6_property->hdr_l2_type = IPA_HDR_L2_ETHERNET_II;
 	rx_properties.num_props = 2;
 
 	res = ipa_register_intf(odu_bridge_ctx->netdev_name, &tx_properties,
@@ -1129,6 +1134,7 @@ int odu_bridge_init(struct odu_bridge_params *params)
 	odu_bridge_ctx->send_dl_skb = params->send_dl_skb;
 	memcpy(odu_bridge_ctx->device_ethaddr, params->device_ethaddr,
 		ETH_ALEN);
+	odu_bridge_ctx->ipa_sys_desc_size = params->ipa_desc_size;
 	odu_bridge_ctx->mode = ODU_BRIDGE_MODE_ROUTER;
 
 	mutex_init(&odu_bridge_ctx->lock);

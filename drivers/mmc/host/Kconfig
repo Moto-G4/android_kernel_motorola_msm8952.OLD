@@ -117,12 +117,17 @@ config MMC_SDHCI_MSM
 
 	  If unsure, say N.
 
-config MMC_SDHCI_MSM_DEBUG
-	tristate "Qualcomm SDHCI Controller Debugging"
-	depends on ARCH_MSM
-	depends on MMC_SDHCI_PLTFM
-	depends on DEBUG_FS
-	default n
+config MMC_SDHCI_MSM_ICE
+	bool "Qualcomm Technologies, Inc Inline Crypto Engine for SDHCI core"
+	depends on MMC_SDHCI_MSM && CRYPTO_DEV_QCOM_ICE
+	default MMC_SDHCI_MSM && CRYPTO_DEV_QCOM_ICE
+	help
+	  This selects the QTI specific additions to support Inline Crypto
+	  Engine (ICE). ICE accelerates the crypto operations and maintains
+	  the high SDHCI performance.
+
+	  Select this if you have ICE supported for SDHCI on QTI chipset.
+	  If unsure, say N.
 
 config MMC_SDHCI_OF_ESDHC
 	tristate "SDHCI OF support for the Freescale eSDHC controller"
@@ -328,16 +333,6 @@ config MMC_ATMELMCI
 	  This selects the Atmel Multimedia Card Interface driver. If
 	  you have an AT32 (AVR32) or AT91 platform with a Multimedia
 	  Card slot, say Y or M here.
-
-	  If unsure, say N.
-
-config MMC_MSM_RAW
-	bool "Qualcomm SDCC Controller Support (raw mode)"
-	depends on ARCH_MSM && APANIC_MMC
-	help
-	  This provides support for dumping the kernel log buffer to a raw
-	  MMC partition in the event of a kernel panic using the SD/MMC cell
-	  found in the MSM and QSD SOCs from Qualcomm.
 
 	  If unsure, say N.
 
@@ -668,3 +663,16 @@ config MMC_REALTEK_PCI
 	help
 	  Say Y here to include driver code to support SD/MMC card interface
 	  of Realtek PCI-E card reader
+
+config MMC_CQ_HCI
+	tristate "Command Queue Support"
+	depends on HAS_DMA
+	help
+	  This selects the Command Queue Host Controller Interface (CQHCI)
+	  support present in host controllers of Qualcomm Technologies, Inc
+	  amongst others.
+	  This controller supports eMMC devices with command queue support.
+
+	  If you have a controller with this interface, say Y or M here.
+
+	  If unsure, say N.

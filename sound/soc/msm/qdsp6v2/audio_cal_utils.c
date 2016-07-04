@@ -1,4 +1,4 @@
-/* Copyright (c) 2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2014-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -16,6 +16,7 @@
 #include <linux/miscdevice.h>
 #include <linux/uaccess.h>
 #include <linux/mutex.h>
+#include <linux/ratelimit.h>
 #include <sound/audio_cal_utils.h>
 
 
@@ -72,6 +73,12 @@ size_t get_cal_info_size(int32_t cal_type)
 	case ASM_AUDSTRM_CAL_TYPE:
 		size = sizeof(struct audio_cal_info_audstrm);
 		break;
+	case AFE_TOPOLOGY_CAL_TYPE:
+		size = sizeof(struct audio_cal_info_afe_top);
+		break;
+	case AFE_CUST_TOPOLOGY_CAL_TYPE:
+		size = 0;
+		break;
 	case AFE_COMMON_RX_CAL_TYPE:
 		size = sizeof(struct audio_cal_info_afe);
 		break;
@@ -92,6 +99,12 @@ size_t get_cal_info_size(int32_t cal_type)
 		break;
 	case AFE_SIDETONE_CAL_TYPE:
 		size = sizeof(struct audio_cal_info_sidetone);
+		break;
+	case LSM_CUST_TOPOLOGY_CAL_TYPE:
+		size = 0;
+		break;
+	case LSM_TOPOLOGY_CAL_TYPE:
+		size = sizeof(struct audio_cal_info_lsm_top);
 		break;
 	case LSM_CAL_TYPE:
 		size = sizeof(struct audio_cal_info_lsm);
@@ -184,6 +197,12 @@ size_t get_user_cal_type_size(int32_t cal_type)
 	case ASM_AUDSTRM_CAL_TYPE:
 		size = sizeof(struct audio_cal_type_audstrm);
 		break;
+	case AFE_TOPOLOGY_CAL_TYPE:
+		size = sizeof(struct audio_cal_type_afe_top);
+		break;
+	case AFE_CUST_TOPOLOGY_CAL_TYPE:
+		size = sizeof(struct audio_cal_type_basic);
+		break;
 	case AFE_COMMON_RX_CAL_TYPE:
 		size = sizeof(struct audio_cal_type_afe);
 		break;
@@ -204,6 +223,12 @@ size_t get_user_cal_type_size(int32_t cal_type)
 		break;
 	case AFE_SIDETONE_CAL_TYPE:
 		size = sizeof(struct audio_cal_type_sidetone);
+		break;
+	case LSM_CUST_TOPOLOGY_CAL_TYPE:
+		size = sizeof(struct audio_cal_type_basic);
+		break;
+	case LSM_TOPOLOGY_CAL_TYPE:
+		size = sizeof(struct audio_cal_type_lsm_top);
 		break;
 	case LSM_CAL_TYPE:
 		size = sizeof(struct audio_cal_type_lsm);
@@ -641,6 +666,7 @@ static int map_memory(struct cal_type_data *cal_type,
 			struct cal_block_data *cal_block)
 {
 	int ret = 0;
+	static DEFINE_RATELIMIT_STATE(rl, HZ/2, 1);
 
 
 	if (cal_type->info.cal_util_callbacks.map_cal != NULL) {
@@ -655,7 +681,8 @@ static int map_memory(struct cal_type_data *cal_type,
 		ret = cal_type->info.cal_util_callbacks.
 			map_cal(cal_type->info.reg.cal_type, cal_block);
 		if (ret < 0) {
-			pr_err("%s: map_cal failed, cal type %d, ret = %d!\n",
+			if (__ratelimit(&rl))
+				pr_err("%s: map_cal failed, cal type %d, ret = %d!\n",
 				__func__, cal_type->info.reg.cal_type,
 				ret);
 			goto done;

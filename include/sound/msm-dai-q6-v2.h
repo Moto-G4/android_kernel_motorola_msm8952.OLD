@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -26,6 +26,8 @@
 #define MSM_TERT_MI2S 2
 #define MSM_QUAT_MI2S  3
 #define MSM_SEC_MI2S_SD1  4
+#define MSM_QUIN_MI2S  5
+#define MSM_SENARY_MI2S  6
 
 struct msm_dai_auxpcm_config {
 	u16 mode;
@@ -50,7 +52,7 @@ struct msm_mi2s_pdata {
 };
 
 struct msm_i2s_data {
-	u32 capability; /* RX or TX */
+	u32 capability; 
 	u16 sd_lines;
 };
 #endif

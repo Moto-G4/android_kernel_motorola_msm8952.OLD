@@ -34,7 +34,9 @@
 #include <linux/device_cgroup.h>
 #include <linux/fs_struct.h>
 #include <linux/posix_acl.h>
+#include <linux/hash.h>
 #include <asm/uaccess.h>
+#include <trace/events/mmcio.h>
 
 #include "internal.h"
 #include "mount.h"
@@ -1647,8 +1649,7 @@ static inline int can_lookup(struct inode *inode)
 
 static inline unsigned int fold_hash(unsigned long hash)
 {
-	hash += hash >> (8*sizeof(int));
-	return hash;
+	return hash_64(hash, 32);
 }
 
 #else	/* 32-bit case */
@@ -3408,6 +3409,7 @@ int vfs_unlink(struct inode *dir, struct dentry *dentry)
 	if (!dir->i_op->unlink)
 		return -EPERM;
 
+	trace_vfs_unlink(dentry, dentry->d_inode->i_size);
 	mutex_lock(&dentry->d_inode->i_mutex);
 	if (d_mountpoint(dentry))
 		error = -EBUSY;
@@ -3420,7 +3422,7 @@ int vfs_unlink(struct inode *dir, struct dentry *dentry)
 		}
 	}
 	mutex_unlock(&dentry->d_inode->i_mutex);
-
+	trace_vfs_unlink_done(dentry);
 	/* We don't d_delete() NFS sillyrenamed files--they still exist. */
 	if (!error && !(dentry->d_flags & DCACHE_NFSFS_RENAMED)) {
 		fsnotify_link_count(dentry->d_inode);

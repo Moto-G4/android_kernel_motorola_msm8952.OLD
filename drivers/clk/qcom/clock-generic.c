@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2013-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -19,6 +19,9 @@
 #include <linux/clk/msm-clk-provider.h>
 #include <linux/clk/msm-clock-generic.h>
 #include <soc/qcom/msm-clock-controller.h>
+#if defined(CONFIG_HTC_DEBUG_FOOTPRINT)
+#include <htc_mnemosyne/htc_footprint.h>
+#endif
 
 /* ==================== Mux clock ==================== */
 
@@ -104,16 +107,14 @@ static int mux_set_rate(struct clk *c, unsigned long rate)
 	 * rate.
 	 */
 	for (i = 0; i < mux->num_parents && mux->try_get_rate; i++) {
-		if (mux->parents[i].src->rate == rate) {
+		struct clk *p = mux->parents[i].src;
+		if (p->rate == rate && clk_round_rate(p, rate) == rate) {
 			new_parent = mux->parents[i].src;
 			break;
 		}
 	}
 
-	if (new_parent == c->parent && rate == c->rate)
-		return 0;
-
-	for (i = 0; i < mux->num_parents && !new_parent; i++) {
+	for (i = 0; i < mux->num_parents && !(!i && new_parent); i++) {
 		if (clk_round_rate(mux->parents[i].src, rate) == rate) {
 			new_parent = mux->parents[i].src;
 			if (!mux->try_new_parent)
@@ -278,6 +279,8 @@ static long __div_round_rate(struct div_data *data, unsigned long rate,
 	numer = data->is_half_divider ? 2 : 1;
 
 	for (div = min_div; div <= max_div; div++) {
+		if (data->skip_odd_div && (div & 1))
+				continue;
 		req_prate = mult_frac(rate, div, numer);
 		prate = clk_round_rate(parent, req_prate);
 		if (IS_ERR_VALUE(prate))
@@ -725,7 +728,11 @@ static int safe_parent_init_once(struct clk *c)
 
 	if (IS_ERR(md->safe_parent))
 		return -EINVAL;
-	if (!md->safe_freq || md->safe_parent)
+
+	 /*
+	  * Update safe_div and safe_parent if there is a valid new safe_freq
+	  */
+	if (!md->safe_freq)
 		return 0;
 
 	rrate = __mux_div_round_rate(c, md->safe_freq, &best_parent,
@@ -745,11 +752,31 @@ static int mux_div_clk_set_rate(struct clk *c, unsigned long rate)
 {
 	struct mux_div_clk *md = to_mux_div_clk(c);
 	unsigned long flags, rrate;
-	unsigned long new_prate, old_prate;
+	unsigned long new_prate, new_parent_orig_rate,
+					old_safe_freq = 0;
+	unsigned long max_safe_freq = 0;
 	struct clk *old_parent, *new_parent;
 	u32 new_div, old_div;
-	int rc;
+	int rc, i;
 
+	if (md->safe_num) {
+		max_safe_freq = max(c->rate, rate);
+
+		for (i = (md->safe_num - 1); i >= 0; i--) {
+			if ((md->safe_freqs[i]) &&
+				(md->safe_freqs[i] < max_safe_freq))
+				break;
+		}
+		/* Move to the new safe frequency */
+		if (i >= 0) {
+			old_safe_freq = md->safe_freq;
+			md->safe_freq = md->safe_freqs[i];
+		}
+	}
+
+#if defined(CONFIG_HTC_DEBUG_FOOTPRINT)
+	set_acpuclk_footprint_by_clk(c, ACPU_BEFORE_SAFE_PARENT_INIT);
+#endif
 	rc = safe_parent_init_once(c);
 	if (rc)
 		return rc;
@@ -761,13 +788,22 @@ static int mux_div_clk_set_rate(struct clk *c, unsigned long rate)
 
 	old_parent = c->parent;
 	old_div = md->data.div;
-	old_prate = clk_get_rate(c->parent);
 
+#if defined(CONFIG_HTC_DEBUG_FOOTPRINT)
+	set_acpuclk_footprint_by_clk(c, ACPU_BEFORE_SET_SAFE_RATE);
+#endif
 	/* Refer to the description of safe_freq in clock-generic.h */
-	if (md->safe_freq)
+	if (md->safe_freq) {
+		/* enable the aux clock safe parent before setting div */
+		rc = clk_prepare_enable(md->safe_parent);
+		if (rc) {
+			pr_err("failed to prepare enable %s\n",
+					clk_name(md->safe_parent));
+			return rc;
+		}
 		rc = set_src_div(md, md->safe_parent, md->safe_div);
 
-	else if (new_parent == old_parent && new_div >= old_div) {
+	} else if (new_parent == old_parent && new_div >= old_div) {
 		/*
 		 * If both the parent_rate and divider changes, there may be an
 		 * intermediate frequency generated. Ensure this intermediate
@@ -777,7 +813,11 @@ static int mux_div_clk_set_rate(struct clk *c, unsigned long rate)
 	}
 	if (rc)
 		return rc;
+#if defined(CONFIG_HTC_DEBUG_FOOTPRINT)
+	set_acpuclk_footprint_by_clk(c, ACPU_BEFORE_SET_PARENT_RATE);
+#endif
 
+	new_parent_orig_rate = clk_get_rate(new_parent);
 	rc = clk_set_rate(new_parent, new_prate);
 	if (rc) {
 		pr_err("failed to set %s to %ld\n",
@@ -785,31 +825,71 @@ static int mux_div_clk_set_rate(struct clk *c, unsigned long rate)
 		goto err_set_rate;
 	}
 
+#if defined(CONFIG_HTC_DEBUG_FOOTPRINT)
+	set_acpuclk_footprint_by_clk(c, ACPU_BEFORE_CLK_PREPARE);
+#endif
 	rc = __clk_pre_reparent(c, new_parent, &flags);
 	if (rc)
 		goto err_pre_reparent;
 
+#if defined(CONFIG_HTC_DEBUG_FOOTPRINT)
+	set_acpuclk_footprint_by_clk(c, ACPU_BEFORE_SET_RATE);
+#endif
 	/* Set divider and mux src atomically */
 	rc = __set_src_div(md, new_parent, new_div);
 	if (rc)
 		goto err_set_src_div;
 
+#if defined(CONFIG_HTC_DEBUG_FOOTPRINT)
+	set_acpuclk_cpu_freq_footprint_by_clk(FT_CUR_RATE, c, rrate);
+	set_acpuclk_l2_freq_footprint_by_clk(FT_CUR_RATE, c, rrate);
+	set_acpuclk_footprint_by_clk(c, ACPU_BEFORE_CLK_UNPREPARE);
+#endif
 	c->parent = new_parent;
 
 	__clk_post_reparent(c, old_parent, &flags);
+
+	if (md->safe_freq)
+		/* disable aux clock safe parent */
+		clk_disable_unprepare(md->safe_parent);
+
+	/* Valid old_safe_freq, move back to the safe_freq value */
+	if (old_safe_freq)
+		md->safe_freq = old_safe_freq;
+
+#if defined(CONFIG_HTC_DEBUG_FOOTPRINT)
+	set_acpuclk_footprint_by_clk(c, ACPU_BEFORE_RETURN);
+#endif
+
 	return 0;
 
 err_set_src_div:
+#if defined(CONFIG_HTC_DEBUG_FOOTPRINT)
+	set_acpuclk_footprint_by_clk(c, ACPU_BEFORE_ERR_CLK_UNPREPARE);
+#endif
 	/* Not switching to new_parent, so disable it */
 	__clk_post_reparent(c, new_parent, &flags);
 err_pre_reparent:
-	rc = clk_set_rate(old_parent, old_prate);
-	WARN(rc, "%s: error changing parent (%s) rate to %ld\n",
-		clk_name(c), clk_name(old_parent), old_prate);
+#if defined(CONFIG_HTC_DEBUG_FOOTPRINT)
+	set_acpuclk_footprint_by_clk(c, ACPU_BEFORE_ERR_SET_PARENT_RATE);
+#endif
+	rc = clk_set_rate(new_parent, new_parent_orig_rate);
+	WARN(rc, "%s: error changing new_parent (%s) rate back to %ld\n",
+		clk_name(c), clk_name(new_parent), new_parent_orig_rate);
 err_set_rate:
+#if defined(CONFIG_HTC_DEBUG_FOOTPRINT)
+	set_acpuclk_footprint_by_clk(c, ACPU_BEFORE_ERR_SET_RATE);
+#endif
 	rc = set_src_div(md, old_parent, old_div);
+#if defined(CONFIG_HTC_DEBUG_FOOTPRINT)
+	set_acpuclk_footprint_by_clk(c, ACPU_BEFORE_ERR_RETURN);
+#endif
 	WARN(rc, "%s: error changing back to original div (%d) and parent (%s)\n",
 		clk_name(c), old_div, clk_name(old_parent));
+	if (!rc && md->safe_freq)
+		clk_disable_unprepare(md->safe_parent);
+	if (old_safe_freq)
+		md->safe_freq = old_safe_freq;
 
 	return rc;
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -61,10 +61,25 @@ struct pll_config_masks {
 struct pll_config_vals {
 	u32 post_div_masked;
 	u32 pre_div_masked;
+	u32 vco_mode_masked;
 	u32 config_ctl_val;
 	u32 test_ctl_lo_val;
+	u32 test_ctl_hi_val;
 	u32 alpha_val;
 	bool enable_mn;
+};
+
+struct pll_vco_data {
+	unsigned long min_freq;
+	unsigned long max_freq;
+	u32 vco_val;
+	u32 config_ctl_val;
+};
+
+struct pll_spm_ctrl {
+	u32 offset;
+	u32 event_bit;
+	void __iomem *spm_base;
 };
 
 #define PLL_FREQ_END	(UINT_MAX-1)
@@ -115,9 +130,14 @@ static inline struct pll_vote_clk *to_pll_vote_clk(struct clk *c)
  *   post divider and vco configuration. register name can be configure register
  *   or user_ctl register depending on targets
  * @status_reg: status register, contains the lock detection bit
+ * @init_test_ctl: initialize the test control register
+ * @pgm_test_ctl_enable: program the test_ctl register in the enable sequence
  * @masks: masks used for settings in config_reg
  * @vals: configuration values to be written to PLL registers
  * @freq_tbl: pll freq table
+ * @no_prepared_reconfig: Fail round_rate if pll is prepared
+ * @pll_vco_data: If any VCO setting is required at runtime when frequencies
+ *		 are modified.
  * @c: clk
  * @base: pointer to base address of ioremapped registers.
  */
@@ -130,7 +150,12 @@ struct pll_clk {
 	void __iomem *const config_reg;
 	void __iomem *const config_ctl_reg;
 	void __iomem *const status_reg;
+	void __iomem *const alt_status_reg;
 	void __iomem *const test_ctl_lo_reg;
+	void __iomem *const test_ctl_hi_reg;
+
+	bool init_test_ctl;
+	bool pgm_test_ctl_enable;
 
 	struct pll_config_masks masks;
 	struct pll_config_vals vals;
@@ -141,7 +166,11 @@ struct pll_clk {
 	unsigned long max_rate;
 
 	bool inited;
+	bool no_prepared_reconfig;
 
+	struct pll_vco_data data;
+
+	struct pll_spm_ctrl spm_ctrl;
 	struct clk c;
 	void *const __iomem *base;
 };
@@ -149,6 +178,8 @@ struct pll_clk {
 extern struct clk_ops clk_ops_local_pll;
 extern struct clk_ops clk_ops_sr2_pll;
 extern struct clk_ops clk_ops_variable_rate_pll;
+extern struct clk_ops clk_ops_hf_pll;
+extern struct clk_ops clk_ops_sr_pll;
 
 static inline struct pll_clk *to_pll_clk(struct clk *c)
 {

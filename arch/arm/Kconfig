@@ -47,7 +47,6 @@ config ARM
 	select HAVE_KPROBES if !XIP_KERNEL
 	select HAVE_KRETPROBES if (HAVE_KPROBES)
 	select HAVE_MEMBLOCK
-	select HAVE_MEMBLOCK_NODE_MAP
 	select HAVE_OPROFILE if (HAVE_PERF_EVENTS)
 	select HAVE_PERF_EVENTS
 	select HAVE_REGS_AND_STACK_ACCESS_API
@@ -654,6 +653,7 @@ config ARCH_MSM
 	select GENERIC_ALLOCATOR
 	select HAVE_CLK
 	select HAVE_CLK_PREPARE
+	select ARCH_HAS_OPP
 	select NEED_MACH_MEMORY_H
 	select NEED_MACH_IO_H
 	select NEED_MACH_GPIO_H
@@ -1401,7 +1401,6 @@ config PERFMAP
 endmenu
 
 source "arch/arm/common/Kconfig"
-source "arch/arm/hotplug/Kconfig"
 
 menu "Bus support"
 
@@ -1637,7 +1636,14 @@ config ARCH_NR_GPIO
 	  If unsure, leave the default value.
 
 source kernel/Kconfig.preempt
-source kernel/Kconfig.hz
+
+config HZ
+	int
+	default 200 if ARCH_EBSA110 || ARCH_S3C24XX || ARCH_S5P64X0 || \
+		ARCH_S5PV210 || ARCH_EXYNOS4
+	default AT91_TIMER_HZ if ARCH_AT91
+	default SHMOBILE_TIMER_HZ if ARCH_SHMOBILE
+	default 100
 
 config SCHED_HRTICK
 	def_bool HIGH_RES_TIMERS

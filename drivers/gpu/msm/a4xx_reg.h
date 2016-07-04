@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -434,12 +434,16 @@ enum a4xx_rb_perfctr_rb_sel {
 #define A4XX_RBBM_CFG_DEBBUS_MISR0		0x1ae
 #define A4XX_RBBM_CFG_DEBBUS_MISR1		0x1af
 #define A4XX_RBBM_POWER_STATUS			0x1b0
+#define A4XX_RBBM_PPD_V2_SP_PWR_WEIGHTS		0x1b2
+#define A4XX_RBBM_PPD_V2_SP_RB_EPOCH_TH		0x1b3
+#define A4XX_RBBM_PPD_V2_TP_CONFIG		0x1b4
+#define A4XX_RBBM_PPD_RAMP_V2_CONTROL		0x1b5
 #define A4XX_RBBM_WAIT_IDLE_CLOCKS_CTL2		0x1b8
 #define A4XX_RBBM_PPD_CTRL			0x1b9
 #define A4XX_RBBM_PPD_EPOCH_INTRA_TH_1		0x1ba
 #define A4XX_RBBM_PPD_EPOCH_INTRA_TH_2		0x1bb
-#define A4XX_RBBM_PPD_EPOCH_INTER_TH_HI_CLR_TH  0x1bc
-#define A4XX_RBBM_PPD_EPOCH_INTER_TH_LO         0x1bd
+#define A4XX_RBBM_PPD_EPOCH_INTER_TH_HIGH_CLEAR_THR  0x1bc
+#define A4XX_RBBM_PPD_EPOCH_INTER_TH_LOW	0x1bd
 /* SECVID registers */
 #define A4XX_RBBM_SECVID_TRUST_CONFIG		0xf000
 #define A4XX_RBBM_SECVID_TRUST_CONTROL		0xf400
@@ -469,8 +473,20 @@ enum a4xx_rb_perfctr_rb_sel {
 #define A4XX_CP_ME_RAM_WADDR		0x225
 #define A4XX_CP_ME_RAM_RADDR		0x226
 #define A4XX_CP_ME_RAM_DATA		0x227
+#define A4XX_CP_SCRATCH_UMASK		0x228
+#define A4XX_CP_SCRATCH_ADDR		0x229
 
+#define A4XX_CP_PREEMPT			0x22a
+/* PREEMPT register bit shifts */
+#define A4XX_CP_PREEMPT_STOP_SHIFT	0
+#define A4XX_CP_PREEMPT_RESUME_SHIFT	1
+
+#define A4XX_CP_PREEMPT_DISABLE		0x22b
+#define A4XX_CP_CNTL			0x22c
+#define A4XX_CP_ME_CNTL			0x22d
 #define A4XX_CP_DEBUG			0x22e
+#define A4XX_CP_STATE_DEBUG_INDEX	0x22f
+#define A4XX_CP_STATE_DEBUG_DATA	0x230
 #define A4XX_CP_POWER_COLLAPSE_CNTL	0x234
 /*
  * CP debug settings for A4xx cores
@@ -479,32 +495,14 @@ enum a4xx_rb_perfctr_rb_sel {
 #define A4XX_CP_DEBUG_DEFAULT (1 << 25)
 
 #define A4XX_CP_PROTECT_REG_0		0x240
-#define A4XX_CP_PROTECT_REG_1		0x241
-#define A4XX_CP_PROTECT_REG_3		0x242
-#define A4XX_CP_PROTECT_REG_4		0x243
-#define A4XX_CP_PROTECT_REG_5		0x244
-#define A4XX_CP_PROTECT_REG_6		0x245
-#define A4XX_CP_PROTECT_REG_7		0x246
-#define A4XX_CP_PROTECT_REG_8		0x248
-#define A4XX_CP_PROTECT_REG_9		0x249
-#define A4XX_CP_PROTECT_REG_A		0x24a
-#define A4XX_CP_PROTECT_REG_B		0x24b
-#define A4XX_CP_PROTECT_REG_C		0x24c
-#define A4XX_CP_PROTECT_REG_D		0x24d
-#define A4XX_CP_PROTECT_REG_E		0x24e
-#define A4XX_CP_PROTECT_REG_F		0x24f
+#define A4XX_CP_PROTECT_CTRL		0x250
+#define A4XX_CP_PROTECT_REG_10          0x251
 
-#define A4XX_CP_PROTECT_CTRL		0x250
-#define A4XX_CP_SCRATCH_UMASK		0x228
-#define A4XX_CP_SCRATCH_ADDR		0x229
+#define A4XX_CP_ME_STATUS		0x4d1
 #define A4XX_CP_CNTL			0x22c
-#define A4XX_CP_ME_CNTL			0x22d
-#define A4XX_CP_STATE_DEBUG_INDEX	0x22F
-#define A4XX_CP_STATE_DEBUG_DATA	0x230
-#define A4XX_CP_PROTECT_CTRL		0x250
-#define A4XX_CP_ME_STATUS		0x4D1
 #define A4XX_CP_WFI_PEND_CTR		0x4d2
-#define A4XX_CP_HW_FAULT		0x4D8
+#define A4XX_CP_PREEMPT_DEBUG		0x4d6
+#define A4XX_CP_HW_FAULT		0x4d8
 #define A4XX_CP_PROTECT_STATUS		0x4da
 #define A4XX_CP_PERFCTR_CP_SEL_0	0x500
 #define A4XX_CP_PERFCTR_CP_SEL_1	0x501
@@ -518,6 +516,18 @@ enum a4xx_rb_perfctr_rb_sel {
 #define A4XX_CP_SCRATCH_REG0		0x578
 #define A4XX_CP_SCRATCH_REG6		0x57e
 #define A4XX_CP_SCRATCH_REG7		0x57f
+#define A4XX_CP_SCRATCH_REG8		0x580
+#define A4XX_CP_SCRATCH_REG9		0x581
+#define A4XX_CP_SCRATCH_REG10		0x582
+#define A4XX_CP_SCRATCH_REG11		0x583
+#define A4XX_CP_SCRATCH_REG12		0x584
+#define A4XX_CP_SCRATCH_REG13		0x585
+#define A4XX_CP_SCRATCH_REG14		0x586
+#define A4XX_CP_SCRATCH_REG15		0x587
+#define A4XX_CP_SCRATCH_REG16		0x588
+#define A4XX_CP_SCRATCH_REG17		0x589
+#define A4XX_CP_SCRATCH_REG18		0x58a
+#define A4XX_CP_SCRATCH_REG23		0x58f
 
 /* SP registers */
 #define A4XX_SP_SP_CTRL			0x22C0
@@ -551,6 +561,14 @@ enum a4xx_rb_perfctr_rb_sel {
 #define A4XX_SP_FS_PVT_MEM_ADDR		0x22ed
 #define A4XX_SP_VS_OBJ_START		0x22e1
 #define A4XX_SP_FS_OBJ_START		0x22eb
+
+/* COUNTABLE FOR SP PERFCOUNTER */
+#define A4XX_SP_ALU_ACTIVE_CYCLES	0x1D
+#define A4XX_SP0_ICL1_MISSES		0x1A
+#define A4XX_SP_FS_CFLOW_INSTRUCTIONS	0x0C
+
+/* COUNTABLE FOR TSE PERFCOUNTER */
+#define A4XX_TSE_INPUT_PRIM_NUM		0x0
 
 enum a4xx_sp_perfctr_sp_sel {
 	SP_FS_STAGE_BARY_INSTRUCTIONS = 0x10,
@@ -661,6 +679,7 @@ enum a4xx_vfd_perfctr_vfd_sel {
 
 #define A4XX_VBIF_XIN_HALT_CTRL0	0x3080
 #define A4XX_VBIF_XIN_HALT_CTRL0_MASK	0x1F
+#define A405_VBIF_XIN_HALT_CTRL0_MASK	0x3
 
 #define A4XX_VBIF_XIN_HALT_CTRL1	0x3081
 
@@ -701,15 +720,6 @@ enum a4xx_vfd_perfctr_vfd_sel {
 #define A4XX_VBIF_PERF_CNT_HIGH2	0x30e2
 #define A4XX_VBIF_PERF_CNT_HIGH3	0x30e3
 
-#define A4XX_VBIF_PERF_CNT_SEL_MASK	0x7F
-
-/* offset of clear register from select register */
-#define A4XX_VBIF_PERF_CLR_REG_SEL_OFF	8
-/* offset of enable register from select register */
-#define A4XX_VBIF_PERF_EN_REG_SEL_OFF	16
-/* offset of high counter from low counter value */
-#define A4XX_VBIF_PERF_HIGH_REG_LOW_OFF	8
-
 #define A4XX_VBIF_PERF_PWR_CNT_EN0	0x3100
 #define A4XX_VBIF_PERF_PWR_CNT_EN1	0x3101
 #define A4XX_VBIF_PERF_PWR_CNT_EN2	0x3102
@@ -726,11 +736,6 @@ enum a4xx_vfd_perfctr_vfd_sel {
 #define A4XX_VBIF_PERF_PWR_CNT_HIGH1	0x3119
 #define A4XX_VBIF_PERF_PWR_CNT_HIGH2	0x311a
 #define A4XX_VBIF_PERF_PWR_CNT_HIGH3	0x311b
-
-/* offset of clear register from the enable register */
-#define A4XX_VBIF_PERF_PWR_CLR_REG_EN_OFF	8
-/* offset of high counter from low counter value */
-#define A4XX_VBIF_PERF_PWR_HIGH_REG_LOW_OFF	8
 
 /* Bit flags for RBBM_CTL */
 #define A4XX_RBBM_RBBM_CTL_RESET_PWR_CTR0	0x00000001

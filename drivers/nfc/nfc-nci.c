@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -61,7 +61,7 @@ MODULE_DEVICE_TABLE(of, msm_match_table);
 #define MAX_QCA_REG				(116)
 /* will timeout in approx. 100ms as 10us steps */
 #define NFC_RF_CLK_FREQ			(19200000)
-#define NTF_TIMEOUT				(25)
+#define NTF_TIMEOUT				(100)
 #define	CORE_RESET_RSP_GID		(0x60)
 #define	CORE_RESET_OID			(0x00)
 #define CORE_RST_NTF_LENGTH		(0x02)
@@ -179,9 +179,9 @@ static irqreturn_t qca199x_dev_irq_handler(int irq, void *dev_id)
 			"%s: NFC:Processor in suspend state device_may_wakeup\n",
 			__func__);
 		/*
-		* Keep system awake long enough to allow userspace
-		* to process the packet.
-		*/
+		 * Keep system awake long enough to allow userspace
+		 * to process the packet.
+		 */
 		pm_wakeup_event(&qca199x_dev->client->dev, WAKEUP_SRC_TIMEOUT);
 	} else {
 		dev_dbg(&qca199x_dev->client->dev,
@@ -299,6 +299,7 @@ static ssize_t nfc_read(struct file *filp, char __user *buf,
 		if ((ftm_raw_write_mode == 0) && (ftm_werr_code == 0)) {
 			ftm_rerr_code = i2c_master_recv(qca199x_dev->client,
 						&rd_byte, sizeof(rd_byte));
+
 			if (ftm_rerr_code != sizeof(rd_byte)) {
 				total = -EMSGSIZE;
 				goto err;
@@ -413,6 +414,7 @@ int nfcc_read_buff_svc(struct qca199x_dev *qca199x_dev)
 		total = ret;
 		if (ret != (length + PAYLOAD_HEADER_LENGTH))
 			goto leave;
+
 	}
 	dev_dbg(&qca199x_dev->client->dev, "%s : NfcNciRx %x %x %x\n",
 			__func__, tmp[0], tmp[1], tmp[2]);
@@ -601,7 +603,6 @@ int nfcc_wake(int level, struct file *filp)
 			 * takes about 0.5 ms
 			 */
 			if ((wake_status & NCI_WAKE) != 0)
-				/* NFCC wakeup time is between 0.5 and .52 ms */
 				usleep_range(500, 550);
 
 		} while ((wake_status & NCI_WAKE)
@@ -1134,6 +1135,13 @@ static int nfcc_initialise(struct i2c_client *client, unsigned short curr_addr,
 	unsigned char raw_slave1_rd		= {0x0};
 	unsigned char raw_1P8_PAD_CFG_CLK_REQ[]	= {0xA5, 0x1};
 	unsigned char raw_1P8_PAD_CFG_PWR_REQ[]	= {0xA7, 0x1};
+
+	unsigned char raw_1P8_PAD_CFG_DCLB_WI1_0X45[]	= {0x45, 0x83};
+	unsigned char raw_1P8_PAD_CFG_SPI_CLK_0X47[]	= {0x47, 0x83};
+	unsigned char raw_1P8_PAD_CFG_SPI_SI_0X48[]	= {0x48, 0x83};
+	unsigned char raw_1P8_PAD_CFG_SPI_SO_0X49[]	= {0x49, 0x83};
+	unsigned char raw_1P8_PAD_CFG_SPI_CNS_0X4A[]	= {0x4A, 0x83};
+
 	unsigned char buf = 0;
 	bool core_reset_completed = false;
 	unsigned char rsp[6];
@@ -1215,7 +1223,7 @@ static int nfcc_initialise(struct i2c_client *client, unsigned short curr_addr,
 	/* Enable the PMIC clock */
 	RAW(1P8_PAD_CFG_CLK_REQ, (0x1));
 	r = nfc_i2c_write(client, &raw_1P8_PAD_CFG_CLK_REQ[0],
-				  sizeof(raw_1P8_PAD_CFG_CLK_REQ));
+				sizeof(raw_1P8_PAD_CFG_CLK_REQ));
 	if (r < 0)
 		goto err_init;
 
@@ -1223,11 +1231,52 @@ static int nfcc_initialise(struct i2c_client *client, unsigned short curr_addr,
 
 	RAW(1P8_PAD_CFG_PWR_REQ, (0x1));
 	r = nfc_i2c_write(client, &raw_1P8_PAD_CFG_PWR_REQ[0],
-				  sizeof(raw_1P8_PAD_CFG_PWR_REQ));
+				sizeof(raw_1P8_PAD_CFG_PWR_REQ));
 	if (r < 0)
 		goto err_init;
 
 	usleep_range(1000, 1100); /* 1 ms wait */
+
+
+	RAW(1P8_PAD_CFG_DCLB_WI1_0X45, (0x83));
+	r = nfc_i2c_write(client, &raw_1P8_PAD_CFG_DCLB_WI1_0X45[0],
+				  sizeof(raw_1P8_PAD_CFG_DCLB_WI1_0X45));
+	if (r < 0)
+		goto err_init;
+
+	usleep(1000);
+
+	RAW(1P8_PAD_CFG_SPI_CLK_0X47, (0x83));
+	r = nfc_i2c_write(client, &raw_1P8_PAD_CFG_SPI_CLK_0X47[0],
+				  sizeof(raw_1P8_PAD_CFG_SPI_CLK_0X47));
+	if (r < 0)
+		goto err_init;
+
+	usleep(1000);
+
+	RAW(1P8_PAD_CFG_SPI_SI_0X48, (0x83));
+	r = nfc_i2c_write(client, &raw_1P8_PAD_CFG_SPI_SI_0X48[0],
+				  sizeof(raw_1P8_PAD_CFG_SPI_SI_0X48));
+	if (r < 0)
+		goto err_init;
+
+	usleep(1000);
+
+	RAW(1P8_PAD_CFG_SPI_SO_0X49, (0x83));
+	r = nfc_i2c_write(client, &raw_1P8_PAD_CFG_SPI_SO_0X49[0],
+				  sizeof(raw_1P8_PAD_CFG_SPI_SO_0X49));
+	if (r < 0)
+		goto err_init;
+
+	usleep(1000);
+
+	RAW(1P8_PAD_CFG_SPI_CNS_0X4A, (0x83));
+	r = nfc_i2c_write(client, &raw_1P8_PAD_CFG_SPI_CNS_0X4A[0],
+				  sizeof(raw_1P8_PAD_CFG_SPI_CNS_0X4A));
+	if (r < 0)
+		goto err_init;
+
+	usleep(1000);
 
 	RAW(slave2, 0x10);
 	r = nfc_i2c_write(client, &raw_slave2[0], sizeof(raw_slave2));
@@ -1278,7 +1327,7 @@ static int nfcc_initialise(struct i2c_client *client, unsigned short curr_addr,
 		qca199x_dev->core_reset_ntf = TIMEDOUT_INITIAL_CORE_RESET_NTF;
 		goto err_init;
 	}
-		qca199x_dev->core_reset_ntf = ARRIVED_INITIAL_CORE_RESET_NTF;
+	qca199x_dev->core_reset_ntf = ARRIVED_INITIAL_CORE_RESET_NTF;
 
 	r = 0;
 	return r;
@@ -1532,7 +1581,9 @@ static int qca199x_probe(struct i2c_client *client,
 	/* Register reboot notifier here */
 	r = register_reboot_notifier(&nfcc_notifier);
 	if (r) {
-		pr_err("cannot register reboot notifier (err=%d)\n", r);
+		dev_err(&client->dev,
+			"%s: cannot register reboot notifier(err = %d)\n",
+			__func__, r);
 		goto err_dis_gpio;
 	}
 
@@ -1736,8 +1787,6 @@ static int qca199x_probe(struct i2c_client *client,
 		}
 		qca199x_dev->irq_enabled_clk_req = true;
 		qca199x_disable_irq_clk_req(qca199x_dev);
-
-
 	}
 	device_init_wakeup(&client->dev, true);
 	device_set_wakeup_capable(&client->dev, true);
@@ -1768,7 +1817,7 @@ err_irq_clk:
 		r = gpio_direction_input(platform_data->irq_gpio_clk_req);
 		if (r)
 			dev_err(&client->dev,
-				 "%s: Unable to set direction\n", __func__);
+				"%s: Unable to set direction\n", __func__);
 		gpio_free(platform_data->irq_gpio_clk_req);
 	}
 err_irq:

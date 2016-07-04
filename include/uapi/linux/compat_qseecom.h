@@ -92,6 +92,7 @@ struct compat_qseecom_load_img_req {
 	compat_ulong_t img_len; /* in */
 	compat_long_t  ifd_data_fd; /* in */
 	char	 img_name[MAX_APP_NAME_SIZE]; /* in */
+	compat_ulong_t app_arch; /* in */
 	compat_int_t app_id; /* out*/
 };
 
@@ -117,6 +118,7 @@ struct compat_qseecom_qseos_version_req {
 struct compat_qseecom_qseos_app_load_query {
 	char app_name[MAX_APP_NAME_SIZE]; /* in */
 	compat_int_t app_id; /* out */
+	compat_ulong_t app_arch;
 };
 
 struct compat_qseecom_send_svc_cmd_req {
@@ -159,6 +161,22 @@ struct compat_qseecom_save_partition_hash_req {
  */
 struct compat_qseecom_is_es_activated_req {
 	compat_int_t is_activated; /* out */
+};
+
+/*
+ * struct compat_qseecom_mdtp_cipher_dip_req
+ * @in_buf - input buffer
+ * @in_buf_size - input buffer size
+ * @out_buf - output buffer
+ * @out_buf_size - output buffer size
+ * @direction - 0=encrypt, 1=decrypt
+ */
+struct compat_qseecom_mdtp_cipher_dip_req {
+	compat_uptr_t in_buf;
+	compat_uint_t in_buf_size;
+	compat_uptr_t out_buf;
+	compat_uint_t out_buf_size;
+	compat_uint_t direction;
 };
 
 /*
@@ -266,13 +284,26 @@ extern long compat_qseecom_ioctl(struct file *file,
 			struct compat_qseecom_update_key_userinfo_req)
 
 #define COMPAT_QSEECOM_QTEEC_IOCTL_OPEN_SESSION_REQ \
-	_IOWR(QSEECOM_IOC_MAGIC, 30, struct compat_qseecom_qteec_req)
+	_IOWR(QSEECOM_IOC_MAGIC, 30, struct compat_qseecom_qteec_modfd_req)
 
 #define COMPAT_QSEECOM_QTEEC_IOCTL_CLOSE_SESSION_REQ \
 	_IOWR(QSEECOM_IOC_MAGIC, 31, struct compat_qseecom_qteec_req)
 
 #define COMPAT_QSEECOM_QTEEC_IOCTL_INVOKE_MODFD_CMD_REQ \
-	_IOWR(QSEECOM_IOC_MAGIC, 32, struct compat_qseecom_qteec_req)
+	_IOWR(QSEECOM_IOC_MAGIC, 32, struct compat_qseecom_qteec_modfd_req)
+
+#define COMPAT_QSEECOM_QTEEC_IOCTL_REQUEST_CANCELLATION_REQ \
+	_IOWR(QSEECOM_IOC_MAGIC, 33, struct compat_qseecom_qteec_modfd_req)
+
+#define COMPAT_QSEECOM_IOCTL_MDTP_CIPHER_DIP_REQ \
+	_IOWR(QSEECOM_IOC_MAGIC, 34, struct qseecom_mdtp_cipher_dip_req)
+
+#define COMPAT_QSEECOM_IOCTL_SEND_MODFD_CMD_64_REQ \
+	_IOWR(QSEECOM_IOC_MAGIC, 35, struct compat_qseecom_send_modfd_cmd_req)
+
+#define COMPAT_QSEECOM_IOCTL_SEND_MODFD_RESP_64 \
+	_IOWR(QSEECOM_IOC_MAGIC, 36, \
+				struct compat_qseecom_send_modfd_listener_resp)
 
 #endif
 #endif /* _UAPI_COMPAT_QSEECOM_H_ */

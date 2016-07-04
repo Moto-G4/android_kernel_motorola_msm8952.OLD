@@ -25,6 +25,7 @@ enum transport_type {
 	USB_GADGET_XPORT_HSIC,
 	USB_GADGET_XPORT_HSUART,
 	USB_GADGET_XPORT_ETHER,
+	USB_GADGET_XPORT_BAM_DMUX,
 	USB_GADGET_XPORT_NONE,
 };
 
@@ -51,6 +52,8 @@ static char *xport_to_str(enum transport_type t)
 		return "HSUART";
 	case USB_GADGET_XPORT_ETHER:
 		return "ETHER";
+	case USB_GADGET_XPORT_BAM_DMUX:
+		return "BAM_DMUX";
 	case USB_GADGET_XPORT_NONE:
 		return "NONE";
 	default:
@@ -81,6 +84,8 @@ static enum transport_type str_to_xport(const char *name)
 		return USB_GADGET_XPORT_HSUART;
 	if (!strncasecmp("ETHER", name, XPORT_STR_LEN))
 		return USB_GADGET_XPORT_ETHER;
+	if (!strncasecmp("BAM_DMUX", name, XPORT_STR_LEN))
+		return USB_GADGET_XPORT_BAM_DMUX;
 	if (!strncasecmp("", name, XPORT_STR_LEN))
 		return USB_GADGET_XPORT_NONE;
 
@@ -129,4 +134,34 @@ int gqti_ctrl_connect(void *gr, u8 port_num, unsigned intf,
 void gqti_ctrl_disconnect(void *gr, u8 port_num);
 void gqti_ctrl_update_ipa_pipes(void *, u8 port_num, u32 ipa_prod,
 					u32 ipa_cons);
+
+enum fserial_func_type {
+	USB_FSER_FUNC_NONE,
+	USB_FSER_FUNC_SERIAL,
+	USB_FSER_FUNC_MODEM,
+	USB_FSER_FUNC_MODEM_MDM,
+	USB_FSER_FUNC_ACM,
+	USB_FSER_FUNC_AUTOBOT,
+};
+
+static __maybe_unused enum fserial_func_type serial_str_to_func_type(const char *name)
+{
+	if (!name)
+		return USB_FSER_FUNC_NONE;
+
+	if (!strncasecmp("modem", name, XPORT_STR_LEN))
+		return USB_FSER_FUNC_MODEM;
+	if (!strncasecmp("serial", name, XPORT_STR_LEN))
+		return USB_FSER_FUNC_SERIAL;
+	if (!strncasecmp("autobot", name, XPORT_STR_LEN))
+		return USB_FSER_FUNC_AUTOBOT;
+	if (!strncasecmp("modem_mdm", name, XPORT_STR_LEN))
+		return USB_FSER_FUNC_MODEM_MDM;
+	if (!strncasecmp("acm", name, XPORT_STR_LEN))
+		return USB_FSER_FUNC_ACM;
+	if (!strncasecmp("", name, XPORT_STR_LEN))
+		return USB_FSER_FUNC_NONE;
+
+	return USB_FSER_FUNC_NONE;
+}
 #endif

@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -23,9 +23,11 @@
 #include <media/v4l2-subdev.h>
 #include "msm_camera_io_util.h"
 #include "msm_jpeg_hw.h"
+#include "cam_smmu_api.h"
 
 #define JPEG_8974_V1 0x10000000
 #define JPEG_8974_V2 0x10010000
+#define JPEG_8994 0x10020000
 #define JPEG_CLK_MAX 16
 
 enum msm_jpeg_state {
@@ -71,6 +73,10 @@ struct msm_jpeg_device {
 	char	  open_count;
 	uint8_t       op_mode;
 
+	/* Flag to store the jpeg bus vote state
+	 */
+	int jpeg_bus_vote;
+
 	/* event queue including frame done & err indications
 	 */
 	struct msm_jpeg_q evt_q;
@@ -98,11 +104,8 @@ struct msm_jpeg_device {
 	dev_t msm_jpeg_devno;
 
 	/*iommu domain and context*/
-	int domain_num;
 	int idx;
-	struct iommu_domain *domain;
-	struct device *iommu_ctx_arr[3];
-	int iommu_cnt;
+	int iommu_hdl;
 	int decode_flag;
 	struct ion_client *jpeg_client;
 	void *jpeg_vbif;

@@ -34,14 +34,21 @@
 #include <linux/idr.h>
 #include <linux/thermal.h>
 #include <linux/reboot.h>
+#include <linux/kthread.h>
 #include <net/netlink.h>
 #include <net/genetlink.h>
 
 #include "thermal_core.h"
 
+#define THERMAL_UEVENT_DATA "type"
+
 MODULE_AUTHOR("Zhang Rui");
 MODULE_DESCRIPTION("Generic thermal management sysfs support");
 MODULE_LICENSE("GPL v2");
+
+static char *truly_shutdown[2] = { "CPU_TEMP=SHUTDOWN_TEMP", NULL };
+static char *shutdown_waring[2]    = { "CPU_TEMP=CLOSE_TO_SHUTDOWN_TEMP", NULL };
+static char *clr_shutdown_warning[2]   = { "CPU_TEMP=CLOSE_TO_SHUTDOWN_TEMP_CLR", NULL };
 
 static DEFINE_IDR(thermal_tz_idr);
 static DEFINE_IDR(thermal_cdev_idr);
@@ -225,8 +232,7 @@ static int __update_sensor_thresholds(struct sensor_info *sensor)
 			sensor->sensor_id, max_of_low_thresh,
 			min_of_high_thresh);
 
-	if ((min_of_high_thresh != sensor->threshold_max) &&
-		(min_of_high_thresh != LONG_MAX)) {
+	if (min_of_high_thresh != LONG_MAX) {
 		ret = sensor->tz->ops->set_trip_temp(sensor->tz,
 			sensor->max_idx, min_of_high_thresh);
 		if (ret) {
@@ -247,8 +253,7 @@ static int __update_sensor_thresholds(struct sensor_info *sensor)
 		goto update_done;
 	}
 
-	if ((max_of_low_thresh != sensor->threshold_min) &&
-		(max_of_low_thresh != LONG_MIN)) {
+	if (max_of_low_thresh != LONG_MIN) {
 		ret = sensor->tz->ops->set_trip_temp(sensor->tz,
 			sensor->min_idx, max_of_low_thresh);
 		if (ret) {
@@ -290,6 +295,22 @@ static void sensor_update_work(struct work_struct *work)
 	mutex_unlock(&sensor->lock);
 }
 
+static __ref int sensor_sysfs_notify(void *data)
+{
+	int ret = 0;
+	struct sensor_info *sensor = (struct sensor_info *)data;
+
+	while (!kthread_should_stop()) {
+		while (wait_for_completion_interruptible(
+		   &sensor->sysfs_notify_complete) != 0)
+			;
+		INIT_COMPLETION(sensor->sysfs_notify_complete);
+		sysfs_notify(&sensor->tz->device.kobj, NULL,
+					THERMAL_UEVENT_DATA);
+	}
+	return ret;
+}
+
 /* May be called in an interrupt context.
  * Do NOT call sensor_set_trip from this function
  */
@@ -315,6 +336,9 @@ int thermal_sensor_trip(struct thermal_zone_device *tz,
 			((trip == THERMAL_TRIP_CONFIGURABLE_HI) &&
 				(pos->temp >= tz->sensor.threshold_max) &&
 				(pos->temp <= temp))) {
+			if ((pos == &tz->tz_threshold[0])
+				|| (pos == &tz->tz_threshold[1]))
+				complete(&tz->sensor.sysfs_notify_complete);
 			pos->active = 0;
 			pos->notify(trip, temp, pos->data);
 		}
@@ -486,6 +510,14 @@ int sensor_init(struct thermal_zone_device *tz)
 	tz->tz_threshold[1].trip = THERMAL_TRIP_CONFIGURABLE_LOW;
 	list_add(&sensor->sensor_list, &sensor_info_list);
 	INIT_WORK(&sensor->work, sensor_update_work);
+	init_completion(&sensor->sysfs_notify_complete);
+	sensor->sysfs_notify_thread = kthread_run(sensor_sysfs_notify,
+						  &tz->sensor,
+						  "therm_core:notify%d",
+						  tz->id);
+	if (IS_ERR(sensor->sysfs_notify_thread))
+		pr_err("Failed to create notify thread %d", tz->id);
+
 
 	return 0;
 }
@@ -715,9 +747,11 @@ static void handle_critical_trips(struct thermal_zone_device *tz,
 	if (trip_type == THERMAL_TRIP_CRITICAL ||
 	    trip_type == THERMAL_TRIP_CRITICAL_LOW) {
 		dev_emerg(&tz->device,
-			  "critical temperature reached(%d C),shutting down\n",
+			  "critical temperature reached(%d C)\n",
 			  tz->temperature / 1000);
-		orderly_poweroff(true);
+	
+	
+		return;
 	}
 }
 
@@ -854,6 +888,28 @@ temp_show(struct device *dev, struct device_attribute *attr, char *buf)
 		return ret;
 
 	return sprintf(buf, "%ld\n", temperature);
+}
+
+static ssize_t
+temp_notify_store(struct device *dev, struct device_attribute *attr,
+          const char *buf, size_t count)
+{
+       struct thermal_zone_device *tz = to_thermal_zone(dev);
+       unsigned int status=0;
+       unsigned long  value=0;
+       if (strict_strtoul(buf, 10, &value))
+              return -EINVAL;
+
+       if (value == 1) 
+              status = kobject_uevent_env(&tz->device.kobj, KOBJ_CHANGE, clr_shutdown_warning);
+       if (value == 2)
+              status = kobject_uevent_env(&tz->device.kobj, KOBJ_CHANGE, shutdown_waring);
+       if (value == 3)
+              status = kobject_uevent_env(&tz->device.kobj, KOBJ_CHANGE, truly_shutdown);
+
+       pr_info("cpu temp uevent :temp=%s,sucess=%d\n",buf,status);
+
+       return count;
 }
 
 static ssize_t
@@ -1188,6 +1244,7 @@ static DEVICE_ATTR(temp, 0444, temp_show, NULL);
 static DEVICE_ATTR(mode, 0644, mode_show, mode_store);
 static DEVICE_ATTR(passive, S_IRUGO | S_IWUSR, passive_show, passive_store);
 static DEVICE_ATTR(policy, S_IRUGO | S_IWUSR, policy_show, policy_store);
+static DEVICE_ATTR(temp_notify, S_IWUSR, NULL, temp_notify_store);
 
 /* sys I/F for cooling device */
 #define to_cooling_device(_dev)	\
@@ -2113,6 +2170,10 @@ struct thermal_zone_device *thermal_zone_device_register(const char *type,
 			goto unregister;
 	}
 
+	result = device_create_file(&tz->device, &dev_attr_temp_notify);
+	if (result)
+		goto unregister;
+
 #ifdef CONFIG_THERMAL_EMULATION
 	result = device_create_file(&tz->device, &dev_attr_emul_temp);
 	if (result)
@@ -2219,6 +2280,7 @@ void thermal_zone_device_unregister(struct thermal_zone_device *tz)
 
 	thermal_remove_hwmon_sysfs(tz);
 	flush_work(&tz->sensor.work);
+	kthread_stop(tz->sensor.sysfs_notify_thread);
 	mutex_lock(&thermal_list_lock);
 	list_del(&tz->sensor.sensor_list);
 	mutex_unlock(&thermal_list_lock);

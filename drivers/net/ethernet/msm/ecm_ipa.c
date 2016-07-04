@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -661,6 +661,7 @@ static void ecm_ipa_packet_receive_notify(void *priv,
 	struct sk_buff *skb = (struct sk_buff *)data;
 	struct ecm_ipa_dev *ecm_ipa_ctx = priv;
 	int result;
+	unsigned int packet_len = skb->len;
 
 	if (!skb) {
 		ECM_IPA_ERROR("Bad SKB received from IPA driver\n");
@@ -687,11 +688,11 @@ static void ecm_ipa_packet_receive_notify(void *priv,
 		return;
 	}
 
-	result = netif_rx(skb);
+	result = netif_rx_ni(skb);
 	if (result)
-		ECM_IPA_ERROR("fail on netif_rx\n");
+		ECM_IPA_ERROR("fail on netif_rx_ni\n");
 	ecm_ipa_ctx->net->stats.rx_packets++;
-	ecm_ipa_ctx->net->stats.rx_bytes += skb->len;
+	ecm_ipa_ctx->net->stats.rx_bytes += packet_len;
 
 	return;
 }
@@ -839,7 +840,6 @@ void ecm_ipa_cleanup(void *priv)
 	ECM_IPA_STATE_DEBUG(ecm_ipa_ctx);
 
 	ecm_ipa_rules_destroy(ecm_ipa_ctx);
-	ecm_ipa_destory_rm_resource(ecm_ipa_ctx);
 	ecm_ipa_debugfs_destroy(ecm_ipa_ctx);
 
 	unregister_netdev(ecm_ipa_ctx->net);
@@ -1108,15 +1108,16 @@ static int ecm_ipa_create_rm_resource(struct ecm_ipa_dev *ecm_ipa_ctx)
 	}
 	ECM_IPA_DEBUG("rm_it client was created");
 
-	result = ipa_rm_add_dependency(IPA_RM_RESOURCE_STD_ECM_PROD,
-				       ecm_ipa_ctx->ipa_rm_resource_name_cons);
-	if (result)
+	result = ipa_rm_add_dependency_sync(IPA_RM_RESOURCE_STD_ECM_PROD,
+		ecm_ipa_ctx->ipa_rm_resource_name_cons);
+	if (result && result != -EINPROGRESS)
 		ECM_IPA_ERROR("unable to add ECM/USB dependency (%d)\n",
 				result);
 
-	result = ipa_rm_add_dependency(ecm_ipa_ctx->ipa_rm_resource_name_prod,
-				       IPA_RM_RESOURCE_APPS_CONS);
-	if (result)
+	result = ipa_rm_add_dependency_sync(
+			ecm_ipa_ctx->ipa_rm_resource_name_prod,
+			IPA_RM_RESOURCE_APPS_CONS);
+	if (result && result != -EINPROGRESS)
 		ECM_IPA_ERROR("unable to add USB/APPS dependency (%d)\n",
 				result);
 
@@ -1208,14 +1209,15 @@ static void ecm_ipa_tx_complete_notify(void *priv,
 		return;
 	}
 
-	ECM_IPA_DEBUG("Tx-complete, len=%d, skb->prot=%d, outstanding=%d\n",
-			skb->len, skb->protocol,
-			atomic_read(&ecm_ipa_ctx->outstanding_pkts));
-
 	if (!ecm_ipa_ctx) {
 		ECM_IPA_ERROR("ecm_ipa_ctx is NULL pointer\n");
 		return;
 	}
+
+	ECM_IPA_DEBUG("Tx-complete, len=%d, skb->prot=%d, outstanding=%d\n",
+			skb->len, skb->protocol,
+			atomic_read(&ecm_ipa_ctx->outstanding_pkts));
+
 	if (evt != IPA_WRITE_DONE) {
 		ECM_IPA_ERROR("unsupported event on Tx callback\n");
 		return;
@@ -1232,6 +1234,7 @@ static void ecm_ipa_tx_complete_notify(void *priv,
 
 	atomic_dec(&ecm_ipa_ctx->outstanding_pkts);
 	if (netif_queue_stopped(ecm_ipa_ctx->net) &&
+		netif_carrier_ok(ecm_ipa_ctx->net) &&
 		atomic_read(&ecm_ipa_ctx->outstanding_pkts) <
 					(ecm_ipa_ctx->outstanding_low)) {
 		ECM_IPA_DEBUG("outstanding low (%d) - waking up queue\n",

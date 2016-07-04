@@ -37,7 +37,7 @@ The optional properties are:
 
 - qcom,non-boot-cpu-index: will hold index of non boot cluster cpu.
 
-- qcom,l1_l2_gcc_secure: indicates L1/L2 clock enabling register is secure.
+- qcom,l1-l2-gcc-secure: indicates L1/L2 clock enabling register is secure.
 
 Example:
 

@@ -1,4 +1,4 @@
-/* Copyright (c) 2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2014-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -10,6 +10,7 @@
  * GNU General Public License for more details.
  */
 
+
 #include <linux/pci.h>
 #include <linux/gpio.h>
 #include <linux/module.h>
@@ -17,6 +18,10 @@
 #include <linux/msm-bus.h>
 #include <linux/delay.h>
 #include <linux/debugfs.h>
+#include <linux/pm_runtime.h>
+
+#define CREATE_TRACE_POINTS
+#include "mhi_trace.h"
 
 #include "mhi_sys.h"
 #include "mhi.h"
@@ -34,7 +39,7 @@ void *mhi_ipc_log;
 static DEFINE_PCI_DEVICE_TABLE(mhi_pcie_device_id) = {
 	{ MHI_PCIE_VENDOR_ID, MHI_PCIE_DEVICE_ID_9x35,
 		PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{ MHI_PCIE_VENDOR_ID, MHI_PCIE_DEVICE_ID_ZIRC,
+	{ MHI_PCIE_VENDOR_ID, MHI_PCIE_DEVICE_ID_9640,
 		PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
 	{ 0, },
 };
@@ -57,8 +62,10 @@ static void mhi_msm_fixup(struct pci_dev *pcie_device)
 int mhi_ctxt_init(struct mhi_pcie_dev_info *mhi_pcie_dev)
 {
 	int ret_val = 0;
-	u32 i = 0;
+	u32 i = 0, j = 0;
 	u32 retry_count = 0;
+	u32 msi_number = 32;
+	struct mhi_device_ctxt *mhi_dev_ctxt = NULL;
 	struct pci_dev *pcie_device = NULL;
 
 	if (NULL == mhi_pcie_dev)
@@ -104,29 +111,37 @@ int mhi_ctxt_init(struct mhi_pcie_dev_info *mhi_pcie_dev)
 	}
 
 	device_disable_async_suspend(&pcie_device->dev);
-	ret_val = pci_enable_msi_block(pcie_device, MAX_NR_MSI + 1);
+	ret_val = pci_enable_msi_block(pcie_device, msi_number);
 	if (0 != ret_val) {
 		mhi_log(MHI_MSG_ERROR,
 			"Failed to enable MSIs for pcie dev ret_val %d.\n",
 			ret_val);
 		goto msi_config_err;
 	}
-	for (i = 0; i < MAX_NR_MSI; ++i) {
-		ret_val = request_irq(pcie_device->irq + i,
-					mhi_msi_handlr,
-					IRQF_NO_SUSPEND,
-					"mhi_drv",
-					(void *)&pcie_device->dev);
+	mhi_dev_ctxt = &mhi_pcie_dev->mhi_ctxt;
+
+	for (j = 0; j < mhi_dev_ctxt->mmio_info.nr_event_rings; j++) {
+		mhi_log(MHI_MSG_VERBOSE,
+				"MSI_number = %d, event ring number = %d\n",
+				mhi_dev_ctxt->ev_ring_props[j].msi_vec, j);
+
+		ret_val = request_irq(pcie_device->irq +
+				mhi_dev_ctxt->ev_ring_props[j].msi_vec,
+				mhi_dev_ctxt->ev_ring_props[j].mhi_handler_ptr,
+				IRQF_NO_SUSPEND,
+				"mhi_drv",
+				(void *)&pcie_device->dev);
 		if (ret_val) {
 			mhi_log(MHI_MSG_ERROR,
-				"Failed to register handler for MSI.\n");
+			   "Failed to register handler for MSI ret_val = %d\n",
+			   ret_val);
 			goto msi_config_err;
 		}
 	}
 	mhi_pcie_dev->core.irq_base = pcie_device->irq;
 	mhi_log(MHI_MSG_VERBOSE,
 		"Setting IRQ Base to 0x%x\n", mhi_pcie_dev->core.irq_base);
-	mhi_pcie_dev->core.max_nr_msis = MAX_NR_MSI;
+	mhi_pcie_dev->core.max_nr_msis = msi_number;
 	do  {
 		ret_val = mhi_init_gpios(mhi_pcie_dev);
 		switch (ret_val) {
@@ -151,8 +166,11 @@ int mhi_ctxt_init(struct mhi_pcie_dev_info *mhi_pcie_dev)
 	if (!mhi_init_debugfs(&mhi_pcie_dev->mhi_ctxt))
 		mhi_log(MHI_MSG_ERROR, "Failed to init debugfs.\n");
 
-	mhi_pcie_dev->mhi_ctxt.mmio_addr = mhi_pcie_dev->core.bar0_base;
+	mhi_pcie_dev->mhi_ctxt.mmio_info.mmio_addr =
+						mhi_pcie_dev->core.bar0_base;
 	pcie_device->dev.platform_data = &mhi_pcie_dev->mhi_ctxt;
+	mhi_pcie_dev->mhi_ctxt.dev_info->plat_dev->dev.platform_data =
+						&mhi_pcie_dev->mhi_ctxt;
 	if (mhi_pcie_dev->mhi_ctxt.base_state == STATE_TRANSITION_BHI) {
 		ret_val = bhi_probe(mhi_pcie_dev);
 		if (ret_val) {
@@ -184,6 +202,12 @@ msi_config_err:
 	pci_disable_device(pcie_device);
 	return ret_val;
 }
+
+static const struct dev_pm_ops pm_ops = {
+	.runtime_suspend = mhi_runtime_suspend,
+	.runtime_resume = mhi_runtime_resume,
+	.runtime_idle = NULL,
+};
 
 static struct pci_driver mhi_pcie_driver = {
 	.name = "mhi_pcie_drv",
@@ -243,6 +267,7 @@ static struct platform_driver mhi_plat_driver = {
 		.name		= "mhi",
 		.owner		= THIS_MODULE,
 		.of_match_table	= mhi_plat_match,
+		.pm = &pm_ops,
 	},
 };
 
@@ -292,7 +317,7 @@ DECLARE_PCI_FIXUP_HEADER(MHI_PCIE_VENDOR_ID,
 		mhi_msm_fixup);
 
 DECLARE_PCI_FIXUP_HEADER(MHI_PCIE_VENDOR_ID,
-		MHI_PCIE_DEVICE_ID_ZIRC,
+		MHI_PCIE_DEVICE_ID_9640,
 		mhi_msm_fixup);
 
 

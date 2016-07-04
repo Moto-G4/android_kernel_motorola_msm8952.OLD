@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2007 Google, Inc.
- * Copyright (c) 2007-2014, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2007-2015, The Linux Foundation. All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -23,6 +23,7 @@
 #include <linux/of.h>
 #include <linux/device.h>
 #include <linux/spinlock.h>
+#include <linux/platform_device.h>
 #include <linux/mutex.h>
 #include <linux/regulator/consumer.h>
 #include <linux/seq_file.h>
@@ -185,6 +186,7 @@ struct clk {
 	struct list_head list;
 
 	unsigned count;
+	unsigned notifier_count;
 	spinlock_t lock;
 	unsigned prepare_count;
 	struct mutex prepare_lock;
@@ -202,6 +204,7 @@ struct clk {
 	.siblings = LIST_HEAD_INIT((name).siblings), \
 	.list = LIST_HEAD_INIT((name).list)
 
+bool is_rate_valid(struct clk *clk, unsigned long rate);
 int vote_vdd_level(struct clk_vdd_class *vdd_class, int level);
 int unvote_vdd_level(struct clk_vdd_class *vdd_class, int level);
 int __clk_pre_reparent(struct clk *c, struct clk *new, unsigned long *flags);
@@ -211,6 +214,9 @@ void __clk_post_reparent(struct clk *c, struct clk *old, unsigned long *flags);
 int msm_clock_register(struct clk_lookup *table, size_t size);
 int of_msm_clock_register(struct device_node *np, struct clk_lookup *table,
 				size_t size);
+
+int clock_rcgwr_init(struct platform_device *pdev);
+int clock_rcgwr_disable(struct platform_device *pdev);
 
 extern struct clk dummy_clk;
 extern struct clk_ops clk_ops_dummy;

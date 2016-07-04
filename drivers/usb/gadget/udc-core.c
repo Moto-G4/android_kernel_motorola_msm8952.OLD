@@ -444,27 +444,37 @@ int usb_func_ep_queue(struct usb_function *func, struct usb_ep *ep,
 	int ret;
 	struct usb_gadget *gadget;
 
-	if (!func || !ep || !req) {
-		pr_err("Invalid argument. func=%p, ep=%p, req=%p\n",
-			func, ep, req);
-		return -EINVAL;
+	if (!func || !func->config || !func->config->cdev ||
+			!func->config->cdev->gadget || !ep || !req) {
+		ret = -EINVAL;
+		goto done;
 	}
 
 	pr_debug("Function %s queueing new data into ep %u\n",
 		func->name ? func->name : "", ep->address);
 
 	gadget = func->config->cdev->gadget;
-	if ((gadget->speed == USB_SPEED_SUPER) && func->func_is_suspended) {
-		ret = usb_func_wakeup(func);
-		if (ret) {
-			pr_err("Failed to send function wake up notification. func name:%s, ep:%u\n",
-				func->name ? func->name : "",
-				ep->address);
-			return ret;
+
+	if (func->func_is_suspended && func->func_wakeup_allowed) {
+		ret = usb_gadget_func_wakeup(gadget, func->intf_id);
+		if (ret == -EAGAIN) {
+			pr_debug("bus suspended func wakeup for %s delayed until bus resume.\n",
+				func->name ? func->name : "");
+		} else if (ret < 0 && ret != -ENOTSUPP) {
+			pr_err("Failed to wake function %s from suspend state. ret=%d.\n",
+				func->name ? func->name : "", ret);
 		}
+
+		goto done;
+	}
+
+	if (func->func_is_suspended && !func->func_wakeup_allowed) {
+		ret = -ENOTSUPP;
+		goto done;
 	}
 
 	ret = usb_ep_queue(ep, req, gfp_flags);
+done:
 	return ret;
 }
 
@@ -487,6 +497,11 @@ static ssize_t usb_udc_softconn_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t n)
 {
 	struct usb_udc		*udc = container_of(dev, struct usb_udc, dev);
+
+	if (!udc->driver) {
+		dev_err(dev, "soft-connect without a gadget driver\n");
+		return -EOPNOTSUPP;
+	}
 
 	if (sysfs_streq(buf, "connect")) {
 		usb_gadget_udc_start(udc->gadget, udc->driver);

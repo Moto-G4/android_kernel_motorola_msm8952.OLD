@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -59,10 +59,14 @@ extern int msm_fw_debug_mode;
 extern int msm_fw_low_power_mode;
 extern int msm_vidc_hw_rsp_timeout;
 extern u32 msm_fw_coverage;
+extern int msm_vidc_reset_clock_control;
+extern int msm_vidc_regulator_scaling;
 extern int msm_vidc_vpe_csc_601_to_709;
-extern int msm_vidc_dcvs_mode;
+extern int msm_vidc_dec_dcvs_mode;
+extern int msm_vidc_enc_dcvs_mode;
 extern int msm_vidc_sys_idle_indicator;
 extern u32 msm_vidc_firmware_unload_delay;
+extern int msm_vidc_thermal_mitigation_disabled;
 
 #define VIDC_MSG_PRIO2STRING(__level) ({ \
 	char *__str; \

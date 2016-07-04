@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -60,12 +60,7 @@ enum msm_isp_buf_mgr_state {
 struct msm_isp_buffer_mapped_info {
 	unsigned long len;
 	dma_addr_t paddr;
-	struct ion_handle *handle;
-};
-
-struct buffer_cmd {
-	struct list_head list;
-	struct msm_isp_buffer_mapped_info *mapped_info;
+	int buf_fd;
 };
 
 struct msm_isp_buffer {
@@ -115,6 +110,9 @@ struct msm_isp_buf_ops {
 	int (*enqueue_buf) (struct msm_isp_buf_mgr *buf_mgr,
 		struct msm_isp_qbuf_info *info);
 
+	int (*dequeue_buf)(struct msm_isp_buf_mgr *buf_mgr,
+		struct msm_isp_qbuf_info *info);
+
 	int (*release_buf) (struct msm_isp_buf_mgr *buf_mgr,
 		uint32_t bufq_handle);
 
@@ -124,8 +122,9 @@ struct msm_isp_buf_ops {
 	int (*get_buf_src) (struct msm_isp_buf_mgr *buf_mgr,
 		uint32_t bufq_handle, uint32_t *buf_src);
 
-	int (*get_buf) (struct msm_isp_buf_mgr *buf_mgr, uint32_t id,
-		uint32_t bufq_handle, struct msm_isp_buffer **buf_info);
+	int (*get_buf)(struct msm_isp_buf_mgr *buf_mgr, uint32_t id,
+		uint32_t bufq_handle, struct msm_isp_buffer **buf_info,
+		uint32_t *buf_cnt);
 
 	int (*get_buf_by_index) (struct msm_isp_buf_mgr *buf_mgr,
 		uint32_t bufq_handle, uint32_t buf_index,
@@ -152,13 +151,18 @@ struct msm_isp_buf_ops {
 	int (*buf_mgr_debug) (struct msm_isp_buf_mgr *buf_mgr);
 	struct msm_isp_bufq * (*get_bufq)(struct msm_isp_buf_mgr *buf_mgr,
 		uint32_t bufq_handle);
+	int (*update_put_buf_cnt)(struct msm_isp_buf_mgr *buf_mgr,
+		uint32_t bufq_handle, uint32_t buf_index,
+		uint32_t frame_id);
+	int (*reset_put_buf_cnt)(struct msm_isp_buf_mgr *buf_mgr,
+		uint32_t bufq_handle, uint32_t buf_index);
 };
 
 struct msm_isp_buf_mgr {
 	int init_done;
 	uint32_t open_count;
 	uint32_t pagefault_debug;
-	spinlock_t lock;
+	uint32_t frameId_mismatch_recovery;
 	uint16_t num_buf_q;
 	struct msm_isp_bufq *bufq;
 
@@ -168,28 +172,23 @@ struct msm_isp_buf_mgr {
 
 	struct msm_sd_req_vb2_q *vb2_ops;
 
-	/*IOMMU specific*/
-	int iommu_domain_num;
-	struct iommu_domain *iommu_domain;
-
-	/*Add secure domain num and domain */
-	int iommu_domain_num_secure;
-	struct iommu_domain *iommu_domain_secure;
+	/*IOMMU driver*/
+	int ns_iommu_hdl;
+	int sec_iommu_hdl;
 
 	/*Add secure mode*/
 	int secure_enable;
 
 	int num_iommu_ctx;
-	struct device *iommu_ctx[2];
-	struct list_head buffer_q;
+	spinlock_t bufq_list_lock;
 	int num_iommu_secure_ctx;
-	struct device *iommu_secure_ctx[2];
-	int attach_ref_cnt[MAX_PROTECTION_MODE][MAX_IOMMU_CTX];
+	int attach_ref_cnt;
 	enum msm_isp_buf_mgr_state attach_state;
+	struct mutex lock;
 };
 
 int msm_isp_create_isp_buf_mgr(struct msm_isp_buf_mgr *buf_mgr,
-	struct msm_sd_req_vb2_q *vb2_ops, struct msm_iova_layout *iova_layout);
+	struct msm_sd_req_vb2_q *vb2_ops, struct device *dev);
 
 int msm_isp_proc_buf_cmd(struct msm_isp_buf_mgr *buf_mgr,
 	unsigned int cmd, void *arg);

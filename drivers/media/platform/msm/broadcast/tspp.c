@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2011-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -615,7 +615,8 @@ static void tspp_sps_complete_tlet(unsigned long data)
 			if (iovec.size == 0)
 				break;
 
-			if (iovec.addr != channel->waiting->sps.phys_base)
+			if (DESC_FULL_ADDR(iovec.flags, iovec.addr)
+			    != channel->waiting->sps.phys_base)
 				pr_err("tspp: buffer mismatch %pa",
 					&channel->waiting->sps.phys_base);
 
@@ -661,8 +662,7 @@ static int tspp_config_gpios(struct tspp_device *device,
 	int ret;
 	struct pinctrl_state *s;
 	struct tspp_pinctrl *p = &device->pinctrl;
-	/* Both TSIF always work in the same mode */
-	bool mode2 = device->tsif[0].mode == TSPP_TSIF_MODE_2;
+	bool mode2;
 
 	/*
 	 * TSIF devices are handled separately, however changing of the pinctrl
@@ -673,6 +673,7 @@ static int tspp_config_gpios(struct tspp_device *device,
 
 	switch (source) {
 	case TSPP_SOURCE_TSIF0:
+		mode2 = device->tsif[0].mode == TSPP_TSIF_MODE_2;
 		if (enable == p->tsif1_active) {
 			if (enable)
 				/* Both tsif enabled */
@@ -693,6 +694,7 @@ static int tspp_config_gpios(struct tspp_device *device,
 			p->tsif0_active = enable;
 		break;
 	case TSPP_SOURCE_TSIF1:
+		mode2 = device->tsif[1].mode == TSPP_TSIF_MODE_2;
 		if (enable == p->tsif0_active) {
 			if (enable)
 				/* Both tsif enabled */

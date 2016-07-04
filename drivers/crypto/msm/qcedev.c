@@ -1,6 +1,6 @@
 /* Qualcomm CE device driver.
  *
- * Copyright (c) 2010-2014, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2010-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -42,6 +42,22 @@
 
 #define CACHE_LINE_SIZE 32
 #define CE_SHA_BLOCK_SIZE SHA256_BLOCK_SIZE
+
+#ifndef CONFIG_FIPS_ENABLE
+#ifndef CONFIG_HW_RANDOM_MSM
+/* Global FIPS status  */
+enum fips_status g_fips140_status = FIPS140_STATUS_NA;
+EXPORT_SYMBOL(g_fips140_status);
+int _do_msm_fips_drbg_init(void *rng_dev)
+{
+	return 0;
+}
+EXPORT_SYMBOL(_do_msm_fips_drbg_init);
+/*FIPS140-2 call back for DRBG self test */
+void *drbg_call_back;
+EXPORT_SYMBOL(drbg_call_back);
+#endif
+#endif
 
 /* are FIPS integrity tests done ?? */
 bool is_fips_qcedev_integritytest_done;
@@ -828,11 +844,6 @@ static int qcedev_sha_final(struct qcedev_async_req *qcedev_areq,
 		return -EINVAL;
 	}
 
-	if (handle->sha_ctxt.trailing_buf_len == 0) {
-		pr_err("%s Incorrect trailng buffer %d\n", __func__,
-					handle->sha_ctxt.trailing_buf_len);
-		return -EINVAL;
-	}
 	handle->sha_ctxt.last_blk = 1;
 
 	total = handle->sha_ctxt.trailing_buf_len;
@@ -1295,7 +1306,7 @@ static int qcedev_vbuf_ablk_cipher(struct qcedev_async_req *areq,
 	k_buf_src = kmalloc(QCE_MAX_OPER_DATA + CACHE_LINE_SIZE * 2,
 				GFP_KERNEL);
 	if (k_buf_src == NULL) {
-		pr_err("%s: Can't Allocate memory: k_buf_src 0x%lx\n",
+		pr_debug("%s: Can't Allocate memory: k_buf_src 0x%lx\n",
 					__func__, (uintptr_t)k_buf_src);
 		return -ENOMEM;
 	}
@@ -1602,10 +1613,9 @@ static int qcedev_check_sha_params(struct qcedev_sha_op_req *req,
 		pr_err("%s: CMAC not supported\n", __func__);
 		goto sha_error;
 	}
-	if ((req->entries == 0) || (req->data_len == 0) ||
-			(req->entries > QCEDEV_MAX_BUFFERS)) {
-		pr_err("%s: Invalid data length (%d)/ num entries (%d)\n",
-				__func__, req->data_len, req->entries);
+	if ((!req->entries) || (req->entries > QCEDEV_MAX_BUFFERS)) {
+		pr_err("%s: Invalid num entries (%d)\n",
+						__func__, req->entries);
 		goto sha_error;
 	}
 

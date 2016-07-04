@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2014 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2015 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -32,9 +32,6 @@
   FILE:         vos_nvitem.c
   OVERVIEW:     This source file contains definitions for vOS NV Item APIs
   DEPENDENCIES: NV, remote API client, WinCE REX
-                Copyright (c) 2008 QUALCOMM Incorporated.
-                All Rights Reserved.
-                Qualcomm Confidential and Proprietary
 ============================================================================*/
 /*============================================================================
   EDIT HISTORY FOR MODULE
@@ -58,9 +55,6 @@
 #include <net/cfg80211.h>
 #include <linux/firmware.h>
 #include <linux/vmalloc.h>
-//Moto, read MACs from boot params
-#include <linux/of.h>
-#include <linux/of_address.h>
 
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(3,9,0))
 #define IEEE80211_CHAN_NO_80MHZ		1<<7
@@ -97,11 +91,8 @@ static v_BOOL_t crda_regulatory_run_time_entry_valid = VOS_FALSE;
 #define MAGIC_NUMBER            0xCAFEBABE
 
 #define MIN(a, b) (a > b ? b : a)
+#define MAX(a, b) (a > b ? a : b)
 
-#ifdef MOTO_UTAGS_MAC
-#define WIFI_MAC_BOOTARG "androidboot.wifimacaddr="
-#define MACSTRLEN 17
-#endif
 /*----------------------------------------------------------------------------
  * Type Declarations
  * -------------------------------------------------------------------------*/
@@ -196,7 +187,7 @@ static CountryInfoTable_t countryInfoTable =
       {REGDOMAIN_FCC, {'I', 'D'}},  //INDONESIA
       {REGDOMAIN_ETSI, {'I', 'E'}}, //IRELAND
       {REGDOMAIN_ETSI, {'I', 'L'}}, //ISRAEL
-      {REGDOMAIN_ETSI, {'I', 'N'}}, //INDIA
+      {REGDOMAIN_APAC, {'I', 'N'}}, //INDIA
       {REGDOMAIN_ETSI, {'I', 'R'}}, //IRAN, ISLAMIC REPUBLIC OF
       {REGDOMAIN_ETSI, {'I', 'S'}}, //ICELNAD
       {REGDOMAIN_ETSI, {'I', 'T'}}, //ITALY
@@ -548,9 +539,6 @@ static CountryInfoTable_t countryInfoTable =
 #endif
 
 
-#ifdef MOTO_UTAGS_MAC
-static v_BOOL_t macsRead = VOS_FALSE;
-#endif
 typedef struct nvEFSTable_s
 {
    v_U32_t    nvValidityBitmap;
@@ -567,13 +555,6 @@ static v_SIZE_t nvReadEncodeBufSize;
 static v_SIZE_t nDictionarySize;
 static v_U32_t magicNumber;
 
-#ifdef WLAN_NV_OTA_UPGRADE
-typedef struct nvEFSTable_factory_s
-{
-   sNvFields fields;
-} nvEFSTable_factory_t;
-nvEFSTable_factory_t *gnvFactoryTable=NULL;
-#endif /* WLAN_NV_OTA_UPGRADE */
 /* NV2 specific, No CH 144 support
  * For NV_FTM operation, NV2 structure should be maintained
  * This will be used only for the NV_FTM operation */
@@ -1118,9 +1099,6 @@ VOS_STATUS vos_nv_parseV2bin(tANI_U8 *pnvEncodedBuf, tANI_U32 nvReadBufSize,
 VOS_STATUS vos_nv_open(void)
 {
     VOS_STATUS status = VOS_STATUS_SUCCESS;
-#ifdef WLAN_NV_OTA_UPGRADE
-    v_SIZE_t factoryNV_bufSize;
-#endif
     v_CONTEXT_t pVosContext= NULL;
     v_SIZE_t bufSize;
     v_SIZE_t nvReadBufSize;
@@ -1149,7 +1127,7 @@ VOS_STATUS vos_nv_open(void)
        return VOS_STATUS_E_RESOURCES;
     }
 
-    pnvEncodedBuf = (v_U8_t *)vmalloc(nvReadBufSize);
+    pnvEncodedBuf = (v_U8_t *)vos_mem_vmalloc(nvReadBufSize);
 
     if (NULL == pnvEncodedBuf) {
         VOS_TRACE(VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_ERROR,
@@ -1163,23 +1141,26 @@ VOS_STATUS vos_nv_open(void)
     vos_mem_copy(&magicNumber, &pnvEncodedBuf[sizeof(v_U32_t)], sizeof(v_U32_t));
 
     /// Allocate buffer with maximum length..
-    pEncodedBuf = (v_U8_t *)vos_mem_malloc(nvReadBufSize);
+    pEncodedBuf = (v_U8_t *)vos_mem_vmalloc(nvReadBufSize);
 
     if (NULL == pEncodedBuf)
     {
         VOS_TRACE(VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_ERROR,
                     "%s : failed to allocate memory for NV", __func__);
+        vos_mem_vfree(pnvEncodedBuf);
         return VOS_STATUS_E_NOMEM;
     }
 
     VOS_TRACE(VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_INFO,
               "NV Table Size %zu", sizeof(nvEFSTable_t));
 
-    pnvEFSTable = (nvEFSTable_t *)vos_mem_malloc(sizeof(nvEFSTable_t));
+    pnvEFSTable = (nvEFSTable_t *)vos_mem_vmalloc(sizeof(nvEFSTable_t));
     if (NULL == pnvEFSTable)
     {
         VOS_TRACE(VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_ERROR,
                   "%s : failed to allocate memory for NV", __func__);
+        vos_mem_vfree(pnvEncodedBuf);
+        vos_mem_vfree(pEncodedBuf);
         return VOS_STATUS_E_NOMEM;
     }
     vos_mem_zero((void *)pnvEFSTable, sizeof(nvEFSTable_t));
@@ -1196,6 +1177,9 @@ VOS_STATUS vos_nv_open(void)
         {
             VOS_TRACE(VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_ERROR,
                       "%s : failed to allocate memory for NV", __func__);
+            vos_mem_vfree(pnvEncodedBuf);
+            vos_mem_vfree(pEncodedBuf);
+            vos_mem_vfree(pnvEFSTable);
             return VOS_STATUS_E_NOMEM;
         }
 
@@ -1217,7 +1201,7 @@ VOS_STATUS vos_nv_open(void)
                    "readEncodeBufSize %d",nvReadEncodeBufSize);
 
         if (VOS_STATUS_SUCCESS == status) {
-           VOS_TRACE(VOS_MODULE_ID_VOSS,  VOS_TRACE_LEVEL_ERROR,
+           VOS_TRACE(VOS_MODULE_ID_VOSS,  VOS_TRACE_LEVEL_INFO,
                        "Embedded NV parsed success !!productId %d couple Type %d wlan RevId %d",
                         pnvData->fields.productId,
                         pnvData->fields.couplerType,
@@ -1231,6 +1215,20 @@ VOS_STATUS vos_nv_open(void)
         {
            VOS_TRACE(VOS_MODULE_ID_VOSS,  VOS_TRACE_LEVEL_ERROR,
                        "nvParser failed %d",status);
+
+           if (nvReadBufSize != sizeof(sHalNv)) {
+               vos_mem_vfree(pEncodedBuf);
+               pEncodedBuf = (v_U8_t *)vos_mem_vmalloc(sizeof(sHalNv));
+
+               if (!pEncodedBuf) {
+                   VOS_TRACE(VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_ERROR,
+                             "%s : failed to allocate memory for NV", __func__);
+                   vos_mem_free(pnvData);
+                   vos_mem_vfree(pnvEncodedBuf);
+                   vos_mem_vfree(pnvEFSTable);
+                   return VOS_STATUS_E_NOMEM;
+               }
+           }
 
            nvReadBufSize = 0;
 
@@ -1260,6 +1258,9 @@ VOS_STATUS vos_nv_open(void)
             VOS_TRACE(VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_FATAL,
                       "Size  mismatch INVALID NV FILE %d %d!!!",
                       nvReadBufSize, bufSize);
+            vos_mem_vfree(pnvEncodedBuf);
+            vos_mem_vfree(pEncodedBuf);
+            vos_mem_vfree(pnvEFSTable);
             return VOS_STATUS_E_FAILURE;
         }
 
@@ -1270,6 +1271,19 @@ VOS_STATUS vos_nv_open(void)
         /* From here, NV2 will be stored into NV3 structure */
         dataOffset = sizeof(v_U32_t);
         nvReadEncodeBufSize = sizeof(sHalNvV2);
+        if (nvReadBufSize != nvReadEncodeBufSize)
+        {
+            vos_mem_vfree(pEncodedBuf);
+            pEncodedBuf = (v_U8_t *)vos_mem_vmalloc(nvReadEncodeBufSize);
+            if (!pEncodedBuf)
+            {
+                VOS_TRACE(VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_ERROR,
+                          "%s : failed to allocate memory for NV", __func__);
+                vos_mem_vfree(pnvEncodedBuf);
+                vos_mem_vfree(pnvEFSTable);
+                return VOS_STATUS_E_NOMEM;
+            }
+        }
         vos_mem_copy(pEncodedBuf,
                      &pnvEncodedBuf[dataOffset],
                      nvReadBufSize - dataOffset);
@@ -1310,26 +1324,9 @@ VOS_STATUS vos_nv_open(void)
        vos_mem_free(pnvData);
     }
 
-#ifdef WLAN_NV_OTA_UPGRADE
-    status = hdd_request_firmware(WLAN_FACTORY_NV_FILE,
-                                ((VosContextType*)(pVosContext))->pHDDContext,
-                                (v_VOID_t**)&gnvFactoryTable, &factoryNV_bufSize);
-    if ( (!VOS_IS_STATUS_SUCCESS( status )) || !gnvFactoryTable)
-    {
-         VOS_TRACE(VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_FATAL,
-                   "%s: [Mot OTA] unable to download NV file %s",
-                   __func__, WLAN_FACTORY_NV_FILE);
-         return VOS_STATUS_E_RESOURCES;
-    }
-    VOS_TRACE(VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_ERROR,
-           "INFO: [Mot OTA] NV factory file version=%d Driver factory NV version=%d, System binary version = %d continue...\n",
-           gnvFactoryTable->fields.nvVersion, WLAN_NV_VERSION, gnvEFSTable->halnv.fields.nvVersion);
-#else /* WLAN_NV_OTA_UPGRADE */
-
     VOS_TRACE(VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_ERROR,
         "INFO: NV version = %d is loaded, driver supports NV version = %d",
         gnvEFSTable->halnv.fields.nvVersion, WLAN_NV_VERSION);
-#endif /* WLAN_NV_OTA_UPGRADE */
 
      /* Copying the read nv data to the globa NV EFS table */
     {
@@ -1368,28 +1365,12 @@ VOS_STATUS vos_nv_open(void)
            VOS_STATUS_SUCCESS)
         {
             if (itemIsValid == VOS_TRUE) {
-#ifdef WLAN_NV_OTA_UPGRADE
-                memcpy((v_VOID_t *)&pnvEFSTable->halnv.fields,
-                   (v_VOID_t *)&gnvFactoryTable->fields, sizeof(sNvFields));
-                if(((VosContextType*)(pVosContext))->nvVersion == E_NV_V2){
-                    memcpy((v_VOID_t *)&gnvEFSTableV2->halnvV2.fields,
-                        (v_VOID_t *)&gnvFactoryTable->fields, sizeof(sNvFields));
-                } else {
-                    memcpy((v_VOID_t *)&gnvEFSTable->halnv.fields,
-                        (v_VOID_t *)&gnvFactoryTable->fields, sizeof(sNvFields));
-                }
-            }
-	    else {
-#endif /* WLAN_NV_OTA_UPGRADE */
+
                 if(vos_nv_read( VNV_FIELD_IMAGE, (v_VOID_t *)&pnvEFSTable->halnv.fields,
                    NULL, sizeof(sNvFields) ) != VOS_STATUS_SUCCESS)
                    goto error;
             }
         }
-#ifdef MOTO_UTAGS_MAC
-        // Read Multi MACs and fill it in global NV strucutre.
-        vos_nv_readMultiMacAddress(NULL,VOS_MAX_CONCURRENCY_PERSONA);
-#endif
 
         if (vos_nv_getValidity(VNV_RATE_TO_POWER_TABLE, &itemIsValid) ==
              VOS_STATUS_SUCCESS)
@@ -1568,42 +1549,25 @@ VOS_STATUS vos_nv_open(void)
 
     return VOS_STATUS_SUCCESS;
 error:
-    vos_mem_free(pnvEFSTable);
-    vos_mem_free(pEncodedBuf);
-    vfree(pnvEncodedBuf);
+    vos_mem_vfree(pnvEFSTable);
+    vos_mem_vfree(pEncodedBuf);
+    vos_mem_vfree(pnvEncodedBuf);
     return eHAL_STATUS_FAILURE ;
 }
 
 VOS_STATUS vos_nv_close(void)
 {
-#ifdef WLAN_NV_OTA_UPGRADE
-    VOS_STATUS status = VOS_STATUS_SUCCESS;
-#endif /* WLAN_NV_OTA_UPGRADE */
     v_CONTEXT_t pVosContext= NULL;
          /*Get the global context */
     pVosContext = vos_get_global_context(VOS_MODULE_ID_SYS, NULL);
 
     ((hdd_context_t*)((VosContextType*)(pVosContext))->pHDDContext)->nv = NULL;
-    vos_mem_free(pnvEFSTable);
-    vos_mem_free(pEncodedBuf);
+    vos_mem_vfree(pnvEFSTable);
+    vos_mem_vfree(pEncodedBuf);
     vos_mem_free(pDictFile);
-    vfree(pnvEncodedBuf);
+    vos_mem_vfree(pnvEncodedBuf);
 
     gnvEFSTable=NULL;
-
-#ifdef WLAN_NV_OTA_UPGRADE
-    status = hdd_release_firmware(WLAN_FACTORY_NV_FILE, ((VosContextType*)(pVosContext))->pHDDContext);
-    if ( !VOS_IS_STATUS_SUCCESS( status ))
-    {
-        VOS_TRACE(VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_ERROR,
-                         "%s : vos_open %s failed\n",__func__, WLAN_FACTORY_NV_FILE);
-        return VOS_STATUS_E_FAILURE;
-    }
-    gnvFactoryTable=NULL;
-#endif /* WLAN_NV_OTA_UPGRADE */
-#ifdef MOTO_UTAGS_MAC
-    macsRead = VOS_FALSE;
-#endif
     return VOS_STATUS_SUCCESS;
 }
 
@@ -1710,19 +1674,6 @@ VOS_STATUS vos_nv_readMacAddress( v_MAC_ADDRESS_t pMacAddress )
    return status;
 }
 
-#ifdef MOTO_UTAGS_MAC
-static inline void strtomac(char * buf, unsigned char macaddr[6]) {
-    if (strchr(buf, ':'))
-        sscanf(buf, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
-            &macaddr[0],&macaddr[1], &macaddr[2], &macaddr[3], &macaddr[4], &macaddr[5]);
-    else if (strchr(buf, '-'))
-        sscanf(buf, "%hhx-%hhx-%hhx-%hhx-%hhx-%hhx",
-            &macaddr[0],&macaddr[1], &macaddr[2], &macaddr[3], &macaddr[4], &macaddr[5]);
-    else
-        VOS_TRACE( VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_ERROR,
-            "%s,Can not parse mac address: %s", __func__,buf);
-}
-#endif
 /**------------------------------------------------------------------------
 
   \brief vos_nv_readMultiMacAddress() - return the Multiple MAC addresses
@@ -1738,21 +1689,10 @@ static inline void strtomac(char * buf, unsigned char macaddr[6]) {
 VOS_STATUS vos_nv_readMultiMacAddress( v_U8_t *pMacAddress,
                                               v_U8_t  macCount )
 {
-#ifndef MOTO_UTAGS_MAC
    sNvFields   fieldImage;
    VOS_STATUS  status;
    v_U8_t      countLoop;
    v_U8_t     *pNVMacAddress;
-#else
-   //Moto, read MACs from bootparams
-   VOS_STATUS  status = VOS_STATUS_E_FAILURE;
-   struct device_node *chosen_node = NULL;
-   unsigned char mac1 [VOS_MAC_ADDRESS_LEN] = {0};
-   unsigned char mac2 [VOS_MAC_ADDRESS_LEN] = {0};
-   unsigned char mac3 [VOS_MAC_ADDRESS_LEN] = {0};
-   unsigned char mac4 [VOS_MAC_ADDRESS_LEN] = {0};
-   v_CONTEXT_t pVosContext= NULL;
-#endif
 
    if((0 == macCount) || (VOS_MAX_CONCURRENCY_PERSONA < macCount) ||
       (NULL == pMacAddress))
@@ -1762,111 +1702,10 @@ VOS_STATUS vos_nv_readMultiMacAddress( v_U8_t *pMacAddress,
           macCount, pMacAddress);
    }
 
-#ifdef MOTO_UTAGS_MAC
-   /*Get the global context */
-   pVosContext = vos_get_global_context(VOS_MODULE_ID_SYS, NULL);
-   if (NULL == pVosContext){
-       VOS_TRACE( VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_ERROR,
-          "%s: Not able to get VosContex",__func__);
-       return VOS_STATUS_E_FAILURE;
-   }
-
-   if ((macsRead == VOS_TRUE) && (pMacAddress != NULL)) {
-        int macLoop =0;
-       /* We have already read MAC addresses when this function was called from vos_nv_open.
-       Avoid reparsing and fill from the global NV structure*/
-       if (((VosContextType*)(pVosContext))->nvVersion == E_NV_V2) {
-           vos_mem_copy(pMacAddress,gnvEFSTableV2->halnvV2.fields.macAddr, VOS_MAC_ADDRESS_LEN);
-           vos_mem_copy(pMacAddress+1*VOS_MAC_ADDRESS_LEN, gnvEFSTableV2->halnvV2.fields.macAddr2, VOS_MAC_ADDRESS_LEN);
-           vos_mem_copy(pMacAddress+2*VOS_MAC_ADDRESS_LEN, gnvEFSTableV2->halnvV2.fields.macAddr3, VOS_MAC_ADDRESS_LEN);
-           vos_mem_copy(pMacAddress+3*VOS_MAC_ADDRESS_LEN, gnvEFSTableV2->halnvV2.fields.macAddr4, VOS_MAC_ADDRESS_LEN);
-       } else if(((VosContextType*)(pVosContext))->nvVersion == E_NV_V3) {
-           vos_mem_copy(pMacAddress, gnvEFSTable->halnv.fields.macAddr, VOS_MAC_ADDRESS_LEN);
-           vos_mem_copy(pMacAddress+1*VOS_MAC_ADDRESS_LEN, gnvEFSTable->halnv.fields.macAddr2, VOS_MAC_ADDRESS_LEN);
-           vos_mem_copy(pMacAddress+2*VOS_MAC_ADDRESS_LEN, gnvEFSTable->halnv.fields.macAddr3, VOS_MAC_ADDRESS_LEN);
-           vos_mem_copy(pMacAddress+3*VOS_MAC_ADDRESS_LEN, gnvEFSTable->halnv.fields.macAddr4, VOS_MAC_ADDRESS_LEN);
-       } else {
-           VOS_TRACE( VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_ERROR,
-                "%s: NV version is invalid",__func__);
-           return VOS_STATUS_E_FAILURE;
-       }
-       for (macLoop = 0; macLoop < VOS_MAX_CONCURRENCY_PERSONA; macLoop++) {
-            VOS_TRACE( VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_ERROR,
-                "%s: pMacAddress[%d]="MAC_ADDRESS_STR ,__func__, macLoop, MAC_ADDR_ARRAY(pMacAddress + macLoop*VOS_MAC_ADDRESS_LEN));
-       }
-       return VOS_STATUS_SUCCESS;
-   }
-#else
-
    status = vos_nv_read( VNV_FIELD_IMAGE, &fieldImage, NULL,
                          sizeof(fieldImage) );
-#endif
-
-#ifdef MOTO_UTAGS_MAC
-    //Moto, read MACs from bootparams
-    chosen_node = of_find_node_by_name(NULL, "chosen");
-    if (!chosen_node) {
-        VOS_TRACE( VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_ERROR,
-            "%s: get chosen node read failed\n", __func__);
-    } else {
-        int len=0;
-        const char *cmd_line = NULL;
-        cmd_line = of_get_property(chosen_node, "bootargs", &len);
-        if (!cmd_line || len <= 0) {
-            VOS_TRACE( VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_ERROR,
-                "%s: get wlan MACs bootargs failed\n", __func__);
-        } else {
-            char * mac_idx = NULL;
-            mac_idx = strstr(cmd_line, WIFI_MAC_BOOTARG);
-            if (mac_idx == NULL) {
-                VOS_TRACE( VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_ERROR,
-                   "%s: " WIFI_MAC_BOOTARG " not present in bootargs", __func__);
-            } else {
-                char macStr1[MACSTRLEN+1] ={0};
-                char macStr2[MACSTRLEN+1] ={0};
-                status = VOS_STATUS_SUCCESS;
-
-                // extract 2 MACs from boot params
-                mac_idx += strlen(WIFI_MAC_BOOTARG);
-                memcpy(macStr1,mac_idx,MACSTRLEN);
-                mac_idx += MACSTRLEN;
-                //IKVPREL1L-627:Handle inter MAC separator if any
-                if ( *mac_idx == ',' || *mac_idx == '-')
-                    mac_idx ++;
-                else
-                    VOS_TRACE( VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_ERROR," No inter MAC separator used");
-
-                memcpy(macStr2,mac_idx,MACSTRLEN);
-                VOS_TRACE( VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_ERROR,
-                    "%s: MAC1 from bootparams=%s\n", __func__,macStr1);
-                VOS_TRACE( VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_ERROR,
-                    "%s: MAC2 from boot params=%s\n", __func__,macStr2);
-                strtomac(macStr1,mac1);
-                strtomac(macStr2,mac2);
-
-                // generate other 2 MACs
-                memcpy(mac3,mac1,VOS_MAC_ADDRESS_LEN);
-                memcpy(mac4,mac2,VOS_MAC_ADDRESS_LEN);
-                // Set local administered bit to derive other two MACs
-                mac3[0] |= 1 << 1;
-                mac4[0] |= 1 << 1;
-
-                VOS_TRACE( VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_DEBUG,
-                    "%s: Mac1 Addr: "  MAC_ADDRESS_STR, __func__, MAC_ADDR_ARRAY(mac1));
-                VOS_TRACE( VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_DEBUG,
-                    "%s: Mac2 Addr: "  MAC_ADDRESS_STR, __func__, MAC_ADDR_ARRAY(mac2));
-                VOS_TRACE( VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_DEBUG,
-                    "%s: Mac3 Addr: "  MAC_ADDRESS_STR, __func__, MAC_ADDR_ARRAY(mac3));
-                VOS_TRACE( VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_DEBUG,
-                    "%s: Mac4 Addr: "  MAC_ADDRESS_STR, __func__, MAC_ADDR_ARRAY(mac4));
-            }
-        }
-    }
-#endif
-
    if (VOS_STATUS_SUCCESS == status)
    {
-#ifndef MOTO_UTAGS_MAC
       pNVMacAddress = fieldImage.macAddr;
       for(countLoop = 0; countLoop < macCount; countLoop++)
       {
@@ -1880,37 +1719,7 @@ VOS_STATUS vos_nv_readMultiMacAddress( v_U8_t *pMacAddress,
       VOS_TRACE( VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_ERROR,
                  "vos_nv_readMultiMacAddress Get NV Field Fail");
    }
-#else
 
-       //Set Macs to global NV structure
-       if (((VosContextType*)(pVosContext))->nvVersion == E_NV_V2) {
-           vos_mem_copy(gnvEFSTableV2->halnvV2.fields.macAddr, mac1, VOS_MAC_ADDRESS_LEN);
-           vos_mem_copy(gnvEFSTableV2->halnvV2.fields.macAddr2, mac2, VOS_MAC_ADDRESS_LEN);
-           vos_mem_copy(gnvEFSTableV2->halnvV2.fields.macAddr3, mac3, VOS_MAC_ADDRESS_LEN);
-           vos_mem_copy(gnvEFSTableV2->halnvV2.fields.macAddr4, mac4, VOS_MAC_ADDRESS_LEN);
-           VOS_TRACE( VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_ERROR, "%s MAC address in global V2"
-                      MAC_ADDRESS_STR MAC_ADDRESS_STR MAC_ADDRESS_STR MAC_ADDRESS_STR ,__func__,
-                      MAC_ADDR_ARRAY(gnvEFSTableV2->halnvV2.fields.macAddr), MAC_ADDR_ARRAY(gnvEFSTableV2->halnvV2.fields.macAddr2),
-                      MAC_ADDR_ARRAY(gnvEFSTableV2->halnvV2.fields.macAddr3), MAC_ADDR_ARRAY(gnvEFSTableV2->halnvV2.fields.macAddr4));
-       } else if(((VosContextType*)(pVosContext))->nvVersion == E_NV_V3) {
-           vos_mem_copy(gnvEFSTable->halnv.fields.macAddr, mac1, VOS_MAC_ADDRESS_LEN);
-           vos_mem_copy(gnvEFSTable->halnv.fields.macAddr2, mac2, VOS_MAC_ADDRESS_LEN);
-           vos_mem_copy(gnvEFSTable->halnv.fields.macAddr3, mac3, VOS_MAC_ADDRESS_LEN);
-           vos_mem_copy(gnvEFSTable->halnv.fields.macAddr4, mac4, VOS_MAC_ADDRESS_LEN);
-           VOS_TRACE( VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_ERROR, "%s MAC address in global V3"
-                      MAC_ADDRESS_STR MAC_ADDRESS_STR MAC_ADDRESS_STR MAC_ADDRESS_STR ,__func__,
-                      MAC_ADDR_ARRAY(gnvEFSTable->halnv.fields.macAddr), MAC_ADDR_ARRAY(gnvEFSTable->halnv.fields.macAddr2),
-                      MAC_ADDR_ARRAY(gnvEFSTable->halnv.fields.macAddr3), MAC_ADDR_ARRAY(gnvEFSTable->halnv.fields.macAddr4));
-       } else {
-           VOS_TRACE( VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_ERROR,
-                "%s: invalid NV version",__func__);
-           goto skip;
-       }
-       macsRead = VOS_TRUE;
-   }
-skip:
-   of_node_put(chosen_node);
-#endif
    return status;
 }
 
@@ -2281,18 +2090,6 @@ VOS_STATUS vos_nv_write(VNV_TYPE type, v_VOID_t *inputVoidBuffer,
     switch (type)
     {
         case VNV_FIELD_IMAGE:
-#ifdef WLAN_NV_OTA_UPGRADE
-            itemSize = sizeof(gnvFactoryTable->fields);
-            if(bufferSize != itemSize) {
-                VOS_TRACE(VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_ERROR,
-                 ("type = %d buffer size=%d is less than data size=%d\r\n"),type, bufferSize,
-                  itemSize);
-                status = VOS_STATUS_E_INVAL;
-            }
-            else {
-                memcpy(&gnvFactoryTable->fields,inputVoidBuffer,bufferSize);
-            }
-#else /* WLAN_NV_OTA_UPGRADE */
             itemSize = sizeof(gnvEFSTableV2->halnvV2.fields);
             if (bufferSize != itemSize)
             {
@@ -2307,7 +2104,6 @@ VOS_STATUS vos_nv_write(VNV_TYPE type, v_VOID_t *inputVoidBuffer,
                        inputVoidBuffer,
                        bufferSize);
             }
-#endif /* WLAN_NV_OTA_UPGRADE */
             break;
 
         case VNV_RATE_TO_POWER_TABLE:
@@ -2552,27 +2348,9 @@ VOS_STATUS vos_nv_write(VNV_TYPE type, v_VOID_t *inputVoidBuffer,
           VOS_TRACE(VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_ERROR,
                     "vos_nv_write_to_efs failed!!!");
           status = VOS_STATUS_E_FAULT;
-#ifdef WLAN_NV_OTA_UPGRADE
-          goto try_perist_and_exit;
-#endif
       }
-
-#ifdef WLAN_NV_OTA_UPGRADE
-try_perist_and_exit:
-      if(type != VNV_FIELD_IMAGE)
-          goto exit;
-      status = wlan_write_to_efs((v_U8_t*)gnvFactoryTable,sizeof(nvEFSTable_factory_t));
-      if (! VOS_IS_STATUS_SUCCESS(status))
-      {
-          VOS_TRACE(VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_ERROR, ("vos_nv_write_to_efs factory nv failed!!!\r\n"));
-          status = VOS_STATUS_E_FAULT;
-      }
-#endif
    }
 
-#ifdef WLAN_NV_OTA_UPGRADE
-exit:
-#endif
    return status;
 }
 
@@ -2602,7 +2380,7 @@ VOS_STATUS vos_nv_getChannelListWithPower(tChannelListWithPower *channels20MHz /
     if( channels20MHz && num20MHzChannelsFound )
     {
         count = 0;
-        for( i = 0; i <= RF_CHAN_13; i++ )
+        for( i = 0; i <= RF_CHAN_14; i++ )
         {
             if( regChannels[i].enabled )
             {
@@ -2809,11 +2587,6 @@ eNVChannelEnabledType vos_nv_getChannelEnabledState
    v_U32_t       channelLoop;
    eRfChannels   channelEnum = INVALID_RF_CHANNEL;
 
-   if(rfChannels[RF_CHAN_14].channelNum == rfChannel)
-   {
-       return NV_CHANNEL_INVALID;
-   }
-
    for(channelLoop = 0; channelLoop <= RF_CHAN_165; channelLoop++)
    {
       if(rfChannels[channelLoop].channelNum == rfChannel)
@@ -2993,7 +2766,6 @@ static int create_crda_regulatory_entry(struct wiphy *wiphy,
           continue;
        if (wiphy->bands[i] == NULL)
        {
-          pr_info("error: wiphy->bands[i] is NULL, i = %d\n", i);
           return -1;
        }
        // internal channels[] is one continous array for both 2G and 5G bands
@@ -3395,6 +3167,28 @@ v_U16_t vos_chan_to_freq(v_U8_t chanNum)
 
    return (0);
 }
+
+/**------------------------------------------------------------------------
+  \brief vos_freq_to_chan -
+  \param   - input frequency to know channel number
+  \return Channel frequency
+  \sa
+  -------------------------------------------------------------------------*/
+v_U8_t vos_freq_to_chan(v_U32_t freq)
+{
+   int i;
+
+   for (i = 0; i < NUM_RF_CHANNELS; i++)
+   {
+      if (rfChannels[i].targetFreq == freq)
+      {
+         return rfChannels[i].channelNum;
+      }
+   }
+
+   return (0);
+}
+
 /* function to tell about if Default country is Non-Zero */
 v_BOOL_t vos_is_nv_country_non_zero()
 {
@@ -3692,12 +3486,36 @@ VOS_STATUS vos_nv_getRegDomainFromCountryCode( v_REGDOMAIN_t *pRegDomain,
         }
         else if (COUNTRY_IE == source || COUNTRY_USER == source)
         {
+            INIT_COMPLETION(pHddCtx->linux_reg_req);
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(3,9,0))
             regulatory_hint_user(country_code,NL80211_USER_REG_HINT_USER);
 #else
             regulatory_hint_user(country_code);
 #endif
-            *pRegDomain = temp_reg_domain;
+            wait_result = wait_for_completion_interruptible_timeout(
+                               &pHddCtx->linux_reg_req,
+                               msecs_to_jiffies(LINUX_REG_WAIT_TIME));
+
+            /* if the country information does not exist with the kernel,
+               then the driver callback would not be called */
+
+            if (wait_result >= 0)
+            {
+               VOS_TRACE( VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_INFO,
+                           "runtime country code : %c%c is found in kernel db",
+                            country_code[0], country_code[1]);
+               *pRegDomain = temp_reg_domain;
+            }
+
+            else
+            {
+                VOS_TRACE( VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_WARN,
+                           "runtime country code : %c%c is not found"
+                           " in kernel db",
+                            country_code[0], country_code[1]);
+
+                return VOS_STATUS_E_EXISTS;
+            }
         }
 
    }
@@ -3723,7 +3541,7 @@ int vos_update_nv_table_from_wiphy_band(void *hdd_ctx,
         if (wiphy->bands[i] == NULL)
         {
 
-            VOS_TRACE(VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_ERROR,
+            VOS_TRACE(VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_INFO,
                       "error: wiphy->bands is NULL, i = %d", i);
             continue;
         }
@@ -3739,12 +3557,7 @@ int vos_update_nv_table_from_wiphy_band(void *hdd_ctx,
         for (j = 0; j < wiphy->bands[i]->n_channels; j++)
         {
              if (IEEE80211_BAND_2GHZ == i && eCSR_BAND_5G == nBandCapability)
-             {
-                 if (WLAN_HDD_IS_SOCIAL_CHANNEL(wiphy->bands[i]->channels[j].center_freq) )
-                     wiphy->bands[i]->channels[j].flags &= ~IEEE80211_CHAN_DISABLED;
-                 else
-                     wiphy->bands[i]->channels[j].flags |= IEEE80211_CHAN_DISABLED;
-             }
+                  wiphy->bands[i]->channels[j].flags |= IEEE80211_CHAN_DISABLED;
              else if (IEEE80211_BAND_5GHZ == i && eCSR_BAND_24 == nBandCapability)
                   wiphy->bands[i]->channels[j].flags |= IEEE80211_CHAN_DISABLED;
 
@@ -3832,8 +3645,26 @@ int vos_update_nv_table_from_wiphy_band(void *hdd_ctx,
                         channels[k].enabled = NV_CHANNEL_DFS;
                 }
 
+                if (!gnvEFSTable->halnv.tables.regDomains[temp_reg_domain].channels[k].pwrLimit
+                    && !wiphy->bands[i]->channels[j].max_power)
+                {
+                    VOS_TRACE( VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_ERROR,
+                               FL("Both NV and DB.txt power limit is zero."
+                                  "Setting default value %d"),TX_POWER_DEFAULT);
+                    wiphy->bands[i]->channels[j].max_power = TX_POWER_DEFAULT;
+                }
+
+                else if (!gnvEFSTable->halnv.tables.regDomains[temp_reg_domain].channels[k].pwrLimit
+                         || !wiphy->bands[i]->channels[j].max_power)
+                {
+                        wiphy->bands[i]->channels[j].max_power =
+                           MAX(gnvEFSTable->halnv.tables.regDomains[temp_reg_domain].channels[k].pwrLimit,
+                              ((wiphy->bands[i]->channels[j].max_power)));
+                }
+
                 // Cap the TX power by the power limits specified in NV for the regdomain
-                if (gnvEFSTable->halnv.tables.regDomains[temp_reg_domain].channels[k].pwrLimit)
+                if (gnvEFSTable->halnv.tables.regDomains[temp_reg_domain].channels[k].pwrLimit
+                    && wiphy->bands[i]->channels[j].max_power)
                 {
                     wiphy->bands[i]->channels[j].max_power =
                            MIN(gnvEFSTable->halnv.tables.regDomains[temp_reg_domain].channels[k].pwrLimit,
@@ -3925,8 +3756,26 @@ int vos_update_nv_table_from_wiphy_band(void *hdd_ctx,
                         channels[k].enabled = NV_CHANNEL_ENABLE;
                 }
 
+                if (!gnvEFSTable->halnv.tables.regDomains[temp_reg_domain].channels[k].pwrLimit
+                    && !wiphy->bands[i]->channels[j].max_power)
+                {
+                    VOS_TRACE( VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_ERROR,
+                               FL("Both NV and DB.txt power limit is zero."
+                                  "Setting default value %d"),TX_POWER_DEFAULT);
+                    wiphy->bands[i]->channels[j].max_power = TX_POWER_DEFAULT;
+                }
+
+                else if (!gnvEFSTable->halnv.tables.regDomains[temp_reg_domain].channels[k].pwrLimit
+                         || !wiphy->bands[i]->channels[j].max_power)
+                {
+                        wiphy->bands[i]->channels[j].max_power =
+                           MAX(gnvEFSTable->halnv.tables.regDomains[temp_reg_domain].channels[k].pwrLimit,
+                              ((wiphy->bands[i]->channels[j].max_power)));
+                }
+
                 // Cap the TX power by the power limits specified in NV for the regdomain
-                if (gnvEFSTable->halnv.tables.regDomains[temp_reg_domain].channels[k].pwrLimit)
+                if (gnvEFSTable->halnv.tables.regDomains[temp_reg_domain].channels[k].pwrLimit
+                    && wiphy->bands[i]->channels[j].max_power)
                 {
                     wiphy->bands[i]->channels[j].max_power =
                            MIN(gnvEFSTable->halnv.tables.regDomains[temp_reg_domain].channels[k].pwrLimit,
@@ -4079,17 +3928,6 @@ int __wlan_hdd_linux_reg_notifier(struct wiphy *wiphy,
     VOS_TRACE(VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_INFO,
                "cfg80211 reg notifier callback for country for initiator %d", request->initiator);
 
-    if (TRUE == isWDresetInProgress())
-    {
-       VOS_TRACE( VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_ERROR,
-                   ("SSR is in progress") );
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3,9,0))
-       return;
-#else
-       return 0;
-#endif
-    }
-
     if (NULL == pHddCtx)
     {
        VOS_TRACE( VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_ERROR,
@@ -4101,15 +3939,18 @@ int __wlan_hdd_linux_reg_notifier(struct wiphy *wiphy,
 #endif
     }
 
+    if (vos_is_logp_in_progress(VOS_MODULE_ID_VOSS, NULL))
+    {
+       VOS_TRACE( VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_INFO,
+                   ("SSR is in progress") );
+       goto do_comp;
+    }
+
     if (WLAN_HDD_IS_UNLOAD_IN_PROGRESS(pHddCtx))
     {
        VOS_TRACE( VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_ERROR,
                    ("%s Unload is in progress"), __func__ );
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3,9,0))
-       return;
-#else
-       return 0;
-#endif
+       goto do_comp;
     }
 
     VOS_TRACE( VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_INFO,
@@ -4136,7 +3977,6 @@ int __wlan_hdd_linux_reg_notifier(struct wiphy *wiphy,
         linux_reg_cc[0] =  request->alpha2[0];
         linux_reg_cc[1] =  request->alpha2[1];
 
-        complete(&pHddCtx->linux_reg_req);
     }
 
     else if (request->initiator == NL80211_REGDOM_SET_BY_USER ||
@@ -4236,7 +4076,12 @@ int __wlan_hdd_linux_reg_notifier(struct wiphy *wiphy,
           }
        }
     }
-
+do_comp:
+    if ((request->initiator == NL80211_REGDOM_SET_BY_DRIVER) ||
+         (request->initiator == NL80211_REGDOM_SET_BY_USER))
+    {
+        complete(&pHddCtx->linux_reg_req);
+    }
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(3,9,0))
     return;
 #else
@@ -4319,7 +4164,6 @@ VOS_STATUS vos_init_wiphy_from_nv_bin(void)
 
         if (wiphy->bands[i] == NULL)
         {
-            pr_info("error: wiphy->bands[i] is NULL, i = %d\n", i);
             continue;
         }
 
@@ -4725,7 +4569,7 @@ int __wlan_hdd_crda_reg_notifier(struct wiphy *wiphy,
          {
              if (NULL == wiphy->bands[i])
              {
-                 VOS_TRACE(VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_ERROR,
+                 VOS_TRACE(VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_INFO,
                            "error: wiphy->bands[i] is NULL, i = %d", i);
                  continue;
              }

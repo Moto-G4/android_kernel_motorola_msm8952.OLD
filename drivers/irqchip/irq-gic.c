@@ -2,7 +2,7 @@
  *  linux/arch/arm/common/gic.c
  *
  *  Copyright (C) 2002 ARM Limited, All Rights Reserved.
- *  Copyright (c) 2014, The Linux Foundation. All rights reserved.
+ *  Copyright (c) 2014-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -44,12 +44,23 @@
 #include <linux/irqchip/arm-gic.h>
 #include <linux/syscore_ops.h>
 #include <linux/msm_rtb.h>
+#include <linux/htc_debug_tools.h>
 
+#include <asm/cputype.h>
 #include <asm/irq.h>
 #include <asm/exception.h>
 #include <asm/smp_plat.h>
 
 #include "irqchip.h"
+#ifdef CONFIG_HTC_POWER_DEBUG
+#define GIC_SPI_START 32
+#define EE0_KRAIT_HLOS_SPMI_PERIPH_IRQ (GIC_SPI_START + 190)
+#define TLMM_MSM_SUMMARY_IRQ (GIC_SPI_START + 208)
+#endif
+
+#ifdef CONFIG_HTC_DEBUG_WATCHDOG
+#include <linux/htc_debug_tools.h>
+#endif
 
 union gic_base {
 	void __iomem *common_base;
@@ -82,6 +93,7 @@ struct gic_chip_data {
 static DEFINE_RAW_SPINLOCK(irq_controller_lock);
 
 #ifdef CONFIG_CPU_PM
+static bool skip_cluster_collapse_activites;
 static unsigned int saved_dist_ctrl, saved_cpu_ctrl;
 #endif
 
@@ -209,6 +221,9 @@ static void gic_unmask_irq(struct irq_data *d)
 
 static void gic_disable_irq(struct irq_data *d)
 {
+	/* don't lazy-disable PPIs */
+	if (gic_irq(d) < 32)
+		gic_mask_irq(d);
 	if (gic_arch_extn.irq_disable)
 		gic_arch_extn.irq_disable(d);
 }
@@ -267,6 +282,21 @@ void gic_show_pending_irq(void)
 	}
 }
 
+bool gic_is_any_irq_pending(void)
+{
+	struct gic_chip_data *gic = &gic_data[0];
+	void __iomem *cpu_base = gic_data_cpu_base(gic);
+	int val;
+
+	val = readl_relaxed_no_log(cpu_base + GIC_CPU_HIGHPRI);
+	val &= GIC_INVL_INTERRUPT_MASK;
+	if (val == GIC_INVL_INTERRUPT_MASK)
+		return 0;
+	else
+		return 1;
+}
+EXPORT_SYMBOL(gic_is_any_irq_pending);
+
 static void gic_show_resume_irq(struct gic_chip_data *gic)
 {
 	unsigned int i;
@@ -293,14 +323,16 @@ static void gic_show_resume_irq(struct gic_chip_data *gic)
 
 		if (desc == NULL)
 			name = "stray irq";
-		else {
-			desc->wakeup_irqs++;
-			if (desc->action && desc->action->name)
-				name = desc->action->name;
-		}
+		else if (desc->action && desc->action->name)
+			name = desc->action->name;
 
 		pr_warning("%s: %d triggered %s\n", __func__,
 					i + gic->irq_offset, name);
+#ifdef CONFIG_HTC_POWER_DEBUG
+                if (EE0_KRAIT_HLOS_SPMI_PERIPH_IRQ != i + gic->irq_offset)
+                        if (TLMM_MSM_SUMMARY_IRQ != i + gic->irq_offset)
+                                pr_info("[WAKEUP] Resume caused by gic-%d\n", i + gic->irq_offset);
+#endif
 	}
 }
 
@@ -476,17 +508,32 @@ static asmlinkage void __exception_irq_entry gic_handle_irq(struct pt_regs *regs
 		irqnr = irqstat & ~0x1c00;
 
 		if (likely(irqnr > 15 && irqnr < 1021)) {
+#if defined(CONFIG_HTC_DEBUG_WATCHDOG)
+			
+			if (irqnr == 20 && smp_processor_id() == 4) {
+				unsigned long long timestamp = sched_clock();
+				htc_debug_watchdog_check_pet(timestamp);
+			}
+#endif 
 			irqnr = irq_find_mapping(gic->domain, irqnr);
-			handle_IRQ(irqnr, regs);
+#if defined(CONFIG_HTC_DEBUG_RTB)
+			uncached_logk_pc(LOGK_IRQ, (void *)(uintptr_t)htc_debug_get_sched_clock_ms(), (void *)(uintptr_t)irqnr);
+#else
 			uncached_logk(LOGK_IRQ, (void *)(uintptr_t)irqnr);
+#endif 
+			handle_IRQ(irqnr, regs);
 			continue;
 		}
 		if (irqnr < 16) {
 			writel_relaxed_no_log(irqstat, cpu_base + GIC_CPU_EOI);
+#if defined(CONFIG_HTC_DEBUG_RTB)
+			uncached_logk_pc(LOGK_IRQ, (void *)(uintptr_t)htc_debug_get_sched_clock_ms(), (void *)(uintptr_t)irqnr);
+#else
+			uncached_logk(LOGK_IRQ, (void *)(uintptr_t)irqnr);
+#endif 
 #ifdef CONFIG_SMP
 			handle_IPI(irqnr, regs);
 #endif
-			uncached_logk(LOGK_IRQ, (void *)(uintptr_t)irqnr);
 			continue;
 		}
 		break;
@@ -870,7 +917,7 @@ static void __init gic_pm_init(struct gic_chip_data *gic)
 		sizeof(u32));
 	BUG_ON(!gic->saved_ppi_conf);
 
-	if (gic == &gic_data[0])
+	if (gic == &gic_data[0] && !skip_cluster_collapse_activites)
 		cpu_pm_register_notifier(&gic_notifier_block);
 }
 #else
@@ -1022,7 +1069,9 @@ void __init gic_init_bases(unsigned int gic_nr, int irq_start,
 		}
 
 		for_each_possible_cpu(cpu) {
-			unsigned long offset = percpu_offset * cpu_logical_map(cpu);
+			u32 mpidr = cpu_logical_map(cpu);
+			u32 core_id = MPIDR_AFFINITY_LEVEL(mpidr, 0);
+			unsigned long offset = percpu_offset * core_id;
 			*per_cpu_ptr(gic->dist_base.percpu_base, cpu) = dist_base + offset;
 			*per_cpu_ptr(gic->cpu_base.percpu_base, cpu) = cpu_base + offset;
 		}
@@ -1124,9 +1173,36 @@ int __init gic_of_init(struct device_node *node, struct device_node *parent)
 	gic_cnt++;
 	return 0;
 }
+
+int __init msm_gic_of_init(struct device_node *node, struct device_node *parent)
+{
+	skip_cluster_collapse_activites = true;
+	return gic_of_init(node, parent);
+}
+
 IRQCHIP_DECLARE(cortex_a15_gic, "arm,cortex-a15-gic", gic_of_init);
 IRQCHIP_DECLARE(cortex_a9_gic, "arm,cortex-a9-gic", gic_of_init);
+IRQCHIP_DECLARE(cortex_a7_gic, "arm,cortex-a7-gic", gic_of_init);
 IRQCHIP_DECLARE(msm_8660_qgic, "qcom,msm-8660-qgic", gic_of_init);
-IRQCHIP_DECLARE(msm_qgic2, "qcom,msm-qgic2", gic_of_init);
+IRQCHIP_DECLARE(msm_qgic2, "qcom,msm-qgic2", msm_gic_of_init);
 
 #endif
+
+bool gic_is_irq_pending(unsigned int irq)
+{
+    struct irq_data *d = irq_get_irq_data(irq);
+    struct gic_chip_data *gic_data = &gic_data[0];
+    u32 mask, val;
+
+    WARN_ON(!irqs_disabled());
+    raw_spin_lock(&irq_controller_lock);
+    mask = 1 << (gic_irq(d) % 32);
+    val = readl(gic_dist_base(d) +
+            GIC_DIST_ENABLE_SET + (gic_irq(d) / 32) * 4);
+    
+    WARN_ON(val & mask);
+    val = readl(gic_dist_base(d) +
+            GIC_DIST_PENDING_SET + (gic_irq(d) / 32) * 4);
+    raw_spin_unlock(&irq_controller_lock);
+    return (bool) (val & mask);
+}

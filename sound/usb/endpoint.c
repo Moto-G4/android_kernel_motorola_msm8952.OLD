@@ -205,10 +205,9 @@ static void prepare_outbound_urb(struct snd_usb_endpoint *ep,
 			unsigned int offs = 0;
 			for (i = 0; i < ctx->packets; ++i) {
 				int counts;
-
-				if (ctx->packet_size[i])
-					counts = ctx->packet_size[i];
-				else
+				
+				
+				
 					counts = snd_usb_endpoint_next_packet_size(ep);
 
 				urb->iso_frame_desc[i].offset = offs * ep->stride;
@@ -350,12 +349,6 @@ static void snd_complete_urb(struct urb *urb)
 	struct snd_usb_endpoint *ep = ctx->ep;
 	int err;
 
-	/*
-	 * Add this dev state check to avoid to call invalid ctx which is
-	 * free during disconnetion handler.
-	 */
-	if (urb->dev->state == USB_STATE_NOTATTACHED)
-		return;
 	if (unlikely(urb->status == -ENOENT ||		/* unlinked */
 		     urb->status == -ENODEV ||		/* device removed */
 		     urb->status == -ECONNRESET ||	/* unlinked */
@@ -693,7 +686,7 @@ static int data_ep_set_params(struct snd_usb_endpoint *ep,
 		if (!u->urb->transfer_buffer)
 			goto out_of_memory;
 		u->urb->pipe = ep->pipe;
-		u->urb->transfer_flags = URB_NO_TRANSFER_DMA_MAP;
+		u->urb->transfer_flags = URB_ISO_ASAP |URB_NO_TRANSFER_DMA_MAP;
 		u->urb->interval = 1 << ep->datainterval;
 		u->urb->context = u;
 		u->urb->complete = snd_complete_urb;
@@ -732,7 +725,7 @@ static int sync_ep_set_params(struct snd_usb_endpoint *ep,
 		u->urb->transfer_dma = ep->sync_dma + i * 4;
 		u->urb->transfer_buffer_length = 4;
 		u->urb->pipe = ep->pipe;
-		u->urb->transfer_flags = URB_NO_TRANSFER_DMA_MAP;
+		u->urb->transfer_flags = URB_ISO_ASAP | URB_NO_TRANSFER_DMA_MAP;
 		u->urb->number_of_packets = 1;
 		u->urb->interval = 1 << ep->syncinterval;
 		u->urb->context = u;
@@ -963,19 +956,30 @@ int snd_usb_endpoint_deactivate(struct snd_usb_endpoint *ep)
 }
 
 /**
+ * snd_usb_endpoint_release: Tear down an snd_usb_endpoint
+ *
+ * @ep: the endpoint to release
+ *
+ * This function does not care for the endpoint's use count but will tear
+ * down all the streaming URBs immediately.
+ */
+void snd_usb_endpoint_release(struct snd_usb_endpoint *ep)
+{
+	release_urbs(ep, 1);
+}
+
+/**
  * snd_usb_endpoint_free: Free the resources of an snd_usb_endpoint
  *
  * @ep: the list header of the endpoint to free
  *
- * This function does not care for the endpoint's use count but will tear
- * down all the streaming URBs immediately and free all resources.
+ * This free all resources of the given ep.
  */
 void snd_usb_endpoint_free(struct list_head *head)
 {
 	struct snd_usb_endpoint *ep;
 
 	ep = list_entry(head, struct snd_usb_endpoint, list);
-	release_urbs(ep, 1);
 	kfree(ep);
 }
 

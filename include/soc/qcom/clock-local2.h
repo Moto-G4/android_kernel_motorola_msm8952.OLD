@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -24,6 +24,7 @@
 
 /**
  * @freq_hz: output rate
+ * @src_freq: source freq for dynamic pll. For fixed plls, set to 0.
  * @src_clk: source clock for freq_hz
  * @m_val: M value corresponding to freq_hz
  * @n_val: N value corresponding to freq_hz
@@ -33,6 +34,7 @@
  */
 struct clk_freq_tbl {
 	unsigned long	freq_hz;
+	unsigned long	src_freq;
 	struct clk	*src_clk;
 	u32	m_val;
 	u32	n_val;
@@ -43,6 +45,7 @@ struct clk_freq_tbl {
 
 #define FREQ_END	(ULONG_MAX-1)
 #define F_END { .freq_hz = FREQ_END }
+#define	FIXED_CLK_SRC	0
 
 /*
  * Generic clock-definition struct and macros
@@ -54,6 +57,7 @@ struct clk_freq_tbl {
  * @freq_tbl: frequency table for this RCG
  * @current_freq: current RCG frequency
  * @c: generic clock data
+ * @non_local_children: set if RCG has at least one branch owned by a diff EE
  * @base: pointer to base address of ioremapped registers.
  */
 struct rcg_clk {
@@ -65,6 +69,7 @@ struct rcg_clk {
 	struct clk_freq_tbl *current_freq;
 	struct clk	c;
 
+	bool non_local_children;
 	void *const __iomem *base;
 };
 
@@ -85,6 +90,9 @@ extern struct clk_freq_tbl rcg_dummy_freq;
  * @cur_div: current branch divider value
  * @max_div: maximum branch divider value (if zero, no divider exists)
  * @halt_check: halt checking type
+ * @toggle_memory: toggle memory during enable/disable if true
+ * @no_halt_check_on_disable: When set, do not check status bit during
+ *			      clk_disable().
  * @base: pointer to base address of ioremapped registers.
  */
 struct branch_clk {
@@ -96,6 +104,8 @@ struct branch_clk {
 	u32 cur_div;
 	u32 max_div;
 	const u32 halt_check;
+	bool toggle_memory;
+	bool no_halt_check_on_disable;
 	void *const __iomem *base;
 };
 
@@ -215,6 +225,8 @@ extern struct clk_ops clk_ops_rcg_hdmi;
 extern struct clk_ops clk_ops_rcg_edp;
 extern struct clk_ops clk_ops_byte;
 extern struct clk_ops clk_ops_pixel;
+extern struct clk_ops clk_ops_byte_multiparent;
+extern struct clk_ops clk_ops_pixel_multiparent;
 extern struct clk_ops clk_ops_edppixel;
 extern struct clk_ops clk_ops_gate;
 extern struct clk_ops clk_ops_rst;

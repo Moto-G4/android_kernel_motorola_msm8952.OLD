@@ -379,6 +379,7 @@ extern void irq_cpu_online(void);
 extern void irq_cpu_offline(void);
 extern int irq_set_affinity_locked(struct irq_data *data,
 				   const struct cpumask *cpumask, bool force);
+extern void irq_affinity_notify(struct work_struct *work);
 
 #if defined(CONFIG_SMP) && defined(CONFIG_GENERIC_PENDING_IRQ)
 void irq_move_irq(struct irq_data *data);
@@ -752,6 +753,10 @@ static inline void irq_gc_unlock(struct irq_chip_generic *gc)
 #else
 static inline void irq_gc_lock(struct irq_chip_generic *gc) { }
 static inline void irq_gc_unlock(struct irq_chip_generic *gc) { }
+#endif
+
+#ifdef CONFIG_HTC_POWER_DEBUG
+void htc_show_interrupts(void);
 #endif
 
 #endif /* _LINUX_IRQ_H */

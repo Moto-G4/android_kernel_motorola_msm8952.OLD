@@ -174,6 +174,8 @@ config DEBUG_KERNEL
 	  Say Y here if you are developing drivers or trying to debug and
 	  identify kernel problems.
 
+source "lib/Kconfig.kasan"
+
 config DEBUG_SHIRQ
 	bool "Debug shared IRQ handlers"
 	depends on DEBUG_KERNEL
@@ -284,6 +286,17 @@ config PANIC_ON_OOPS_VALUE
 	range 0 1
 	default 0 if !PANIC_ON_OOPS
 	default 1 if PANIC_ON_OOPS
+
+config PANIC_ON_RECURSIVE_FAULT
+	bool "Panic on recursive faults during task exit"
+	help
+	  Panic upon the detection of a recursive fault during task exit,
+	  rather than putting the task into an uninterruptible sleep.
+	  This is particularly useful for debugging system hangs in
+	  scenarios where the task experiencing the fault is critical
+	  for system operation, rendering the system inoperable.
+
+	  Say N if unsure.
 
 config DETECT_HUNG_TASK
 	bool "Detect Hung Tasks"
@@ -1611,33 +1624,16 @@ config PANIC_ON_DATA_CORRUPTION
 	 recoverable data corruption scenarios to system-halting panics,
 	 for easier detection and debug.
 
-config SOFTLOCKUP_WATCHDOG_TEST
-       bool "To test softlockup watchdog"
-       depends on LOCKUP_DETECTOR && DEBUG_FS
-       default n
-       help
-         This option provides a kernel debugfs item that can be used
-         to test softlockup watchdog reset. This option is not useful
-         for distributions or general kernels, but only for kernel
-         developers working on architecture code for test purpose.
-
-         Say N if you are unsure.
-
-config LOCKUP_IPI_CALL_WDT
-       bool "Trigger Watchdog Reset when Softlockup on IPI Call"
-       depends on LOCKUP_DETECTOR
-       help
-         Say Y here to enable the kernel to trigger watchdog reset when it
-         detects softlockup happens during current cpu is waiting for ipi replying
-         from other CPUs.
-
-         Original softlockup logs for ipi call hang issue can't provide
-         the backtrace on other CPUs. Since some machine may provide
-         ramdump when watchdog happens, we can leverage it to find out the
-         the other cpus' backtrace by initiating a watchdog reset
-         when this kind of softlockup occurs.
-
-         Say N if unsure.
+config MEMTEST
+	bool "Memtest"
+	---help---
+	  This option adds a kernel parameter 'memtest', which allows memtest
+	  to be set.
+	        memtest=0, mean disabled; -- default
+	        memtest=1, mean do 1 test pattern;
+	        ...
+	        memtest=17, mean do 17 test patterns.
+	  If you are unsure how to answer this question, answer N.
 
 source "samples/Kconfig"
 

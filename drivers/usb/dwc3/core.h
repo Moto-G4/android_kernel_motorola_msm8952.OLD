@@ -47,6 +47,7 @@
 #include <linux/mm.h>
 #include <linux/debugfs.h>
 #include <linux/hrtimer.h>
+#include <linux/wait.h>
 
 #include <linux/usb/ch9.h>
 #include <linux/usb/gadget.h>
@@ -54,7 +55,7 @@
 #include "dwc3_otg.h"
 
 /* Global constants */
-#define DWC3_EP0_BOUNCE_SIZE	512
+#define DWC3_EP0_BOUNCE_SIZE	2048
 #define DWC3_ENDPOINTS_NUM	32
 #define DWC3_XHCI_RESOURCES_NUM	2
 
@@ -197,6 +198,10 @@
 /* Global User Control Register */
 #define DWC3_GUCTL_REFCLKPER (0x3FF << 22)
 
+/* Host waits for DTCT value before timeout. Recommended to be POR value */
+#define DWC3_GUCTL_DTCT(n) ((n) << 9)
+#define DWC3_GUCTL_DTCT_MASK (2 << 9)
+
 /* Global Debug LTSSM Register */
 #define DWC3_GDBGLTSSM_LINKSTATE_MASK	(0xF << 22)
 
@@ -216,6 +221,10 @@
 /* Global TX Fifo Size Register */
 #define DWC3_GTXFIFOSIZ_TXFDEF(n)	((n) & 0xffff)
 #define DWC3_GTXFIFOSIZ_TXFSTADDR(n)	((n) & 0xffff0000)
+
+/* Global Event Size Registers */
+#define DWC3_GEVNTSIZ_INTMASK		(1 << 31)
+#define DWC3_GEVNTSIZ_SIZE(n)		((n) & 0xffff)
 
 /* Global HWPARAMS1 Register */
 #define DWC3_GHWPARAMS1_EN_PWROPT(n)	(((n) & (3 << 24)) >> 24)
@@ -261,6 +270,9 @@
 #define DWC3_DCTL_HIRD_THRES(n)	(((n) << 24) & DWC3_DCTL_HIRD_THRES_MASK)
 
 #define DWC3_DCTL_APPL1RES	(1 << 23)
+
+#define DWC3_DCTL_LPM_NYET_THRES_MASK	(0x0f << 20)
+#define DWC3_DCTL_LPM_NYET_THRES(n)	((n) << 20)
 
 /* These apply for core versions 1.87a and earlier */
 #define DWC3_DCTL_TRGTULST_MASK		(0x0f << 17)
@@ -492,7 +504,7 @@ struct dwc3_ep_events {
 #define DWC3_EP_DIRECTION_TX	true
 #define DWC3_EP_DIRECTION_RX	false
 
-#define DWC3_TRB_NUM		1024
+#define DWC3_TRB_NUM		128
 #define DWC3_TRB_MASK		(DWC3_TRB_NUM - 1)
 
 /**
@@ -726,6 +738,7 @@ struct dwc3_scratchpad_array {
 #define DWC3_CORE_PM_RESUME_EVENT			6
 #define DWC3_CONTROLLER_POST_INITIALIZATION_EVENT	7
 #define DWC3_CONTROLLER_CONNDONE_EVENT			8
+#define DWC3_CONTROLLER_NOTIFY_OTG_EVENT		9
 
 #define MAX_INTR_STATS				10
 /**
@@ -784,12 +797,15 @@ struct dwc3_scratchpad_array {
  *	during disconnect and set it after device is configured.
  * @usb3_u1u2_disable: if true, disable U1U2 low power modes in Superspeed mode.
  * @hird_thresh: value to configure in DCTL[HIRD_Thresh]
+ * @lpm_nyet_thresh: value to configure in DCTL[LPM_NYET_Thresh]
  * @in_lpm: if 1, indicates that the controller is in low power mode (no clocks)
  * @irq: irq number
+ * @irq_cnt: total irq count
  * @bh: tasklet which handles the interrupt
  * @bh_completion_time: time taken for taklet completion
  * @bh_handled_evt_cnt: no. of events handled by tasklet per interrupt
  * @bh_dbg_index: index for capturing bh_completion_time and bh_handled_evt_cnt
+ * @wait_linkstate: waitqueue for waiting LINK to move into required state
  */
 struct dwc3 {
 	struct usb_ctrlrequest	*ctrl_req;
@@ -902,20 +918,24 @@ struct dwc3 {
 	bool			usb3_u1u2_disable;
 	bool			enable_bus_suspend;
 	u8			hird_thresh;
+	u8			lpm_nyet_thresh;
 	atomic_t		in_lpm;
+	bool			b_suspend;
 	struct dwc3_gadget_events	dbg_gadget_events;
 
 	/* offload IRQ handling to tasklet */
 	int			irq;
+	unsigned long		irq_cnt;
 	struct tasklet_struct	bh;
 	unsigned                bh_completion_time[MAX_INTR_STATS];
 	unsigned                bh_handled_evt_cnt[MAX_INTR_STATS];
 	unsigned                bh_dbg_index;
 	ktime_t			irq_start_time[MAX_INTR_STATS];
+	ktime_t			t_pwr_evt_irq;
 	unsigned                irq_completion_time[MAX_INTR_STATS];
 	unsigned                irq_event_count[MAX_INTR_STATS];
 	unsigned                irq_dbg_index;
-	int                     charge_enabled; /* unconditional charging */
+	wait_queue_head_t	wait_linkstate;
 };
 
 /* -------------------------------------------------------------------------- */

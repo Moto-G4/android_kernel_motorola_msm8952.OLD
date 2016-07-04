@@ -5,6 +5,9 @@
 #include <linux/types.h>
 #include <linux/ioctl.h>
 
+#define MSM_CAM_LOGSYNC_FILE_NAME "logsync"
+#define MSM_CAM_LOGSYNC_FILE_BASEDIR "camera"
+
 #define MSM_CAM_V4L2_IOCTL_NOTIFY \
 	_IOW('V', BASE_VIDIOC_PRIVATE + 30, struct msm_v4l2_event_data)
 
@@ -17,6 +20,8 @@
 #define MSM_CAM_V4L2_IOCTL_NOTIFY_ERROR \
 	_IOW('V', BASE_VIDIOC_PRIVATE + 33, struct msm_v4l2_event_data)
 
+#define MSM_CAM_V4L2_IOCTL_NOTIFY_DEBUG \
+	_IOW('V', BASE_VIDIOC_PRIVATE + 34, struct msm_v4l2_event_data)
 
 #ifdef CONFIG_COMPAT
 #define MSM_CAM_V4L2_IOCTL_NOTIFY32 \
@@ -30,6 +35,9 @@
 
 #define MSM_CAM_V4L2_IOCTL_NOTIFY_ERROR32 \
 	_IOW('V', BASE_VIDIOC_PRIVATE + 33, struct v4l2_event32)
+
+#define MSM_CAM_V4L2_IOCTL_NOTIFY_DEBUG32 \
+	_IOW('V', BASE_VIDIOC_PRIVATE + 34, struct v4l2_event32)
 
 #endif
 
@@ -55,17 +63,20 @@
 #define MSM_CAMERA_SUBDEV_SENSOR_INIT  14
 #define MSM_CAMERA_SUBDEV_OIS          15
 #define MSM_CAMERA_SUBDEV_FLASH        16
-
-#define MSM_CAMERA_SUBDEV_CCI_INTF     20
+#define MSM_CAMERA_SUBDEV_EXT          17
 
 #define MSM_MAX_CAMERA_SENSORS  5
 
 /* The below macro is defined to put an upper limit on maximum
  * number of buffer requested per stream. In case of extremely
  * large value for number of buffer due to data structure corruption
- * we return error to avoid integer overflow. This value may be
+ * we return error to avoid integer overflow. Group processing
+ * can have max of 9 groups of 8 bufs each. This value may be
  * configured in future*/
-#define MSM_CAMERA_MAX_STREAM_BUF 40
+#define MSM_CAMERA_MAX_STREAM_BUF 72
+
+/* Max batch size of processing */
+#define MSM_CAMERA_MAX_USER_BUFF_CNT 16
 
 /* featur base */
 #define MSM_CAMERA_FEATURE_BASE     0x00010000
@@ -104,6 +115,8 @@
 #define MSM_CAMERA_PRIV_SHUTDOWN   (V4L2_CID_PRIVATE_BASE + 12)
 #define MSM_CAMERA_PRIV_STREAM_INFO_SYNC \
 	(V4L2_CID_PRIVATE_BASE + 13)
+#define MSM_CAMERA_PRIV_G_SESSION_ID (V4L2_CID_PRIVATE_BASE + 14)
+#define MSM_CAMERA_PRIV_CMD_MAX  20
 
 /* data.status - success */
 #define MSM_CAMERA_CMD_SUCESS      0x00000001
@@ -113,6 +126,7 @@
 #define MSM_CAMERA_ERR_EVT_BASE 0x00010000
 #define MSM_CAMERA_ERR_CMD_FAIL (MSM_CAMERA_ERR_EVT_BASE + 1)
 #define MSM_CAMERA_ERR_MAPPING  (MSM_CAMERA_ERR_EVT_BASE + 2)
+#define MSM_CAMERA_ERR_DEVICE_BUSY  (MSM_CAMERA_ERR_EVT_BASE + 3)
 
 /* The msm_v4l2_event_data structure should match the
  * v4l2_event.u.data field.
@@ -196,6 +210,11 @@ enum smmu_attach_mode {
 
 struct msm_camera_smmu_attach_type {
 	enum smmu_attach_mode attach;
+};
+
+struct msm_camera_user_buf_cont_t {
+	unsigned int buf_cnt;
+	unsigned int buf_idx[MSM_CAMERA_MAX_USER_BUFF_CNT];
 };
 
 #endif /* __LINUX_MSMB_CAMERA_H */

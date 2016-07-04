@@ -1,4 +1,4 @@
-/* Copyright (c) 2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2014-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -50,28 +50,20 @@ static int mhi_ssr_notify_cb(struct notifier_block *nb,
 	case SUBSYS_BEFORE_SHUTDOWN:
 		mhi_log(MHI_MSG_INFO,
 			"Received Subsystem event BEFORE_SHUTDOWN\n");
-		atomic_set(&mhi_dev_ctxt->flags.pending_ssr, 1);
-		mhi_notify_clients(mhi_dev_ctxt, MHI_CB_MHI_DISABLED);
+		mhi_log(MHI_MSG_INFO,
+			"Not notifying clients\n");
 		break;
 	case SUBSYS_AFTER_SHUTDOWN:
 		mhi_log(MHI_MSG_INFO,
 			"Received Subsystem event AFTER_SHUTDOWN\n");
-		ret_val = mhi_init_state_transition(mhi_dev_ctxt,
-				STATE_TRANSITION_LINK_DOWN);
-		if (MHI_STATUS_SUCCESS != ret_val) {
-			mhi_log(MHI_MSG_CRITICAL,
-				"Failed to init state transition, to %d\n",
-				STATE_TRANSITION_LINK_DOWN);
-		}
+		mhi_log(MHI_MSG_INFO,
+			"Not notifying clients\n");
 		break;
 	case SUBSYS_RAMDUMP_NOTIFICATION:
 		mhi_log(MHI_MSG_INFO,
 			"Received Subsystem event RAMDUMP\n");
-		ret_val = init_mhi_base_state(mhi_dev_ctxt);
-		if (MHI_STATUS_SUCCESS != ret_val)
-			mhi_log(MHI_MSG_CRITICAL,
-				"Failed to transition to base state %d.\n",
-				ret_val);
+		mhi_log(MHI_MSG_INFO,
+			"Not notifying clients\n");
 		break;
 	default:
 		mhi_log(MHI_MSG_INFO,
@@ -145,10 +137,10 @@ void mhi_notify_client(struct mhi_client_handle *client_handle,
 	if (NULL != client_handle &&
 	    NULL != client_handle->client_info.mhi_client_cb) {
 		result.user_data = client_handle->user_data;
-		cb_info.chan = client_handle->chan;
+		cb_info.chan = client_handle->chan_info.chan_nr;
 		cb_info.result = &result;
 		mhi_log(MHI_MSG_INFO, "Calling back for chan %d, reason %d\n",
-				client_handle->chan, reason);
+					cb_info.chan, reason);
 		client_handle->client_info.mhi_client_cb(&cb_info);
 	}
 }

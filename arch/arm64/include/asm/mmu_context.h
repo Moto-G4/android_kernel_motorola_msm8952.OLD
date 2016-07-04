@@ -30,6 +30,11 @@
 
 #define MAX_ASID_BITS	16
 
+#if defined(CONFIG_HTC_DEBUG_RTB)
+#include <linux/htc_debug_tools.h>
+#include <linux/msm_rtb.h>
+#endif
+
 extern unsigned int cpu_last_asid;
 
 void __init_new_context(struct task_struct *tsk, struct mm_struct *mm);
@@ -43,6 +48,9 @@ static inline void contextidr_thread_switch(struct task_struct *next)
 	"	isb"
 	:
 	: "r" (task_pid_nr(next)));
+#if defined(CONFIG_HTC_DEBUG_RTB)
+	uncached_logk_pc(LOGK_CTXID, (void *)(uintptr_t)htc_debug_get_sched_clock_ms(), (void *)(uintptr_t)(task_pid_nr(next)));
+#endif
 }
 #else
 static inline void contextidr_thread_switch(struct task_struct *next)
@@ -150,6 +158,15 @@ switch_mm(struct mm_struct *prev, struct mm_struct *next,
 	  struct task_struct *tsk)
 {
 	unsigned int cpu = smp_processor_id();
+
+	/*
+	 * init_mm.pgd does not contain any user mappings and it is always
+	 * active for kernel addresses in TTBR1. Just set the reserved TTBR0.
+	 */
+	if (next == &init_mm) {
+		cpu_set_reserved_ttbr0();
+		return;
+	}
 
 	if (!cpumask_test_and_set_cpu(cpu, mm_cpumask(next)) || prev != next)
 		check_and_switch_context(next, tsk);

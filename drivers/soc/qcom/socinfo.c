@@ -59,6 +59,7 @@ enum {
 	HW_PLATFORM_QRD	= 11,
 	HW_PLATFORM_HRD	= 13,
 	HW_PLATFORM_DTV	= 14,
+	HW_PLATFORM_RCM	= 21,
 	HW_PLATFORM_STP = 23,
 	HW_PLATFORM_SBC = 24,
 	HW_PLATFORM_INVALID
@@ -73,6 +74,7 @@ const char *hw_platform[] = {
 	[HW_PLATFORM_SVLTE_SURF] = "SLVTE_SURF",
 	[HW_PLATFORM_MTP_MDM] = "MDM_MTP_NO_DISPLAY",
 	[HW_PLATFORM_MTP] = "MTP",
+	[HW_PLATFORM_RCM] = "RCM",
 	[HW_PLATFORM_LIQUID] = "Liquid",
 	[HW_PLATFORM_DRAGON] = "Dragon",
 	[HW_PLATFORM_QRD] = "QRD",
@@ -189,6 +191,13 @@ struct socinfo_v9 {
 	uint32_t foundry_id;
 };
 
+struct socinfo_v10 {
+	struct socinfo_v9 v9;
+
+	/* only valid when format==10*/
+	uint32_t serial_number;
+};
+
 static union {
 	struct socinfo_v1 v1;
 	struct socinfo_v2 v2;
@@ -199,6 +208,7 @@ static union {
 	struct socinfo_v7 v7;
 	struct socinfo_v8 v8;
 	struct socinfo_v9 v9;
+	struct socinfo_v10 v10;
 } *socinfo;
 
 static struct msm_soc_info cpu_of_id[] = {
@@ -446,6 +456,7 @@ static struct msm_soc_info cpu_of_id[] = {
 	[191] = {FSM_CPU_9900, "FSM9900"},
 	[192] = {FSM_CPU_9900, "FSM9900"},
 	[193] = {FSM_CPU_9900, "FSM9900"},
+	[276] = {FSM_CPU_9900, "FSM9900"},
 
 	/* 8916 IDs */
 	[206] = {MSM_CPU_8916, "MSM8916"},
@@ -466,16 +477,17 @@ static struct msm_soc_info cpu_of_id[] = {
 
 	/* 8909 IDs */
 	[245] = {MSM_CPU_8909, "MSM8909"},
-	[260] = {MSM_CPU_8909, "MDMFERRUM"},
-	[261] = {MSM_CPU_8909, "MDMFERRUM"},
-	[262] = {MSM_CPU_8909, "MDMFERRUM"},
+	[258] = {MSM_CPU_8909, "MSM8209"},
+	[259] = {MSM_CPU_8909, "MSM8208"},
+	[265] = {MSM_CPU_8909, "APQ8009"},
+	[275] = {MSM_CPU_8909, "MSM8609"},
 
-	/* ZIRC IDs */
-	[234] = {MSM_CPU_ZIRC, "MSMZIRC"},
-	[235] = {MSM_CPU_ZIRC, "MSMZIRC"},
-	[236] = {MSM_CPU_ZIRC, "MSMZIRC"},
-	[237] = {MSM_CPU_ZIRC, "MSMZIRC"},
-	[238] = {MSM_CPU_ZIRC, "MSMZIRC"},
+	/* 9640 IDs */
+	[234] = {MSM_CPU_9640, "MDM9640"},
+	[235] = {MSM_CPU_9640, "MDM9640"},
+	[236] = {MSM_CPU_9640, "MDM9640"},
+	[237] = {MSM_CPU_9640, "MDM9640"},
+	[238] = {MSM_CPU_9640, "MDM9640"},
 
 	/* 8994 ID */
 	[207] = {MSM_CPU_8994, "MSM8994"},
@@ -490,14 +502,31 @@ static struct msm_soc_info cpu_of_id[] = {
 	[256] = {FSM_CPU_9010, "FSM9010"},
 	[257] = {FSM_CPU_9010, "FSM9010"},
 
-	/* Tellurium ID */
-	[264] = {MSM_CPU_TELLURIUM, "MSMTELLURIUM"},
+	/* 8952 ID */
+	[264] = {MSM_CPU_8952, "MSM8952"},
+	[289] = {MSM_CPU_8952, "APQ8052"},
+
+	/* 8976 ID */
+	[278] = {MSM_CPU_8976, "MSM8976"},
+	[277] = {MSM_CPU_8976, "APQ8076"},
+	/* 8956 ID */
+	[266] = {MSM_CPU_8956, "MSM8956"},
+	[274] = {MSM_CPU_8956, "APQ8056"},
 
 	/* 8929 IDs */
 	[268] = {MSM_CPU_8929, "MSM8929"},
 	[269] = {MSM_CPU_8929, "MSM8629"},
 	[270] = {MSM_CPU_8929, "MSM8229"},
 	[271] = {MSM_CPU_8929, "APQ8029"},
+
+	/* FERMIUM ID */
+	[290] = {MSM_CPU_FERMIUM, "MDMFERMIUM"},
+
+	/* Californium IDs */
+	[283] = {MSM_CPU_CALIFORNIUM, "MDMCALIFORNIUM"},
+	[284] = {MSM_CPU_CALIFORNIUM, "MDMCALIFORNIUM"},
+	[285] = {MSM_CPU_CALIFORNIUM, "MDMCALIFORNIUM"},
+	[286] = {MSM_CPU_CALIFORNIUM, "MDMCALIFORNIUM"},
 
 	/* Uninitialized IDs are not known to run Linux.
 	   MSM_CPU_UNKNOWN is set to 0 to ensure these IDs are
@@ -997,9 +1026,17 @@ static void * __init setup_dummy_socinfo(void)
 		dummy_socinfo.id = 233;
 		strlcpy(dummy_socinfo.build_id, "msm8936 - ",
 			sizeof(dummy_socinfo.build_id));
-	} else if (early_machine_is_msmzirc()) {
+	} else if (early_machine_is_mdm9640()) {
 		dummy_socinfo.id = 238;
-		strlcpy(dummy_socinfo.build_id, "msmzirc - ",
+		strlcpy(dummy_socinfo.build_id, "mdm9640 - ",
+			sizeof(dummy_socinfo.build_id));
+	} else if (early_machine_is_mdmcalifornium()) {
+		dummy_socinfo.id = 286;
+		strlcpy(dummy_socinfo.build_id, "mdmcalifornium - ",
+			sizeof(dummy_socinfo.build_id));
+	} else if (early_machine_is_msmvpipa()) {
+		dummy_socinfo.id = 238;
+		strlcpy(dummy_socinfo.build_id, "msmvpipa - ",
 			sizeof(dummy_socinfo.build_id));
 	} else if (early_machine_is_msm8994()) {
 		dummy_socinfo.id = 207;
@@ -1009,13 +1046,25 @@ static void * __init setup_dummy_socinfo(void)
 		dummy_socinfo.id = 251;
 		strlcpy(dummy_socinfo.build_id, "msm8992 - ",
 			sizeof(dummy_socinfo.build_id));
-	} else if (early_machine_is_msmtellurium()) {
+	} else if (early_machine_is_msm8976()) {
+		dummy_socinfo.id = 278;
+		strlcpy(dummy_socinfo.build_id, "msm8976 - ",
+			sizeof(dummy_socinfo.build_id));
+	} else if (early_machine_is_msm8956()) {
+		dummy_socinfo.id = 266;
+		strlcpy(dummy_socinfo.build_id, "msm8956 - ",
+			sizeof(dummy_socinfo.build_id));
+	} else if (early_machine_is_msm8952()) {
 		dummy_socinfo.id = 264;
-		strlcpy(dummy_socinfo.build_id, "msmtellurium - ",
+		strlcpy(dummy_socinfo.build_id, "msm8952 - ",
 			sizeof(dummy_socinfo.build_id));
 	} else if (early_machine_is_msm8929()) {
 		dummy_socinfo.id = 268;
 		strlcpy(dummy_socinfo.build_id, "msm8929 - ",
+			sizeof(dummy_socinfo.build_id));
+	} else if (early_machine_is_mdmfermium()) {
+		dummy_socinfo.id = 290;
+		strlcpy(dummy_socinfo.build_id, "mdmfermium - ",
 			sizeof(dummy_socinfo.build_id));
 	}
 
@@ -1035,6 +1084,7 @@ static void __init populate_soc_sysfs_files(struct device *msm_soc_device)
 	device_create_file(msm_soc_device, &select_image);
 
 	switch (legacy_format) {
+	case 10:
 	case 9:
 		 device_create_file(msm_soc_device,
 					&msm_soc_attr_foundry_id);
@@ -1210,6 +1260,22 @@ static void socinfo_print(void)
 			socinfo->v7.pmic_die_revision,
 			socinfo->v9.foundry_id);
 		break;
+	case 10:
+		pr_info("%s: v%u, id=%u, ver=%u.%u, raw_id=%u, raw_ver=%u, hw_plat=%u, hw_plat_ver=%u\n accessory_chip=%u, hw_plat_subtype=%u, pmic_model=%u, pmic_die_revision=%u foundry_id=%u serial_number=%u\n",
+			__func__,
+			socinfo->v1.format,
+			socinfo->v1.id,
+			SOCINFO_VERSION_MAJOR(socinfo->v1.version),
+			SOCINFO_VERSION_MINOR(socinfo->v1.version),
+			socinfo->v2.raw_id, socinfo->v2.raw_version,
+			socinfo->v3.hw_platform, socinfo->v4.platform_version,
+			socinfo->v5.accessory_chip,
+			socinfo->v6.hw_platform_subtype,
+			socinfo->v7.pmic_model,
+			socinfo->v7.pmic_die_revision,
+			socinfo->v9.foundry_id,
+			socinfo->v10.serial_number);
+		break;
 
 	default:
 		pr_err("%s: Unknown format found\n", __func__);
@@ -1220,63 +1286,13 @@ static void socinfo_print(void)
 int __init socinfo_init(void)
 {
 	static bool socinfo_init_done;
+	unsigned size;
 
 	if (socinfo_init_done)
 		return 0;
 
-	socinfo = smem_find(SMEM_HW_SW_BUILD_ID,
-				sizeof(struct socinfo_v9),
-				0,
-				SMEM_ANY_HOST_FLAG);
-
-	if (IS_ERR_OR_NULL(socinfo))
-		socinfo = smem_find(SMEM_HW_SW_BUILD_ID,
-				sizeof(struct socinfo_v8),
-				0,
-				SMEM_ANY_HOST_FLAG);
-
-	if (IS_ERR_OR_NULL(socinfo))
-		socinfo = smem_find(SMEM_HW_SW_BUILD_ID,
-				sizeof(struct socinfo_v7),
-				0,
-				SMEM_ANY_HOST_FLAG);
-
-	if (IS_ERR_OR_NULL(socinfo))
-		socinfo = smem_find(SMEM_HW_SW_BUILD_ID,
-				sizeof(struct socinfo_v6),
-				0,
-				SMEM_ANY_HOST_FLAG);
-
-	if (IS_ERR_OR_NULL(socinfo))
-		socinfo = smem_find(SMEM_HW_SW_BUILD_ID,
-				sizeof(struct socinfo_v5),
-				0,
-				SMEM_ANY_HOST_FLAG);
-
-	if (IS_ERR_OR_NULL(socinfo))
-		socinfo = smem_find(SMEM_HW_SW_BUILD_ID,
-				sizeof(struct socinfo_v4),
-				0,
-				SMEM_ANY_HOST_FLAG);
-
-	if (IS_ERR_OR_NULL(socinfo))
-		socinfo = smem_find(SMEM_HW_SW_BUILD_ID,
-				sizeof(struct socinfo_v3),
-				0,
-				SMEM_ANY_HOST_FLAG);
-
-	if (IS_ERR_OR_NULL(socinfo))
-		socinfo = smem_find(SMEM_HW_SW_BUILD_ID,
-				sizeof(struct socinfo_v2),
-				0,
-				SMEM_ANY_HOST_FLAG);
-
-	if (IS_ERR_OR_NULL(socinfo))
-		socinfo = smem_find(SMEM_HW_SW_BUILD_ID,
-				sizeof(struct socinfo_v1),
-				0,
-				SMEM_ANY_HOST_FLAG);
-
+	socinfo = smem_get_entry(SMEM_HW_SW_BUILD_ID, &size, 0,
+				 SMEM_ANY_HOST_FLAG);
 	if (IS_ERR_OR_NULL(socinfo)) {
 		pr_warn("%s: Can't find SMEM_HW_SW_BUILD_ID; falling back on dummy values.\n",
 				__func__);

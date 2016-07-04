@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2010-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -25,7 +25,9 @@
 #define SCM_SVC_DCVS			0xD
 #define SCM_SVC_ES			0x10
 #define SCM_SVC_HDCP			0x11
+#define SCM_SVC_MDTP			0x12
 #define SCM_SVC_LMH			0x13
+#define SCM_SVC_SMMU_PROGRAM		0x15
 #define SCM_SVC_TZSCHEDULER		0xFC
 
 #define SCM_FUSE_READ			0x7
@@ -109,6 +111,8 @@ extern s32 scm_call_atomic2(u32 svc, u32 cmd, u32 arg1, u32 arg2);
 extern s32 scm_call_atomic3(u32 svc, u32 cmd, u32 arg1, u32 arg2, u32 arg3);
 extern s32 scm_call_atomic4_3(u32 svc, u32 cmd, u32 arg1, u32 arg2, u32 arg3,
 		u32 arg4, u32 *ret1, u32 *ret2);
+extern s32 scm_call_atomic5_3(u32 svc, u32 cmd, u32 arg1, u32 arg2, u32 arg3,
+		u32 arg4, u32 arg5, u32 *ret1, u32 *ret2, u32 *ret3);
 
 #define SCM_VERSION(major, minor) (((major) << 16) | ((minor) & 0xFF))
 
@@ -119,10 +123,6 @@ extern bool is_scm_armv8(void);
 extern int scm_restore_sec_cfg(u32 device_id, u32 spare, int *scm_ret);
 extern u32 scm_io_read(phys_addr_t address);
 extern int scm_io_write(phys_addr_t address, u32 val);
-
-#ifndef CONFIG_ARM64
-extern void scm_inv_range(unsigned long start, unsigned long end);
-#endif
 
 #define SCM_HDCP_MAX_REG 5
 
@@ -183,6 +183,12 @@ static inline s32 scm_call_atomic4_3(u32 svc, u32 cmd, u32 arg1, u32 arg2,
 	return 0;
 }
 
+static inline s32 scm_call_atomic5_3(u32 svc, u32 cmd, u32 arg1, u32 arg2,
+	u32 arg3, u32 arg4, u32 arg5, u32 *ret1, u32 *ret2, u32 *ret3)
+{
+	return 0;
+}
+
 static inline u32 scm_get_version(void)
 {
 	return 0;
@@ -217,11 +223,5 @@ static inline int scm_io_write(phys_addr_t address, u32 val)
 {
 	return 0;
 }
-
-static inline void scm_inv_range(unsigned long start, unsigned long end)
-{
-	return;
-}
-
 #endif
 #endif

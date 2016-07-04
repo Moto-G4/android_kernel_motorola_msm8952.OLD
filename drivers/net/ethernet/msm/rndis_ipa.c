@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -36,7 +36,7 @@
 #define IPV4_HDR_NAME "rndis_eth_ipv4"
 #define IPV6_HDR_NAME "rndis_eth_ipv6"
 #define IPA_TO_USB_CLIENT IPA_CLIENT_USB_CONS
-#define INACTIVITY_MSEC_DELAY 1000
+#define INACTIVITY_MSEC_DELAY 100
 #define DEFAULT_OUTSTANDING_HIGH 64
 #define DEFAULT_OUTSTANDING_LOW 32
 #define DEBUGFS_TEMP_BUF_SIZE 4
@@ -600,13 +600,6 @@ int rndis_ipa_init(struct ipa_usb_init_params *params)
 		goto fail_debugfs;
 	RNDIS_IPA_DEBUG("debugfs entries were created\n");
 
-	result = rndis_ipa_create_rm_resource(rndis_ipa_ctx);
-	if (result) {
-		RNDIS_IPA_ERROR("fail on RM create\n");
-		goto fail_create_rm;
-	}
-	RNDIS_IPA_DEBUG("RM resource was created\n");
-
 	result = rndis_ipa_set_device_ethernet_addr(net->dev_addr,
 			rndis_ipa_ctx->device_ethaddr);
 	if (result) {
@@ -661,8 +654,6 @@ fail_register_tx:
 	rndis_ipa_hdrs_destroy(rndis_ipa_ctx);
 fail_set_device_ethernet:
 fail_hdrs_cfg:
-	rndis_ipa_destory_rm_resource(rndis_ipa_ctx);
-fail_create_rm:
 	rndis_ipa_debugfs_destroy(rndis_ipa_ctx);
 fail_debugfs:
 fail_netdev_priv:
@@ -739,6 +730,14 @@ int rndis_ipa_pipe_connect_notify(u32 usb_to_ipa_hdl,
 				ipa_to_usb_hdl);
 		return -EINVAL;
 	}
+
+	result = rndis_ipa_create_rm_resource(rndis_ipa_ctx);
+	if (result) {
+		RNDIS_IPA_ERROR("fail on RM create\n");
+		goto fail_create_rm;
+	}
+	RNDIS_IPA_DEBUG("RM resource was created\n");
+
 	rndis_ipa_ctx->ipa_to_usb_hdl = ipa_to_usb_hdl;
 	rndis_ipa_ctx->usb_to_ipa_hdl = usb_to_ipa_hdl;
 	if (max_packet_number_to_dev > 1)
@@ -780,7 +779,11 @@ int rndis_ipa_pipe_connect_notify(u32 usb_to_ipa_hdl,
 
 	RNDIS_IPA_LOG_EXIT();
 
+	return 0;
+
 fail:
+	rndis_ipa_destory_rm_resource(rndis_ipa_ctx);
+fail_create_rm:
 	return result;
 }
 EXPORT_SYMBOL(rndis_ipa_pipe_connect_notify);
@@ -974,6 +977,7 @@ static void rndis_ipa_tx_complete_notify(void *private,
 
 	atomic_dec(&rndis_ipa_ctx->outstanding_pkts);
 	if (netif_queue_stopped(rndis_ipa_ctx->net) &&
+		netif_carrier_ok(rndis_ipa_ctx->net) &&
 		atomic_read(&rndis_ipa_ctx->outstanding_pkts) <
 					(rndis_ipa_ctx->outstanding_low)) {
 		RNDIS_IPA_DEBUG("outstanding low boundary reached (%d)n",
@@ -1084,6 +1088,7 @@ static void rndis_ipa_packet_receive_notify(void *private,
 	struct sk_buff *skb = (struct sk_buff *)data;
 	struct rndis_ipa_dev *rndis_ipa_ctx = private;
 	int result;
+	unsigned int packet_len = skb->len;
 
 	RNDIS_IPA_DEBUG("packet Rx, len=%d\n",
 		skb->len);
@@ -1116,11 +1121,11 @@ static void rndis_ipa_packet_receive_notify(void *private,
 		return;
 	}
 
-	result = netif_rx(skb);
+	result = netif_rx_ni(skb);
 	if (result)
-		RNDIS_IPA_ERROR("fail on netif_rx\n");
+		RNDIS_IPA_ERROR("fail on netif_rx_ni\n");
 	rndis_ipa_ctx->net->stats.rx_packets++;
-	rndis_ipa_ctx->net->stats.rx_bytes += skb->len;
+	rndis_ipa_ctx->net->stats.rx_bytes += packet_len;
 
 	return;
 }
@@ -1179,6 +1184,7 @@ int rndis_ipa_pipe_disconnect_notify(void *private)
 	struct rndis_ipa_dev *rndis_ipa_ctx = private;
 	int next_state;
 	int outstanding_dropped_pkts;
+	int retval;
 
 	RNDIS_IPA_LOG_ENTRY();
 
@@ -1210,6 +1216,13 @@ int rndis_ipa_pipe_disconnect_notify(void *private)
 
 	rndis_ipa_ctx->net->stats.tx_dropped += outstanding_dropped_pkts;
 	atomic_set(&rndis_ipa_ctx->outstanding_pkts, 0);
+
+	retval = rndis_ipa_destory_rm_resource(rndis_ipa_ctx);
+	if (retval) {
+		RNDIS_IPA_ERROR("Fail to clean RM\n");
+		return retval;
+	}
+	RNDIS_IPA_DEBUG("RM was successfully destroyed\n");
 
 	rndis_ipa_ctx->state = next_state;
 	RNDIS_IPA_STATE_DEBUG(rndis_ipa_ctx);
@@ -1276,18 +1289,11 @@ void rndis_ipa_cleanup(void *private)
 	RNDIS_IPA_DEBUG("deregister Tx/Rx properties was successful\n");
 
 	retval = rndis_ipa_hdrs_destroy(rndis_ipa_ctx);
-	if (retval) {
-		RNDIS_IPA_ERROR("Fail to remove headers\n");
-		return;
-	}
-	RNDIS_IPA_DEBUG("RNDIS headers were removed from IPA core\n");
-
-	retval = rndis_ipa_destory_rm_resource(rndis_ipa_ctx);
-	if (retval) {
-		RNDIS_IPA_ERROR("Fail to clean RM\n");
-		return;
-	}
-	RNDIS_IPA_DEBUG("RM was successfully destroyed\n");
+	if (retval)
+		RNDIS_IPA_ERROR(
+			"Failed removing RNDIS headers from IPA core. Continue anyway\n");
+	else
+		RNDIS_IPA_DEBUG("RNDIS headers were removed from IPA core\n");
 
 	rndis_ipa_debugfs_destroy(rndis_ipa_ctx);
 	RNDIS_IPA_DEBUG("debugfs remove was done\n");
@@ -1687,18 +1693,18 @@ static int rndis_ipa_create_rm_resource(struct rndis_ipa_dev *rndis_ipa_ctx)
 
 	RNDIS_IPA_DEBUG("rm_it client was created\n");
 
-	result = ipa_rm_add_dependency(DRV_RESOURCE_ID,
+	result = ipa_rm_add_dependency_sync(DRV_RESOURCE_ID,
 				IPA_RM_RESOURCE_USB_CONS);
 
-	if (result)
+	if (result && result != -EINPROGRESS)
 		RNDIS_IPA_ERROR("unable to add RNDIS/USB dependency (%d)\n",
 				result);
 	else
 		RNDIS_IPA_DEBUG("RNDIS/USB dependency was set\n");
 
-	result = ipa_rm_add_dependency(IPA_RM_RESOURCE_USB_PROD,
+	result = ipa_rm_add_dependency_sync(IPA_RM_RESOURCE_USB_PROD,
 				IPA_RM_RESOURCE_APPS_CONS);
-	if (result)
+	if (result && result != -EINPROGRESS)
 		RNDIS_IPA_ERROR("unable to add USB/APPS dependency (%d)\n",
 				result);
 	else
@@ -1731,7 +1737,7 @@ static int rndis_ipa_destory_rm_resource(struct rndis_ipa_dev *rndis_ipa_ctx)
 
 	result = ipa_rm_delete_dependency(DRV_RESOURCE_ID,
 			IPA_RM_RESOURCE_USB_CONS);
-	if (result) {
+	if (result && result != -EINPROGRESS) {
 		RNDIS_IPA_ERROR("Fail to delete RNDIS/USB dependency\n");
 		goto bail;
 	}

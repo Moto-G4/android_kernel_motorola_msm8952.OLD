@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -49,17 +49,20 @@
 		vdd-io-supply = <&pma8084_l13>;
 	};
 
-	qcom,mdss_dsi@fd922800 {
-		vdd-supply = <&pma8084_l22>;
-		vddio-supply = <&pma8084_l12>;
+	qcom,mdss_dsi@0 {
 		vdda-supply = <&pma8084_l2>;
-		qcom,platform-reset-gpio = <&pma8084_gpios 20 0>;
-	};
+		vddio-supply = <&pma8084_l12>;
 
-	qcom,mdss_dsi@fd922e00 {
-		vdd-supply = <&pma8084_l22>;
-		vddio-supply = <&pma8084_l12>;
-		vdda-supply = <&pma8084_l2>;
+		qcom,mdss_dsi_ctrl0@fd922800 {
+			vdd-supply = <&pma8084_l22>;
+			vddio-supply = <&pma8084_l12>;
+			qcom,platform-reset-gpio = <&pma8084_gpios 20 0>;
+		};
+
+		qcom,mdss_dsi_ctrl1@fd922e00 {
+			vdd-supply = <&pma8084_l22>;
+			vddio-supply = <&pma8084_l12>;
+		};
 	};
 
 	qcom,hdmi_tx@fd922100 {
@@ -227,4 +230,10 @@
 
 &dsi_generic_720p_cmd {
 	qcom,mdss-dsi-bl-pmic-bank-select = <3>;
+	qcom,panel-supply-entries = <&dsi_panel_pwr_supply>;
+};
+
+&usb3 {
+	vdda33-supply = <&pma8084_l24>;
+	vdda18-supply = <&pma8084_l6>;
 };

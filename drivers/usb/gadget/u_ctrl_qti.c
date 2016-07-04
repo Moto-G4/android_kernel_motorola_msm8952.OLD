@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2013-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -15,6 +15,7 @@
 #include <linux/poll.h>
 #include <linux/usb/usb_ctrl_qti.h>
 
+#include <soc/qcom/bam_dmux.h>
 
 #include "u_rmnet.h"
 #include "usb_gadget_xport.h"
@@ -54,6 +55,11 @@ struct qti_ctrl_port {
 
 	spinlock_t	lock;
 	enum gadget_type	gtype;
+	unsigned	host_to_modem;
+	unsigned	copied_to_modem;
+	unsigned	copied_from_modem;
+	unsigned	modem_to_host;
+	unsigned	drp_cpkt_cnt;
 };
 static struct qti_ctrl_port *ctrl_port[NR_QTI_PORTS];
 
@@ -137,12 +143,14 @@ static int gqti_ctrl_send_cpkt_tomodem(u8 portno, void *buf, size_t len)
 	if (!port->is_open) {
 		pr_debug("rmnet file handler %p(index=%d) is not open",
 		       port, port->index);
+		port->drp_cpkt_cnt++;
 		spin_unlock_irqrestore(&port->lock, flags);
 		free_rmnet_ctrl_pkt(cpkt);
 		return 0;
 	}
 
 	list_add_tail(&cpkt->list, &port->cpkt_req_q);
+	port->host_to_modem++;
 	spin_unlock_irqrestore(&port->lock, flags);
 
 	/* wakeup read thread */
@@ -169,7 +177,6 @@ gqti_ctrl_notify_modem(void *gptr, u8 portno, int val)
 	qti_ctrl_queue_notify(port);
 }
 
-#define BAM_DMUX_CHANNEL_ID 8
 int gqti_ctrl_connect(void *gr, u8 port_num, unsigned intf,
 			enum transport_type dxport, enum gadget_type gtype)
 {
@@ -192,22 +199,21 @@ int gqti_ctrl_connect(void *gr, u8 port_num, unsigned intf,
 
 	spin_lock_irqsave(&port->lock, flags);
 	port->gtype = gtype;
-	if (dxport == USB_GADGET_XPORT_BAM) {
+	if (dxport == USB_GADGET_XPORT_BAM ||
+			dxport == USB_GADGET_XPORT_BAM_DMUX) {
 		/*
-		 * BAM-DMUX data transport is used for RMNET
+		 * BAM-DMUX data transport is used for RMNET and DPL
 		 * on some targets where IPA is not available.
 		 * Set endpoint type as BAM-DMUX and interface
 		 * id as channel number. This information is
 		 * sent to user space via EP_LOOKUP ioctl.
 		 *
-		 * The BAM data transport driver supports only
-		 * 1 BAM channel and the number is fixed so far
-		 * on all targets. This number needs to be same
-		 * as the bam_ch_ids defined in u_bam.c.
-		 *
 		 */
+
 		port->ep_type = DATA_EP_TYPE_BAM_DMUX;
-		port->intf = BAM_DMUX_CHANNEL_ID;
+		port->intf = (gtype == USB_GADGET_RMNET) ?
+			BAM_DMUX_USB_RMNET_0 :
+			BAM_DMUX_USB_DPL;
 		port->ipa_prod_idx = 0;
 		port->ipa_cons_idx = 0;
 	} else {
@@ -231,6 +237,11 @@ int gqti_ctrl_connect(void *gr, u8 port_num, unsigned intf,
 		pr_err("%s(): Port is used without gtype.\n", __func__);
 		return -ENODEV;
 	}
+	port->host_to_modem = 0;
+	port->copied_to_modem = 0;
+	port->copied_from_modem = 0;
+	port->modem_to_host = 0;
+	port->drp_cpkt_cnt = 0;
 
 	spin_unlock_irqrestore(&port->lock, flags);
 
@@ -264,31 +275,26 @@ void gqti_ctrl_disconnect(void *gr, u8 port_num)
 		return;
 	}
 
-	if (gr && (port->gtype == USB_GADGET_RMNET)) {
-		g_rmnet = (struct grmnet *)gr;
-		g_rmnet->disconnect(port->port_usb);
-	} else if (gr && (port->gtype == USB_GADGET_DPL)) {
-		g_dpl = (struct gqdss *)gr;
-		gqti_ctrl_send_cpkt_tomodem(DPL_QTI_CTRL_PORT_NO, NULL, 0);
-	} else {
-		pr_err("%s(): unrecognized gadget type(%d).\n",
-					__func__, port->gtype);
-		return;
-	}
-
 	atomic_set(&port->connected, 0);
 	atomic_set(&port->line_state, 0);
 	spin_lock_irqsave(&port->lock, flags);
+
+	/* reset ipa eps to -1 */
+	port->ipa_prod_idx = -1;
+	port->ipa_cons_idx = -1;
 	port->port_usb = NULL;
 
-	if (g_rmnet) {
+	if (gr && port->gtype == USB_GADGET_RMNET) {
+		g_rmnet = (struct grmnet *)gr;
 		g_rmnet->send_encap_cmd = NULL;
 		g_rmnet->notify_modem = NULL;
-	}
-
-	if (g_dpl) {
+	} else if (gr && port->gtype == USB_GADGET_DPL) {
+		g_dpl = (struct gqdss *)gr;
 		g_dpl->send_encap_cmd = NULL;
 		g_dpl->notify_modem = NULL;
+	} else {
+		pr_err("%s(): unrecognized gadget type(%d).\n",
+					__func__, port->gtype);
 	}
 
 	while (!list_empty(&port->cpkt_req_q)) {
@@ -428,6 +434,7 @@ qti_ctrl_read(struct file *fp, char __user *buf, size_t count, loff_t *pos)
 	} else {
 		pr_debug("%s: copied %d bytes to user\n", __func__, cpkt->len);
 		ret = cpkt->len;
+		port->copied_to_modem++;
 	}
 
 	free_rmnet_ctrl_pkt(cpkt);
@@ -484,6 +491,7 @@ qti_ctrl_write(struct file *fp, const char __user *buf, size_t count,
 		qti_ctrl_unlock(&port->write_excl);
 		return -EFAULT;
 	}
+	port->copied_from_modem++;
 
 	spin_lock_irqsave(&port->lock, flags);
 	if (port && port->port_usb) {
@@ -501,6 +509,7 @@ qti_ctrl_write(struct file *fp, const char __user *buf, size_t count,
 							kbuf, count);
 			if (ret)
 				pr_err("%d failed to send ctrl packet.\n", ret);
+			port->modem_to_host++;
 		} else {
 			pr_err("send_cpkt_response callback is NULL\n");
 			ret = -EINVAL;
@@ -576,6 +585,12 @@ static long qti_ctrl_ioctl(struct file *fp, unsigned cmd, unsigned long arg)
 			break;
 		}
 
+		if (port->ipa_prod_idx == -1 && port->ipa_cons_idx == -1) {
+			pr_err("EP_LOOKUP failed - ipa pipes were not updated\n");
+			ret = -EAGAIN;
+			break;
+		}
+
 		info.ph_ep_info.ep_type = port->ep_type;
 		info.ph_ep_info.peripheral_iface_id = port->intf;
 		info.ipa_ep_pair.cons_pipe_num = port->ipa_cons_idx;
@@ -630,6 +645,92 @@ static unsigned int qti_ctrl_poll(struct file *file, poll_table *wait)
 	spin_unlock_irqrestore(&port->lock, flags);
 
 	return mask;
+}
+
+static int qti_ctrl_read_stats(struct seq_file *s, void *unused)
+{
+	struct qti_ctrl_port	*port = s->private;
+	unsigned long		flags;
+	int			i;
+
+	for (i = 0; i < NR_QTI_PORTS; i++) {
+		port = ctrl_port[i];
+		if (!port)
+			continue;
+		spin_lock_irqsave(&port->lock, flags);
+
+		seq_printf(s, "\n#PORT:%d port: %p\n", i, port);
+		seq_printf(s, "name:			%s\n", port->name);
+		seq_printf(s, "host_to_modem:		%d\n",
+				port->host_to_modem);
+		seq_printf(s, "copied_to_modem:	%d\n",
+				port->copied_to_modem);
+		seq_printf(s, "copied_from_modem:	%d\n",
+				port->copied_from_modem);
+		seq_printf(s, "modem_to_host:		%d\n",
+				port->modem_to_host);
+		seq_printf(s, "cpkt_drp_cnt:		%d\n",
+				port->drp_cpkt_cnt);
+		spin_unlock_irqrestore(&port->lock, flags);
+	}
+
+	return 0;
+}
+
+static int qti_ctrl_stats_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, qti_ctrl_read_stats, inode->i_private);
+}
+
+static ssize_t qti_ctrl_reset_stats(struct file *file,
+	const char __user *buf, size_t count, loff_t *ppos)
+{
+	struct seq_file *s = file->private_data;
+	struct qti_ctrl_port *port = s->private;
+	int                     i;
+	unsigned long           flags;
+
+	for (i = 0; i < NR_QTI_PORTS; i++) {
+		port = ctrl_port[i];
+		if (!port)
+			continue;
+
+		spin_lock_irqsave(&port->lock, flags);
+		port->host_to_modem = 0;
+		port->copied_to_modem = 0;
+		port->copied_from_modem = 0;
+		port->modem_to_host = 0;
+		port->drp_cpkt_cnt = 0;
+		spin_unlock_irqrestore(&port->lock, flags);
+	}
+	return count;
+}
+
+const struct file_operations qti_ctrl_stats_ops = {
+	.open = qti_ctrl_stats_open,
+	.read = seq_read,
+	.write = qti_ctrl_reset_stats,
+};
+
+static struct dentry   *qti_ctrl_dent;
+static void qti_ctrl_debugfs_init(void)
+{
+	struct dentry   *qti_ctrl_dfile;
+
+	qti_ctrl_dent = debugfs_create_dir("usb_qti", 0);
+	if (IS_ERR(qti_ctrl_dent))
+		return;
+
+	qti_ctrl_dfile =
+		debugfs_create_file("status", 0444, qti_ctrl_dent, 0,
+				&qti_ctrl_stats_ops);
+	if (!qti_ctrl_dfile || IS_ERR(qti_ctrl_dfile))
+		debugfs_remove(qti_ctrl_dent);
+}
+
+static void qti_ctrl_debugfs_exit(void)
+{
+	debugfs_remove_recursive(qti_ctrl_dent);
 }
 
 /* file operations for rmnet device /dev/rmnet_ctrl */
@@ -710,6 +811,7 @@ static int __init gqti_ctrl_init(void)
 			goto fail_init;
 		}
 	}
+	qti_ctrl_debugfs_init();
 
 	return ret;
 
@@ -732,5 +834,6 @@ static void __exit gqti_ctrl_cleanup(void)
 		kfree(ctrl_port[i]);
 		ctrl_port[i] = NULL;
 	}
+	qti_ctrl_debugfs_exit();
 }
 module_exit(gqti_ctrl_cleanup);

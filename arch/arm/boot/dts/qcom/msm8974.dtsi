@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -203,6 +203,7 @@
 	restart@fc4ab000 {
 		compatible = "qcom,pshold";
 		reg = <0xfc4ab000 0x4>;
+		reg-names = "pshold-base";
 	};
 
 	timer {
@@ -283,11 +284,21 @@
 	msm_vidc: qcom,vidc@fdc00000 {
 		compatible = "qcom,msm-vidc";
 		reg = <0xfdc00000 0xff000>;
+		qcom,qdss-presets = <0xfc307000 0x1000>,
+			<0xfc322000 0x1000>,
+			<0xfc319000 0x1000>,
+			<0xfc31a000 0x1000>,
+			<0xfc31b000 0x1000>,
+			<0xfc321000 0x1000>,
+			<0xfa180000 0x1000>,
+			<0xfa181000 0x1000>;
 		interrupts = <0 44 0>;
 		venus-supply = <&gdsc_venus>;
 		qcom,hfi = "venus";
 		qcom,ocmem-size = <524288>; /* 512 * 1024*/
 		qcom,max-hw-load = <1216800>; /* 3840 x 2160 @ 30 + 1080p @ 30*/
+		qcom,dcvs-min-load = <489600>; /* 1080p @ 60fps */
+		qcom,dcvs-min-mbperframe = <32400>; /* 4K */
 		clock-names = "core_clk", "iface_clk", "bus_clk", "mem_clk";
 		qcom,clock-configs = <0x3 0x0 0x0 0x0>;
 		qcom,sw-power-collapse;
@@ -1488,6 +1499,7 @@
 		compatible = "qcom,kraitbw-l2pm";
 		interrupts = <0 1 1>;
 		qcom,bytes-per-beat = <8>;
+		qcom,target-dev = <&cache>;
 	};
 
 	devfreq-cpufreq {
@@ -1564,6 +1576,8 @@
 		interrupt-names = "hs_phy_irq", "pmic_id_irq";
 
 		vbus_dwc3-supply = <&pm8941_mvs1>;
+		vdda33-supply = <&pm8941_l24>;
+		vdda18-supply = <&pm8941_l6>;
 		qcom,misc-ref = <&pm8941_misc>;
 		dwc_usb3-adc_tm = <&pm8941_adc_tm>;
 		qcom,dwc-usb3-msm-tx-fifo-size = <29696>;
@@ -1580,8 +1594,7 @@
 			compatible = "synopsys,dwc3";
 			reg = <0xf9200000 0xfc000>;
 			interrupt-parent = <&intc>;
-			interrupts = <0 131 0>, <0 179 0>;
-			interrupt-names = "irq", "otg_irq";
+			interrupts = <0 131 0>;
 			usb-phy = <&hsphy>, <&ssphy>;
 			tx-fifo-resize;
 		};
@@ -1590,6 +1603,7 @@
 	hsphy: hsphy@f92f8800 {
 		compatible = "qcom,usb-hsphy";
 		reg = <0xf92f8800 0x3ff>;
+		reg-names = "core";
 		qcom,hsphy-init = <0x00D191A4>;
 		vdd-supply = <&pm8841_s2_corner>;
 		vdda18-supply = <&pm8941_l6>;
@@ -1663,6 +1677,11 @@
 	qcom,msm-adsp-loader {
 		compatible = "qcom,adsp-loader";
 		qcom,adsp-state = <0>;
+	};
+
+	qcom,msmapr-audio {
+		compatible = "qcom,msmapr-audio";
+		qcom,apr-dest-type = "ADSP";
 	};
 
 	qcom,msm-audio-ion {
@@ -1918,6 +1937,7 @@
 		interrupts = <0 24 1>;
 		vdd_mss-supply = <&pm8841_s3>;
 		vdd_cx-supply = <&pm8841_s2_corner>;
+		vdd_cx-voltage = <7>;
 		vdd_mx-supply = <&pm8841_s1>;
 		vdd_mx-uV = <1050000>;
 		vdd_pll-supply = <&pm8941_l12>;
@@ -2015,7 +2035,7 @@
 		gpios = <&msmgpio 36 0>, <&msmgpio 37 0>, <&msmgpio 38 0>, <&msmgpio 39 0>, <&msmgpio 40 0>;
 		qcom,has-48mhz-xo;
 		qcom,has-pronto-hw;
-		qcom,wcnss-pm = <11 21 1200 1 1>;
+		qcom,wcnss-pm = <11 19 1200 1 1 6>;
 	};
 
 	qcom,ocmem@fdd00000 {
@@ -2317,10 +2337,10 @@
 		qcom,limit-temp = <60>;
 		qcom,temp-hysteresis = <10>;
 		qcom,freq-step = <2>;
-		qcom,freq-control-mask = <0xf>;
+		qcom,freq-control-list = <&CPU0 &CPU1 &CPU2 &CPU3>;
 		qcom,core-limit-temp = <80>;
 		qcom,core-temp-hysteresis = <10>;
-		qcom,core-control-mask = <0xe>;
+		qcom,core-control-list = <&CPU1 &CPU2 &CPU3>;
 		qcom,hotplug-temp = <110>;
 		qcom,hotplug-temp-hysteresis = <20>;
 		qcom,cpu-sensors = "tsens_tz_sensor5", "tsens_tz_sensor6",
@@ -2328,7 +2348,7 @@
 		qcom,freq-mitigation-temp = <110>;
 		qcom,freq-mitigation-temp-hysteresis = <20>;
 		qcom,freq-mitigation-value = <960000>;
-		qcom,freq-mitigation-control-mask = <0x01>;
+		qcom,freq-mitigation-control-list = <&CPU0>;
 		qcom,vdd-restriction-temp = <5>;
 		qcom,vdd-restriction-temp-hysteresis = <10>;
 		qcom,pmic-sw-mode-temp = <85>;

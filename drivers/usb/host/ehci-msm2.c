@@ -1,6 +1,6 @@
 /* ehci-msm2.c - HSUSB Host Controller Driver Implementation
  *
- * Copyright (c) 2008-2014, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2008-2015, The Linux Foundation. All rights reserved.
  *
  * Partly derived from ehci-fsl.c and ehci-hcd.c
  * Copyright (c) 2000-2004 by David Brownell
@@ -39,6 +39,7 @@
 #include <linux/of_gpio.h>
 #include <linux/irq.h>
 #include <linux/clk/msm-clk.h>
+#include <linux/msm-bus.h>
 
 #include <linux/usb/ulpi.h>
 #include <linux/usb/msm_hsusb_hw.h>
@@ -94,6 +95,9 @@ struct msm_hcd {
 	int					wakeup_irq;
 	void __iomem				*usb_phy_ctrl_reg;
 	struct pinctrl				*hsusb_pinctrl;
+	struct pm_qos_request			pm_qos_req_dma;
+	struct msm_bus_scale_pdata		*bus_scale_table;
+	u32					bus_perf_client;
 };
 
 static inline struct msm_hcd *hcd_to_mhcd(struct usb_hcd *hcd)
@@ -268,7 +272,7 @@ static int msm_ehci_config_vddcx(struct msm_hcd *mhcd, int high)
 
 	if (high)
 		min_vol = hsusb_vdd_val[VDD_MIN_OP];
-	else if (pdata && pdata->dock_connect_irq &&
+	else if (pdata->dock_connect_irq &&
 			!irq_read_line(pdata->dock_connect_irq))
 		min_vol = hsusb_vdd_val[VDD_MIN_P75];
 	else
@@ -351,7 +355,7 @@ static int msm_ehci_init_vbus(struct msm_hcd *mhcd, int init)
 	pdata = mhcd->dev->platform_data;
 
 	if (!init) {
-		if (pdata && pdata->dock_connect_irq)
+		if (pdata->dock_connect_irq)
 			free_irq(pdata->dock_connect_irq, mhcd);
 		return rc;
 	}
@@ -365,18 +369,16 @@ static int msm_ehci_init_vbus(struct msm_hcd *mhcd, int init)
 		mhcd->vbus = NULL;
 	}
 
-	if (pdata) {
-		hcd->power_budget = pdata->power_budget;
+	hcd->power_budget = pdata->power_budget;
 
-		if (pdata->dock_connect_irq) {
-			rc = request_threaded_irq(pdata->dock_connect_irq, NULL,
-					msm_ehci_dock_connect_irq,
-					IRQF_TRIGGER_FALLING |
-					IRQF_TRIGGER_RISING |
-					IRQF_ONESHOT, "msm_ehci_host", mhcd);
-			if (!rc)
-				enable_irq_wake(pdata->dock_connect_irq);
-		}
+	if (pdata->dock_connect_irq) {
+		rc = request_threaded_irq(pdata->dock_connect_irq, NULL,
+				msm_ehci_dock_connect_irq,
+				IRQF_TRIGGER_FALLING |
+				IRQF_TRIGGER_RISING |
+				IRQF_ONESHOT, "msm_ehci_host", mhcd);
+		if (!rc)
+			enable_irq_wake(pdata->dock_connect_irq);
 	}
 	return rc;
 }
@@ -575,7 +577,7 @@ static int msm_ehci_phy_reset(struct msm_hcd *mhcd)
 		return ret;
 
 	pdata = mhcd->dev->platform_data;
-	if (pdata && pdata->use_sec_phy)
+	if (pdata->use_sec_phy)
 		/* select secondary phy if offset is set for USB operation */
 		writel_relaxed(readl_relaxed(USB_PHY_CTRL2) | (1<<16),
 								USB_PHY_CTRL2);
@@ -640,7 +642,7 @@ static int msm_hsusb_reset(struct msm_hcd *mhcd)
 	writel_relaxed(0x80000000, USB_PORTSC);
 
 	pdata = mhcd->dev->platform_data;
-	if (pdata && pdata->use_sec_phy)
+	if (pdata->use_sec_phy)
 		writel_relaxed(readl_relaxed(USB_PHY_CTRL2) | (1<<16),
 								USB_PHY_CTRL2);
 
@@ -719,30 +721,22 @@ static int msm_ehci_suspend(struct msm_hcd *mhcd)
 	}
 
 	pdata = mhcd->dev->platform_data;
-	if (pdata && pdata->is_uicc) {
+	if (pdata->is_uicc) {
 		/* put the controller in non-driving mode */
 		func_ctrl = msm_ulpi_read(mhcd, ULPI_FUNC_CTRL);
 		func_ctrl &= ~ULPI_FUNC_CTRL_OPMODE_MASK;
 		func_ctrl |= ULPI_FUNC_CTRL_OPMODE_NONDRIVING;
 		msm_ulpi_write(mhcd, func_ctrl, ULPI_FUNC_CTRL);
 	}
-	/* If port is enabled wait 5ms for PHCD to come up. Reset PHY
-	 * and link if it fails to do so.
-	 * If port is not enabled set the PHCD bit and poll for it to
-	 * come up with in 500ms. Reset phy and link if it fails to do so.
+
+	/*
+	 * Set the PHCD bit, only if it is not set by the controller.
+	 * PHY may take some time or even fail to enter into low power
+	 * mode (LPM). Hence poll for 500 msec and reset the PHY and link
+	 * in failure case.
 	 */
 	portsc = readl_relaxed(USB_PORTSC);
-	if (portsc & PORT_PE) {
-
-		usleep_range(5000, 5000);
-
-		if (!(readl_relaxed(USB_PORTSC) & PORTSC_PHCD)) {
-			dev_err(mhcd->dev,
-				"Unable to suspend PHY. portsc: %8x\n",
-				readl_relaxed(USB_PORTSC));
-			goto reset_phy_and_link;
-		}
-	} else {
+	if (!(portsc & PORTSC_PHCD)) {
 		writel_relaxed(portsc | PORTSC_PHCD, USB_PORTSC);
 
 		timeout = jiffies + msecs_to_jiffies(PHY_SUSP_TIMEOUT_MSEC);
@@ -756,6 +750,9 @@ static int msm_ehci_suspend(struct msm_hcd *mhcd)
 			usleep_range(10000, 10000);
 		}
 	}
+
+	/* Suspend QUSB2 PHY */
+	usb_phy_set_suspend(hcd->phy, 1);
 
 	/*
 	 * PHY has capability to generate interrupt asynchronously in low
@@ -807,6 +804,16 @@ static int msm_ehci_suspend(struct msm_hcd *mhcd)
 		enable_irq_wake(mhcd->async_irq);
 		enable_irq(mhcd->async_irq);
 	}
+
+	if (mhcd->bus_perf_client) {
+		int ret = msm_bus_scale_client_update_request(
+						mhcd->bus_perf_client, 0);
+		if (ret)
+			dev_err(mhcd->dev, "Failed to vote for bus scaling\n");
+	}
+
+	pm_qos_update_request(&mhcd->pm_qos_req_dma, PM_QOS_DEFAULT_VALUE);
+
 	pm_relax(mhcd->dev);
 
 	dev_info(mhcd->dev, "EHCI USB in low power mode\n");
@@ -859,6 +866,18 @@ static int msm_ehci_resume(struct msm_hcd *mhcd)
 
 	pm_stay_awake(mhcd->dev);
 
+	pdata = mhcd->dev->platform_data;
+	if (pdata->pm_qos_latency)
+		pm_qos_update_request(&mhcd->pm_qos_req_dma,
+					pdata->pm_qos_latency + 1);
+
+	if (mhcd->bus_perf_client) {
+		int ret = msm_bus_scale_client_update_request(
+						mhcd->bus_perf_client, 1);
+		if (ret)
+			dev_err(mhcd->dev, "Failed to vote for bus scaling\n");
+	}
+
 	/* Vote for TCXO when waking up the phy */
 	if (mhcd->xo_clk)
 		clk_prepare_enable(mhcd->xo_clk);
@@ -873,10 +892,15 @@ static int msm_ehci_resume(struct msm_hcd *mhcd)
 	temp &= ~ULPI_STP_CTRL;
 	writel_relaxed(temp, USB_USBCMD);
 
+	/* Resume QUSB2 PHY */
+	usb_phy_set_suspend(hcd->phy, 0);
+
 	if (!(readl_relaxed(USB_PORTSC) & PORTSC_PHCD))
 		goto skip_phy_resume;
 
 	temp = readl_relaxed(USB_PORTSC) & ~PORTSC_PHCD;
+	temp &= ~PORT_RWC_BITS;
+	temp |= PORT_RESUME;
 	writel_relaxed(temp, USB_PORTSC);
 
 	timeout = jiffies + usecs_to_jiffies(PHY_RESUME_TIMEOUT_USEC);
@@ -892,8 +916,7 @@ static int msm_ehci_resume(struct msm_hcd *mhcd)
 	}
 
 skip_phy_resume:
-	pdata = mhcd->dev->platform_data;
-	if (pdata && pdata->is_uicc) {
+	if (pdata->is_uicc) {
 		/* put the controller in normal mode */
 		func_ctrl = msm_ulpi_read(mhcd, ULPI_FUNC_CTRL);
 		func_ctrl &= ~ULPI_FUNC_CTRL_OPMODE_MASK;
@@ -982,6 +1005,7 @@ static int msm_ehci_reset(struct usb_hcd *hcd)
 
 	ehci->caps = USB_CAPLENGTH;
 	hcd->has_tt = 1;
+	ehci->no_testmode_suspend = true;
 
 	retval = ehci_setup(hcd);
 	if (retval)
@@ -995,7 +1019,7 @@ static int msm_ehci_reset(struct usb_hcd *hcd)
 	writel_relaxed(0x13, USB_USBMODE);
 
 	pdata = mhcd->dev->platform_data;
-	if (pdata && pdata->use_sec_phy)
+	if (pdata->use_sec_phy)
 		writel_relaxed(readl_relaxed(USB_PHY_CTRL2) | (1<<16),
 								USB_PHY_CTRL2);
 
@@ -1305,6 +1329,8 @@ struct msm_usb_host_platform_data *ehci_msm2_dt_to_pdata(
 					"qcom,ext-hub-reset-gpio", 0);
 	pdata->is_uicc = of_property_read_bool(node,
 					"qcom,usb2-enable-uicc");
+	of_property_read_u32(node, "qcom,pm-qos-latency",
+				&pdata->pm_qos_latency);
 
 	return pdata;
 }
@@ -1352,13 +1378,13 @@ static int ehci_msm2_probe(struct platform_device *pdev)
 	if (ret)
 		goto xo_put;
 
-	if (pdev->dev.of_node) {
-		dev_dbg(&pdev->dev, "device tree enabled\n");
-		pdev->dev.platform_data = ehci_msm2_dt_to_pdata(pdev);
-	}
+	pdev->dev.platform_data = ehci_msm2_dt_to_pdata(pdev);
 
-	if (!pdev->dev.platform_data)
-		dev_dbg(&pdev->dev, "No platform data given\n");
+	if (!pdev->dev.platform_data) {
+		dev_err(&pdev->dev, "Platform data allocation failed\n");
+		ret = -ENOMEM;
+		goto xo_put;
+	}
 
 	pdata = pdev->dev.platform_data;
 
@@ -1445,7 +1471,7 @@ static int ehci_msm2_probe(struct platform_device *pdev)
 		}
 	}
 
-	if (pdata && gpio_is_valid(pdata->resume_gpio)) {
+	if (gpio_is_valid(pdata->resume_gpio)) {
 		mhcd->resume_gpio = pdata->resume_gpio;
 		ret = devm_gpio_request(&pdev->dev, mhcd->resume_gpio,
 							"hsusb_resume");
@@ -1462,7 +1488,7 @@ static int ehci_msm2_probe(struct platform_device *pdev)
 		}
 	}
 
-	if (pdata && gpio_is_valid(pdata->ext_hub_reset_gpio)) {
+	if (gpio_is_valid(pdata->ext_hub_reset_gpio)) {
 		ret = devm_gpio_request(&pdev->dev, pdata->ext_hub_reset_gpio,
 							"hsusb_reset");
 		if (ret) {
@@ -1523,12 +1549,15 @@ static int ehci_msm2_probe(struct platform_device *pdev)
 		hcd->phy = NULL;
 	}
 
-	if (hcd->phy)
+	if (hcd->phy) {
 		usb_phy_init(hcd->phy);
-	else if (pdata && pdata->use_sec_phy)
+		/* Set Host mode flag */
+		hcd->phy->flags |= PHY_HOST_MODE;
+	} else if (pdata->use_sec_phy) {
 		mhcd->usb_phy_ctrl_reg = USB_PHY_CTRL2;
-	else
+	} else {
 		mhcd->usb_phy_ctrl_reg = USB_PHY_CTRL;
+	}
 
 	ret = msm_hsusb_reset(mhcd);
 	if (ret) {
@@ -1542,17 +1571,28 @@ static int ehci_msm2_probe(struct platform_device *pdev)
 		goto vbus_deinit;
 	}
 
+	mhcd->bus_scale_table = msm_bus_cl_get_pdata(pdev);
+	if (!mhcd->bus_scale_table) {
+		dev_dbg(&pdev->dev, "bus scaling is disabled\n");
+	} else {
+		mhcd->bus_perf_client =
+			msm_bus_scale_register_client(mhcd->bus_scale_table);
+		ret = msm_bus_scale_client_update_request(
+						mhcd->bus_perf_client, 1);
+		if (ret)
+			dev_err(&pdev->dev, "Failed to vote for bus scaling\n");
+	}
+
 	pdata = mhcd->dev->platform_data;
-	if (pdata && (!pdata->dock_connect_irq ||
-				!irq_read_line(pdata->dock_connect_irq)))
+	if (!pdata->dock_connect_irq ||
+				!irq_read_line(pdata->dock_connect_irq))
 		msm_ehci_vbus_power(mhcd, 1);
 
 	/* For peripherals directly conneted to downstream port of root hub
 	 * and require to drive suspend and resume by controller driver instead
 	 * of root hub.
 	 */
-	if (pdata)
-		mhcd->ehci.no_selective_suspend = pdata->no_selective_suspend;
+	mhcd->ehci.no_selective_suspend = pdata->no_selective_suspend;
 
 	mhcd->wakeup_irq = platform_get_irq_byname(pdev, "wakeup_irq");
 	if (mhcd->wakeup_irq > 0) {
@@ -1581,7 +1621,7 @@ static int ehci_msm2_probe(struct platform_device *pdev)
 	 * runtime APIs based on root-hub's state.
 	 */
 	/* configure pmic_gpio_irq for D+ change */
-	if (pdata && pdata->pmic_gpio_dp_irq)
+	if (pdata->pmic_gpio_dp_irq)
 		mhcd->pmic_gpio_dp_irq = pdata->pmic_gpio_dp_irq;
 	if (mhcd->pmic_gpio_dp_irq) {
 		ret = request_threaded_irq(mhcd->pmic_gpio_dp_irq, NULL,
@@ -1596,6 +1636,11 @@ static int ehci_msm2_probe(struct platform_device *pdev)
 			mhcd->pmic_gpio_dp_irq = 0;
 		}
 	}
+
+	if (pdata->pm_qos_latency)
+		pm_qos_add_request(&mhcd->pm_qos_req_dma,
+			PM_QOS_CPU_DMA_LATENCY, pdata->pm_qos_latency + 1);
+
 	pm_runtime_set_active(&pdev->dev);
 	pm_runtime_enable(&pdev->dev);
 
@@ -1649,6 +1694,7 @@ static int ehci_msm2_remove(struct platform_device *pdev)
 	struct usb_hcd *hcd = platform_get_drvdata(pdev);
 	struct msm_hcd *mhcd = hcd_to_mhcd(hcd);
 	struct pinctrl_state *set_state;
+	struct msm_usb_host_platform_data *pdata;
 
 	if (mhcd->pmic_gpio_dp_irq) {
 		if (mhcd->pmic_gpio_dp_irq_enabled)
@@ -1676,8 +1722,18 @@ static int ehci_msm2_remove(struct platform_device *pdev)
 
 	usb_remove_hcd(hcd);
 
-	if (hcd->phy)
+	if (mhcd->bus_perf_client)
+		msm_bus_scale_unregister_client(mhcd->bus_perf_client);
+
+	pdata = pdev->dev.platform_data;
+	if (pdata->pm_qos_latency)
+		pm_qos_remove_request(&mhcd->pm_qos_req_dma);
+
+	if (hcd->phy) {
+		/* Clear host mode flag */
+		hcd->phy->flags &= ~PHY_HOST_MODE;
 		usb_phy_shutdown(hcd->phy);
+	}
 
 	if (mhcd->xo_clk) {
 		clk_disable_unprepare(mhcd->xo_clk);

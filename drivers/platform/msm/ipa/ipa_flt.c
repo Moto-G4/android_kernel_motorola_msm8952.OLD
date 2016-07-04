@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -273,7 +273,7 @@ static int ipa_get_flt_hw_tbl_size(enum ipa_ip_type ip, u32 *hdr_sz)
 		}
 	}
 
-	for (i = 0; i < IPA_NUM_PIPES; i++) {
+	for (i = 0; i < ipa_ctx->ipa_num_pipes; i++) {
 		tbl = &ipa_ctx->flt_tbl[i][ip];
 		rule_set_sz = 0;
 		list_for_each_entry(entry, &tbl->head_flt_rule_list, link) {
@@ -417,7 +417,7 @@ static int ipa_generate_flt_hw_tbl_common(enum ipa_ip_type ip, u8 *base,
 		}
 	}
 
-	for (i = 0; i < IPA_NUM_PIPES; i++) {
+	for (i = 0; i < ipa_ctx->ipa_num_pipes; i++) {
 		tbl = &ipa_ctx->flt_tbl[i][ip];
 		if (!list_empty(&tbl->head_flt_rule_list)) {
 			/* pipe "i" is at bit "i+1" */
@@ -526,7 +526,7 @@ proc_err:
  *
  * Returns:	0 on success, negative on failure
  */
-static int ipa_generate_flt_hw_tbl_v1(enum ipa_ip_type ip,
+static int ipa_generate_flt_hw_tbl_v1_1(enum ipa_ip_type ip,
 		struct ipa_mem_buffer *mem)
 {
 	u32 hdr_top = 0;
@@ -600,7 +600,7 @@ static void __ipa_reap_sys_flt_tbls(enum ipa_ip_type ip)
 		}
 	}
 
-	for (i = 0; i < IPA_NUM_PIPES; i++) {
+	for (i = 0; i < ipa_ctx->ipa_num_pipes; i++) {
 		tbl = &ipa_ctx->flt_tbl[i][ip];
 		if (tbl->prev_mem.phys_base) {
 			IPADBG("reaping flt tbl (prev) pipe=%d ip=%d\n", i, ip);
@@ -625,7 +625,7 @@ static void __ipa_reap_sys_flt_tbls(enum ipa_ip_type ip)
 	}
 }
 
-int __ipa_commit_flt_v1(enum ipa_ip_type ip)
+int __ipa_commit_flt_v1_1(enum ipa_ip_type ip)
 {
 	struct ipa_desc desc = { 0 };
 	struct ipa_mem_buffer *mem;
@@ -656,7 +656,7 @@ int __ipa_commit_flt_v1(enum ipa_ip_type ip)
 		goto fail_alloc_cmd;
 	}
 
-	if (ipa_generate_flt_hw_tbl_v1(ip, mem)) {
+	if (ipa_generate_flt_hw_tbl_v1_1(ip, mem)) {
 		IPAERR("fail to generate FLT HW TBL ip %d\n", ip);
 		goto fail_hw_tbl_gen;
 	}
@@ -879,7 +879,9 @@ int __ipa_commit_flt_v2(enum ipa_ip_type ip)
 
 		if (ipa_get_ep_mapping(IPA_CLIENT_APPS_WAN_CONS) == i ||
 			ipa_get_ep_mapping(IPA_CLIENT_APPS_LAN_CONS) == i ||
-			ipa_get_ep_mapping(IPA_CLIENT_APPS_CMD_PROD) == i) {
+			ipa_get_ep_mapping(IPA_CLIENT_APPS_CMD_PROD) == i ||
+			(ipa_get_ep_mapping(IPA_CLIENT_APPS_LAN_WAN_PROD) == i
+			&& ipa_ctx->modem_cfg_emb_pipe_flt)) {
 			IPADBG("skip %d\n", i);
 			continue;
 		}
@@ -904,12 +906,16 @@ int __ipa_commit_flt_v2(enum ipa_ip_type ip)
 		desc[num_desc++].type = IPA_IMM_CMD_DESC;
 	}
 
-	for (i = 11; i < IPA_NUM_PIPES; i++) {
+	for (i = 11; i < ipa_ctx->ipa_num_pipes; i++) {
 		if (ipa_ctx->skip_ep_cfg_shadow[i]) {
 			IPADBG("skip %d\n", i);
 			continue;
 		}
-
+		if (ipa_get_ep_mapping(IPA_CLIENT_APPS_LAN_WAN_PROD) == i &&
+			ipa_ctx->modem_cfg_emb_pipe_flt) {
+			IPADBG("skip %d\n", i);
+			continue;
+		}
 		if (ip == IPA_IP_v4) {
 			local_addrh = ipa_ctx->smem_restricted_bytes +
 				IPA_MEM_PART(v4_flt_ofst) +
@@ -1401,7 +1407,7 @@ int ipa_reset_flt(enum ipa_ip_type ip)
 		ipa_id_remove(id);
 	}
 
-	for (i = 0; i < IPA_NUM_PIPES; i++) {
+	for (i = 0; i < ipa_ctx->ipa_num_pipes; i++) {
 		tbl = &ipa_ctx->flt_tbl[i][ip];
 		list_for_each_entry_safe(entry, next, &tbl->head_flt_rule_list,
 				link) {

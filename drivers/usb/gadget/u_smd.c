@@ -1,7 +1,7 @@
 /*
  * u_smd.c - utilities for USB gadget serial over smd
  *
- * Copyright (c) 2011, 2013-2014, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2011, 2013-2015, The Linux Foundation. All rights reserved.
  *
  * This code also borrows from drivers/usb/gadget/u_serial.c, which is
  * Copyright (C) 2000 - 2003 Al Borchers (alborchers@steinerpoint.com)
@@ -29,6 +29,8 @@
 #include <linux/debugfs.h>
 
 #include "u_serial.h"
+
+#define EXTRA_ALLOCATION_SIZE     256	
 
 #define SMD_RX_QUEUE_SIZE		8
 #define SMD_RX_BUF_SIZE			2048
@@ -74,9 +76,6 @@ struct gsmd_port {
 	struct delayed_work	connect_work;
 	struct work_struct	disconnect_work;
 
-	/* At present, smd does not notify
-	 * control bit change info from modem
-	 */
 	struct work_struct	update_modem_ctrl_sig;
 
 #define SMD_ACM_CTRL_DTR		0x01
@@ -89,7 +88,7 @@ struct gsmd_port {
 #define SMD_ACM_CTRL_RI		0x08
 	unsigned		cbits_to_laptop;
 
-	/* pkt counters */
+	
 	unsigned long		nbytes_tomodem;
 	unsigned long		nbytes_tolaptop;
 };
@@ -100,6 +99,7 @@ static struct smd_portmaster {
 	struct platform_driver pdrv;
 } smd_ports[SMD_N_PORTS];
 static unsigned n_smd_ports;
+u32			extra_sz;
 
 static void gsmd_free_req(struct usb_ep *ep, struct usb_request *req)
 {
@@ -119,7 +119,7 @@ static void gsmd_free_requests(struct usb_ep *ep, struct list_head *head)
 }
 
 static struct usb_request *
-gsmd_alloc_req(struct usb_ep *ep, unsigned len, gfp_t flags)
+gsmd_alloc_req(struct usb_ep *ep, unsigned len, size_t extra_sz, gfp_t flags)
 {
 	struct usb_request *req;
 
@@ -130,7 +130,7 @@ gsmd_alloc_req(struct usb_ep *ep, unsigned len, gfp_t flags)
 	}
 
 	req->length = len;
-	req->buf = kmalloc(len, flags);
+	req->buf = kmalloc(len + extra_sz, flags);
 	if (!req->buf) {
 		pr_err("%s: request buf allocation failed\n", __func__);
 		usb_ep_free_request(ep, req);
@@ -141,7 +141,7 @@ gsmd_alloc_req(struct usb_ep *ep, unsigned len, gfp_t flags)
 }
 
 static int gsmd_alloc_requests(struct usb_ep *ep, struct list_head *head,
-		int num, int size,
+		int num, int size, size_t extra_sz,
 		void (*cb)(struct usb_ep *ep, struct usb_request *))
 {
 	int i;
@@ -151,7 +151,7 @@ static int gsmd_alloc_requests(struct usb_ep *ep, struct list_head *head,
 			ep, head, num, size, cb);
 
 	for (i = 0; i < num; i++) {
-		req = gsmd_alloc_req(ep, size, GFP_ATOMIC);
+		req = gsmd_alloc_req(ep, size, extra_sz, GFP_ATOMIC);
 		if (!req) {
 			pr_debug("%s: req allocated:%d\n", __func__, i);
 			return list_empty(head) ? -ENOMEM : 0;
@@ -234,7 +234,7 @@ static void gsmd_rx_push(struct work_struct *w)
 					" Unexpected Rx Status:%d\n", __func__,
 					port, port->port_num, req->status);
 		case 0:
-			/* normal completion */
+			
 			break;
 		}
 
@@ -286,7 +286,7 @@ static void gsmd_read_pending(struct gsmd_port *port)
 	if (!port || !port->pi->ch)
 		return;
 
-	/* passing null buffer discards the data */
+	
 	while ((avail = smd_read_avail(port->pi->ch)))
 		smd_read(port->pi->ch, 0, avail);
 
@@ -333,10 +333,10 @@ static void gsmd_tx_pull(struct work_struct *w)
 		ret = usb_ep_queue(in, req, GFP_KERNEL);
 		spin_lock_irq(&port->port_lock);
 		if (ret) {
-			pr_err("%s: usb ep out queue failed"
+			pr_err("%s: usb ep in queue failed"
 					"port:%p, port#%d err:%d\n",
 					__func__, port, port->port_num, ret);
-			/* could be usb disconnected */
+			
 			if (!port->port_usb)
 				gsmd_free_req(in, req);
 			else
@@ -348,7 +348,7 @@ static void gsmd_tx_pull(struct work_struct *w)
 	}
 
 tx_pull_end:
-	/* TBD: Check how code behaves on USB bus suspend */
+	
 	if (port->port_usb && smd_read_avail(port->pi->ch) && !list_empty(pool))
 		queue_work(gsmd_wq, &port->pull);
 
@@ -431,7 +431,7 @@ static void gsmd_start_io(struct gsmd_port *port)
 
 	ret = gsmd_alloc_requests(port->port_usb->out,
 				&port->read_pool,
-				SMD_RX_QUEUE_SIZE, SMD_RX_BUF_SIZE,
+				SMD_RX_QUEUE_SIZE, SMD_RX_BUF_SIZE, 0,
 				gsmd_read_complete);
 	if (ret) {
 		pr_err("%s: unable to allocate out requests\n",
@@ -441,7 +441,7 @@ static void gsmd_start_io(struct gsmd_port *port)
 
 	ret = gsmd_alloc_requests(port->port_usb->in,
 				&port->write_pool,
-				SMD_TX_QUEUE_SIZE, SMD_TX_BUF_SIZE,
+				SMD_TX_QUEUE_SIZE, SMD_TX_BUF_SIZE, extra_sz,
 				gsmd_write_complete);
 	if (ret) {
 		gsmd_free_requests(port->port_usb->out, &port->read_pool);
@@ -463,7 +463,7 @@ static unsigned int convert_uart_sigs_to_acm(unsigned uart_sig)
 {
 	unsigned int acm_sig = 0;
 
-	/* should this needs to be in calling functions ??? */
+	
 	uart_sig &= (TIOCM_RI | TIOCM_CD | TIOCM_DSR);
 
 	if (uart_sig & TIOCM_RI)
@@ -480,7 +480,7 @@ static unsigned int convert_acm_sigs_to_uart(unsigned acm_sig)
 {
 	unsigned int uart_sig = 0;
 
-	/* should this needs to be in calling functions ??? */
+	
 	acm_sig &= (SMD_ACM_CTRL_DTR | SMD_ACM_CTRL_RTS);
 
 	if (acm_sig & SMD_ACM_CTRL_DTR)
@@ -579,7 +579,7 @@ static void gsmd_connect_work(struct work_struct *w)
 				&pi->ch, port, gsmd_notify);
 	if (ret) {
 		if (ret == -EAGAIN) {
-			/* port not ready  - retry */
+			
 			pr_debug("%s: SMD port not ready - rescheduling:%s err:%d\n",
 					__func__, pi->name, ret);
 			queue_delayed_work(gsmd_wq, &port->connect_work,
@@ -630,17 +630,26 @@ static void gsmd_notify_modem(void *gptr, u8 portno, int ctrl_bits)
 
 	port->cbits_to_modem = temp;
 
-	/* usb could send control signal before smd is ready */
+	
 	if (!test_bit(CH_OPENED, &port->pi->flags))
 		return;
 
-	/* if DTR is high, update latest modem info to laptop */
+	pr_debug("%s: ctrl_tomodem:%d DTR:%d  RST:%d\n", __func__, ctrl_bits,
+		ctrl_bits & SMD_ACM_CTRL_DTR ? 1 : 0,
+		ctrl_bits & SMD_ACM_CTRL_RTS ? 1 : 0);
+	
 	if (port->cbits_to_modem & TIOCM_DTR) {
 		unsigned i;
 
 		i = smd_tiocmget(port->pi->ch);
 		port->cbits_to_laptop = convert_uart_sigs_to_acm(i);
 
+		pr_debug("%s - input control lines: cbits_to_host:%x DCD:%c DSR:%c BRK:%c RING:%c\n",
+			__func__, port->cbits_to_laptop,
+			port->cbits_to_laptop & SMD_ACM_CTRL_DCD ? '1' : '0',
+			port->cbits_to_laptop & SMD_ACM_CTRL_DSR ? '1' : '0',
+			port->cbits_to_laptop & SMD_ACM_CTRL_BRK ? '1' : '0',
+			port->cbits_to_laptop & SMD_ACM_CTRL_RI  ? '1' : '0');
 		if (gser->send_modem_ctrl_bits)
 			gser->send_modem_ctrl_bits(
 					port->port_usb,
@@ -726,7 +735,7 @@ void gsmd_disconnect(struct gserial *gser, u8 portno)
 	port->port_usb = 0;
 	spin_unlock_irqrestore(&port->port_lock, flags);
 
-	/* disable endpoints, aborting down any active I/O */
+	
 	usb_ep_disable(gser->out);
 	gser->out->driver_data = NULL;
 	usb_ep_disable(gser->in);
@@ -740,7 +749,7 @@ void gsmd_disconnect(struct gserial *gser, u8 portno)
 	spin_unlock_irqrestore(&port->port_lock, flags);
 
 	if (test_and_clear_bit(CH_OPENED, &port->pi->flags)) {
-		/* lower the dtr */
+		
 		port->cbits_to_modem = 0;
 		smd_tiocmset(port->pi->ch,
 				port->cbits_to_modem,
@@ -969,6 +978,12 @@ int gsmd_setup(struct usb_gadget *g, unsigned count)
 		return -ENOMEM;
 	}
 
+	
+	
+	
+	extra_sz = EXTRA_ALLOCATION_SIZE;
+	
+
 	for (i = 0; i < count; i++) {
 		mutex_init(&smd_ports[i].lock);
 		n_smd_ports++;
@@ -994,7 +1009,7 @@ free_smd_ports:
 
 void gsmd_cleanup(struct usb_gadget *g, unsigned count)
 {
-	/* TBD */
+	
 }
 
 int gsmd_write(u8 portno, char *buf, unsigned int size)

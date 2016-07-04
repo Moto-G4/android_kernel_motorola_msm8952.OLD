@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -106,44 +106,40 @@ error:
 	return rc;
 }
 
-void msm_jpeg_platform_p2v(struct msm_jpeg_device *pgmn_dev, struct file  *file,
-	struct ion_handle **ionhandle, int domain_num)
+void msm_jpeg_platform_p2v(int iommu_hdl, int fd)
 {
-	ion_unmap_iommu(pgmn_dev->jpeg_client, *ionhandle, domain_num, 0);
-	ion_free(pgmn_dev->jpeg_client, *ionhandle);
-	*ionhandle = NULL;
+	cam_smmu_put_phy_addr(iommu_hdl, fd);
+	return;
 }
 
 uint32_t msm_jpeg_platform_v2p(struct msm_jpeg_device *pgmn_dev, int fd,
-	uint32_t len, struct file **file_p, struct ion_handle **ionhandle,
-	int domain_num) {
+	uint32_t len, int iommu_hdl)
+{
 	dma_addr_t paddr;
 	unsigned long size;
 	int rc;
-	*ionhandle = ion_import_dma_buf(pgmn_dev->jpeg_client, fd);
-	if (IS_ERR_OR_NULL(*ionhandle))
-		return 0;
 
-	rc = ion_map_iommu(pgmn_dev->jpeg_client, *ionhandle, domain_num, 0,
-		SZ_4K, 0, &paddr, (unsigned long *)&size, 0, 0);
+	rc = cam_smmu_get_phy_addr(pgmn_dev->iommu_hdl, fd, CAM_SMMU_MAP_RW,
+			&paddr, (size_t *)&size);
 	JPEG_DBG("%s:%d] addr 0x%x size %ld", __func__, __LINE__,
 		(uint32_t)paddr, size);
 
 	if (rc < 0) {
-		JPEG_PR_ERR("%s: ion_map_iommu fd %d error %d\n", __func__, fd,
+		JPEG_PR_ERR("%s: fd %d got phy addr error %d\n", __func__, fd,
 			rc);
-		goto error1;
+		goto err_get_phy;
 	}
 
 	/* validate user input */
 	if (len > size) {
 		JPEG_PR_ERR("%s: invalid offset + len\n", __func__);
-		goto error1;
+		goto err_size;
 	}
 
 	return paddr;
-error1:
-	ion_free(pgmn_dev->jpeg_client, *ionhandle);
+err_size:
+	cam_smmu_put_phy_addr(pgmn_dev->iommu_hdl, fd);
+err_get_phy:
 	return 0;
 }
 
@@ -152,32 +148,39 @@ static void set_vbif_params(struct msm_jpeg_device *pgmn_dev,
 {
 	writel_relaxed(0x1,
 		jpeg_vbif_base + JPEG_VBIF_CLKON);
-	writel_relaxed(0x10101010,
-		jpeg_vbif_base + JPEG_VBIF_IN_RD_LIM_CONF0);
-	writel_relaxed(0x10101010,
-		jpeg_vbif_base + JPEG_VBIF_IN_RD_LIM_CONF1);
-	writel_relaxed(0x10101010,
-		jpeg_vbif_base + JPEG_VBIF_IN_RD_LIM_CONF2);
-	writel_relaxed(0x10101010,
-		jpeg_vbif_base + JPEG_VBIF_IN_WR_LIM_CONF0);
-	writel_relaxed(0x10101010,
-		jpeg_vbif_base + JPEG_VBIF_IN_WR_LIM_CONF1);
-	writel_relaxed(0x10101010,
-		jpeg_vbif_base + JPEG_VBIF_IN_WR_LIM_CONF2);
-	writel_relaxed(0x00001010,
-		jpeg_vbif_base + JPEG_VBIF_OUT_RD_LIM_CONF0);
-	writel_relaxed(0x00000110,
-		jpeg_vbif_base + JPEG_VBIF_OUT_WR_LIM_CONF0);
-	writel_relaxed(0x00000707,
-		jpeg_vbif_base + JPEG_VBIF_DDR_OUT_MAX_BURST);
+
+	if (pgmn_dev->hw_version != JPEG_8994) {
+		writel_relaxed(0x10101010,
+			jpeg_vbif_base + JPEG_VBIF_IN_RD_LIM_CONF0);
+		writel_relaxed(0x10101010,
+			jpeg_vbif_base + JPEG_VBIF_IN_RD_LIM_CONF1);
+		writel_relaxed(0x10101010,
+			jpeg_vbif_base + JPEG_VBIF_IN_RD_LIM_CONF2);
+		writel_relaxed(0x10101010,
+			jpeg_vbif_base + JPEG_VBIF_IN_WR_LIM_CONF0);
+		writel_relaxed(0x10101010,
+			jpeg_vbif_base + JPEG_VBIF_IN_WR_LIM_CONF1);
+		writel_relaxed(0x10101010,
+			jpeg_vbif_base + JPEG_VBIF_IN_WR_LIM_CONF2);
+		writel_relaxed(0x00001010,
+			jpeg_vbif_base + JPEG_VBIF_OUT_RD_LIM_CONF0);
+		writel_relaxed(0x00000110,
+			jpeg_vbif_base + JPEG_VBIF_OUT_WR_LIM_CONF0);
+		writel_relaxed(0x00000707,
+			jpeg_vbif_base + JPEG_VBIF_DDR_OUT_MAX_BURST);
+		writel_relaxed(0x00000FFF,
+			jpeg_vbif_base + JPEG_VBIF_OUT_AXI_AOOO_EN);
+		writel_relaxed(0x0FFF0FFF,
+			jpeg_vbif_base + JPEG_VBIF_OUT_AXI_AOOO);
+		writel_relaxed(0x2222,
+			jpeg_vbif_base + JPEG_VBIF_OUT_AXI_AMEMTYPE_CONF1);
+	}
+
 	writel_relaxed(0x7,
 		jpeg_vbif_base + JPEG_VBIF_OCMEM_OUT_MAX_BURST);
 	writel_relaxed(0x00000030,
 		jpeg_vbif_base + JPEG_VBIF_ARB_CTL);
-	writel_relaxed(0x00000FFF,
-		jpeg_vbif_base + JPEG_VBIF_OUT_AXI_AOOO_EN);
-	writel_relaxed(0x0FFF0FFF,
-		jpeg_vbif_base + JPEG_VBIF_OUT_AXI_AOOO);
+
 	/*FE and WE QOS configuration need to be set when
 	QOS RR arbitration is enabled*/
 	if (pgmn_dev->hw_version != JPEG_8974_V1)
@@ -189,8 +192,62 @@ static void set_vbif_params(struct msm_jpeg_device *pgmn_dev,
 
 	writel_relaxed(0x22222222,
 		jpeg_vbif_base + JPEG_VBIF_OUT_AXI_AMEMTYPE_CONF0);
-	writel_relaxed(0x2222,
-		jpeg_vbif_base + JPEG_VBIF_OUT_AXI_AMEMTYPE_CONF1);
+
+}
+
+static int32_t msm_jpeg_set_init_dt_parms(struct msm_jpeg_device *pgmn_dev,
+				const char *dt_prop_name,
+				void *base)
+{
+	struct device_node *of_node;
+	int32_t i = 0 , rc = 0;
+	uint32_t *dt_reg_settings = NULL;
+	uint32_t dt_count = 0;
+
+	of_node = pgmn_dev->pdev->dev.of_node;
+	JPEG_DBG("%s:%d E\n", __func__, __LINE__);
+
+	if (!of_get_property(of_node, dt_prop_name,
+				&dt_count)) {
+		JPEG_PR_ERR("%s: Error property does not exist\n",
+				__func__);
+		return -ENOENT;
+	}
+	if (dt_count % 8) {
+		JPEG_PR_ERR("%s: Error invalid entries\n",
+				__func__);
+		return -EINVAL;
+	}
+	dt_count /= 4;
+	if (dt_count != 0) {
+		dt_reg_settings = kzalloc(sizeof(uint32_t) * dt_count,
+			GFP_KERNEL);
+		if (!dt_reg_settings) {
+			JPEG_PR_ERR("%s:%d No memory\n",
+				__func__, __LINE__);
+			return -ENOMEM;
+		}
+		rc = of_property_read_u32_array(of_node,
+				dt_prop_name,
+				dt_reg_settings,
+				dt_count);
+		if (rc < 0) {
+			JPEG_PR_ERR("%s: No reg info\n",
+				__func__);
+			kfree(dt_reg_settings);
+			return -EINVAL;
+		}
+		for (i = 0; i < dt_count; i = i + 2) {
+			JPEG_DBG("%s:%d] %p %08x\n",
+					__func__, __LINE__,
+					base + dt_reg_settings[i],
+					dt_reg_settings[i + 1]);
+			writel_relaxed(dt_reg_settings[i + 1],
+					base + dt_reg_settings[i]);
+		}
+		kfree(dt_reg_settings);
+	}
+	return 0;
 }
 
 static struct msm_bus_vectors msm_jpeg_init_vectors[] = {
@@ -231,32 +288,22 @@ static struct msm_bus_scale_pdata msm_jpeg_bus_client_pdata = {
 #ifdef CONFIG_MSM_IOMMU
 static int msm_jpeg_attach_iommu(struct msm_jpeg_device *pgmn_dev)
 {
-	int i;
-
-	for (i = 0; i < pgmn_dev->iommu_cnt; i++) {
-		int rc = iommu_attach_device(pgmn_dev->domain,
-				pgmn_dev->iommu_ctx_arr[i]);
-		if (rc < 0) {
-			JPEG_PR_ERR("%s: Device attach failed\n", __func__);
-			return -ENODEV;
-		}
-		JPEG_DBG("%s:%d] dom 0x%lx ctx 0x%lx", __func__, __LINE__,
-				(unsigned long)pgmn_dev->domain,
-				(unsigned long)pgmn_dev->iommu_ctx_arr[i]);
+	int rc;
+	rc = cam_smmu_ops(pgmn_dev->iommu_hdl, CAM_SMMU_ATTACH);
+	if (rc < 0) {
+		JPEG_PR_ERR("%s: Device attach failed\n", __func__);
+		return -ENODEV;
 	}
+	JPEG_DBG("%s:%d] handle %d attach\n",
+			__func__, __LINE__, pgmn_dev->iommu_hdl);
 	return 0;
 }
+
 static int msm_jpeg_detach_iommu(struct msm_jpeg_device *pgmn_dev)
 {
-	int i;
-
-	for (i = 0; i < pgmn_dev->iommu_cnt; i++) {
-		JPEG_DBG("%s:%d] dom 0x%lx ctx 0x%lx", __func__, __LINE__,
-				(unsigned long)pgmn_dev->domain,
-				(unsigned long)pgmn_dev->iommu_ctx_arr[i]);
-		iommu_detach_device(pgmn_dev->domain,
-				pgmn_dev->iommu_ctx_arr[i]);
-	}
+	JPEG_DBG("%s:%d] handle %d detach\n",
+			__func__, __LINE__, pgmn_dev->iommu_hdl);
+	cam_smmu_ops(pgmn_dev->iommu_hdl, CAM_SMMU_DETACH);
 	return 0;
 }
 #else
@@ -316,8 +363,6 @@ int msm_jpeg_platform_init(struct platform_device *pdev,
 		pgmn_dev->jpeg_bus_client = 0;
 		return -EINVAL;
 	}
-	msm_bus_scale_client_update_request(
-		pgmn_dev->jpeg_bus_client, 1);
 
 	jpeg_io = request_mem_region(jpeg_mem->start,
 		resource_size(jpeg_mem), pdev->name);
@@ -372,7 +417,24 @@ int msm_jpeg_platform_init(struct platform_device *pdev,
 	if (rc < 0)
 		goto fail_iommu;
 
-	set_vbif_params(pgmn_dev, pgmn_dev->jpeg_vbif);
+	rc = msm_jpeg_set_init_dt_parms(pgmn_dev, "vbif-reg-settings",
+					pgmn_dev->jpeg_vbif);
+	if (rc == -ENOENT) {
+		JPEG_DBG("%s: No vbif-reg-settings property\n", __func__);
+		set_vbif_params(pgmn_dev, pgmn_dev->jpeg_vbif);
+	} else if (rc < 0) {
+		JPEG_PR_ERR("%s: vbif params set fail\n", __func__);
+		goto fail_vbif;
+	}
+
+	rc = msm_jpeg_set_init_dt_parms(pgmn_dev, "qos-reg-settings",
+					jpeg_base);
+	if (rc == -ENOENT) {
+		JPEG_DBG("%s: No qos-reg-settings property\n", __func__);
+	} else if (rc < 0) {
+		JPEG_PR_ERR("%s: qos params set fail\n", __func__);
+		goto fail_qos;
+	}
 
 	rc = request_irq(jpeg_irq, handler, IRQF_TRIGGER_RISING,
 		dev_name(&pdev->dev), context);
@@ -398,7 +460,7 @@ fail_request_irq:
 fail_iommu:
 	iounmap(pgmn_dev->jpeg_vbif);
 
-
+fail_qos:
 fail_vbif:
 	msm_cam_clk_enable(&pgmn_dev->pdev->dev, pgmn_dev->jpeg_clk_info,
 	pgmn_dev->jpeg_clk, pgmn_dev->num_clk, 0);
@@ -429,8 +491,12 @@ int msm_jpeg_platform_release(struct resource *mem, void *base, int irq,
 	msm_jpeg_detach_iommu(pgmn_dev);
 
 	if (pgmn_dev->jpeg_bus_client) {
-		msm_bus_scale_client_update_request(
-			pgmn_dev->jpeg_bus_client, 0);
+		if (pgmn_dev->jpeg_bus_vote) {
+			msm_bus_scale_client_update_request(
+				pgmn_dev->jpeg_bus_client, 0);
+			JPEG_BUS_UNVOTED(pgmn_dev);
+			JPEG_DBG("%s:%d] Bus unvoted\n", __func__, __LINE__);
+		}
 		msm_bus_scale_unregister_client(pgmn_dev->jpeg_bus_client);
 	}
 

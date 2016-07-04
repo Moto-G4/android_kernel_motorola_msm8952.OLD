@@ -19,18 +19,7 @@
 
 struct device;
 
-/*
- * All voltages, currents, charges, energies, time and temperatures in uV,
- * µA, µAh, µWh, seconds and tenths of degree Celsius unless otherwise
- * stated. It's driver's job to convert its raw values to units in which
- * this class operates.
- */
 
-/*
- * For systems where the charger determines the maximum battery capacity
- * the min and max fields should be used to present these values to user
- * space. Unused/unknown fields will not appear in sysfs.
- */
 
 enum {
 	POWER_SUPPLY_STATUS_UNKNOWN = 0,
@@ -82,26 +71,34 @@ enum {
 };
 
 enum {
-	POWER_SUPPLY_CHARGE_RATE_NONE = 0,
-	POWER_SUPPLY_CHARGE_RATE_NORMAL,
-	POWER_SUPPLY_CHARGE_RATE_WEAK,
-	POWER_SUPPLY_CHARGE_RATE_TURBO,
-};
-
-enum {
 	POWER_SUPPLY_SCOPE_UNKNOWN = 0,
 	POWER_SUPPLY_SCOPE_SYSTEM,
 	POWER_SUPPLY_SCOPE_DEVICE,
 };
 
+enum {
+	POWER_SUPPLY_DP_DM_UNKNOWN = 0,
+	POWER_SUPPLY_DP_DM_PREPARE = 1,
+	POWER_SUPPLY_DP_DM_UNPREPARE = 2,
+	POWER_SUPPLY_DP_DM_CONFIRMED_HVDCP3 = 3,
+	POWER_SUPPLY_DP_DM_DP_PULSE = 4,
+	POWER_SUPPLY_DP_DM_DM_PULSE = 5,
+	POWER_SUPPLY_DP_DM_DP0P6_DMF = 6,
+	POWER_SUPPLY_DP_DM_DP0P6_DM3P3 = 7,
+	POWER_SUPPLY_DP_DM_DPF_DMF = 8,
+	POWER_SUPPLY_DP_DM_DPR_DMR = 9,
+	POWER_SUPPLY_DP_DM_HVDCP3_SUPPORTED = 10,
+};
+
 enum power_supply_property {
-	/* Properties of type `int' */
+	
 	POWER_SUPPLY_PROP_STATUS = 0,
 	POWER_SUPPLY_PROP_CHARGE_TYPE,
 	POWER_SUPPLY_PROP_HEALTH,
 	POWER_SUPPLY_PROP_PRESENT,
 	POWER_SUPPLY_PROP_ONLINE,
 	POWER_SUPPLY_PROP_AUTHENTIC,
+	POWER_SUPPLY_PROP_BATTERY_CHARGING_ENABLED,
 	POWER_SUPPLY_PROP_CHARGING_ENABLED,
 	POWER_SUPPLY_PROP_TECHNOLOGY,
 	POWER_SUPPLY_PROP_CYCLE_COUNT,
@@ -112,6 +109,7 @@ enum power_supply_property {
 	POWER_SUPPLY_PROP_VOLTAGE_NOW,
 	POWER_SUPPLY_PROP_VOLTAGE_AVG,
 	POWER_SUPPLY_PROP_VOLTAGE_OCV,
+	POWER_SUPPLY_PROP_OVERLOAD, 
 	POWER_SUPPLY_PROP_INPUT_VOLTAGE_REGULATION,
 	POWER_SUPPLY_PROP_CURRENT_MAX,
 	POWER_SUPPLY_PROP_INPUT_CURRENT_MAX,
@@ -127,8 +125,9 @@ enum power_supply_property {
 	POWER_SUPPLY_PROP_CHARGE_FULL,
 	POWER_SUPPLY_PROP_CHARGE_EMPTY,
 	POWER_SUPPLY_PROP_CHARGE_NOW,
+	POWER_SUPPLY_PROP_CHARGE_NOW_RAW,
+	POWER_SUPPLY_PROP_CHARGE_NOW_ERROR,
 	POWER_SUPPLY_PROP_CHARGE_AVG,
-	POWER_SUPPLY_PROP_CHARGE_RATE,
 	POWER_SUPPLY_PROP_CHARGE_COUNTER,
 	POWER_SUPPLY_PROP_CHARGE_COUNTER_SHADOW,
 	POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT,
@@ -145,10 +144,11 @@ enum power_supply_property {
 	POWER_SUPPLY_PROP_ENERGY_AVG,
 	POWER_SUPPLY_PROP_HI_POWER,
 	POWER_SUPPLY_PROP_LOW_POWER,
-	POWER_SUPPLY_PROP_CAPACITY, /* in percents! */
-	POWER_SUPPLY_PROP_CAPACITY_ALERT_MIN, /* in percents! */
-	POWER_SUPPLY_PROP_CAPACITY_ALERT_MAX, /* in percents! */
+	POWER_SUPPLY_PROP_CAPACITY, 
+	POWER_SUPPLY_PROP_CAPACITY_ALERT_MIN, 
+	POWER_SUPPLY_PROP_CAPACITY_ALERT_MAX, 
 	POWER_SUPPLY_PROP_CAPACITY_LEVEL,
+	POWER_SUPPLY_PROP_CAPACITY_RAW,
 	POWER_SUPPLY_PROP_TEMP,
 	POWER_SUPPLY_PROP_TEMP_ALERT_MIN,
 	POWER_SUPPLY_PROP_TEMP_ALERT_MAX,
@@ -157,33 +157,43 @@ enum power_supply_property {
 	POWER_SUPPLY_PROP_TEMP_AMBIENT,
 	POWER_SUPPLY_PROP_TEMP_AMBIENT_ALERT_MIN,
 	POWER_SUPPLY_PROP_TEMP_AMBIENT_ALERT_MAX,
-	POWER_SUPPLY_PROP_TEMP_HOTSPOT,
 	POWER_SUPPLY_PROP_TIME_TO_EMPTY_NOW,
 	POWER_SUPPLY_PROP_TIME_TO_EMPTY_AVG,
 	POWER_SUPPLY_PROP_TIME_TO_FULL_NOW,
 	POWER_SUPPLY_PROP_TIME_TO_FULL_AVG,
-	POWER_SUPPLY_PROP_TYPE, /* use power_supply.type instead */
+	POWER_SUPPLY_PROP_TYPE, 
 	POWER_SUPPLY_PROP_SCOPE,
 	POWER_SUPPLY_PROP_SYSTEM_TEMP_LEVEL,
-	POWER_SUPPLY_PROP_NUM_SYSTEM_TEMP_LEVELS,
 	POWER_SUPPLY_PROP_RESISTANCE,
 	POWER_SUPPLY_PROP_RESISTANCE_CAPACITIVE,
-	/* unit is in ohms due to ID being typically in kohm range */
+	
 	POWER_SUPPLY_PROP_RESISTANCE_ID,
-	POWER_SUPPLY_PROP_TAPER_REACHED,
-	/* Local extensions */
+	POWER_SUPPLY_PROP_RESISTANCE_NOW,
+	
 	POWER_SUPPLY_PROP_USB_HC,
 	POWER_SUPPLY_PROP_USB_OTG,
 	POWER_SUPPLY_PROP_CHARGE_ENABLED,
 	POWER_SUPPLY_PROP_FLASH_CURRENT_MAX,
-	POWER_SUPPLY_PROP_ALLOW_DETECTION,
-	/* Local extensions of type int64_t */
+	POWER_SUPPLY_PROP_UPDATE_NOW,
+	POWER_SUPPLY_PROP_ESR_COUNT,
+	POWER_SUPPLY_PROP_SAFETY_TIMER_ENABLE,
+	POWER_SUPPLY_PROP_CHARGE_DONE,
+	POWER_SUPPLY_PROP_FLASH_ACTIVE,
+	POWER_SUPPLY_PROP_FORCE_TLIM,
+	POWER_SUPPLY_PROP_DP_DM,
+	POWER_SUPPLY_PROP_INPUT_CURRENT_LIMITED,
+	POWER_SUPPLY_PROP_RERUN_AICL,
+	POWER_SUPPLY_PROP_CYCLE_COUNT_ID,
+	POWER_SUPPLY_PROP_SAFETY_TIMER_EXPIRED,
+	
 	POWER_SUPPLY_PROP_CHARGE_COUNTER_EXT,
-	/* Properties of type `const char *' */
+	
 	POWER_SUPPLY_PROP_MODEL_NAME,
 	POWER_SUPPLY_PROP_MANUFACTURER,
 	POWER_SUPPLY_PROP_SERIAL_NUMBER,
 	POWER_SUPPLY_PROP_BATTERY_TYPE,
+	POWER_SUPPLY_PROP_HOT_TEMP, 
+	POWER_SUPPLY_PROP_COLD_TEMP, 
 };
 
 enum power_supply_type {
@@ -191,14 +201,16 @@ enum power_supply_type {
 	POWER_SUPPLY_TYPE_BATTERY,
 	POWER_SUPPLY_TYPE_UPS,
 	POWER_SUPPLY_TYPE_MAINS,
-	POWER_SUPPLY_TYPE_USB,		/* Standard Downstream Port */
-	POWER_SUPPLY_TYPE_USB_DCP,	/* Dedicated Charging Port */
-	POWER_SUPPLY_TYPE_USB_CDP,	/* Charging Downstream Port */
-	POWER_SUPPLY_TYPE_USB_ACA,	/* Accessory Charger Adapters */
-	POWER_SUPPLY_TYPE_WIRELESS,	/* Accessory Charger Adapters */
-	POWER_SUPPLY_TYPE_BMS,		/* Battery Monitor System */
-	POWER_SUPPLY_TYPE_USB_PARALLEL,		/* USB Parallel Path */
-	POWER_SUPPLY_TYPE_BCL,		/* Battery Current Limit */
+	POWER_SUPPLY_TYPE_USB,		
+	POWER_SUPPLY_TYPE_USB_DCP,	
+	POWER_SUPPLY_TYPE_USB_CDP,	
+	POWER_SUPPLY_TYPE_USB_ACA,	
+	POWER_SUPPLY_TYPE_USB_HVDCP,	
+	POWER_SUPPLY_TYPE_USB_HVDCP_3,	
+	POWER_SUPPLY_TYPE_WIRELESS,	
+	POWER_SUPPLY_TYPE_BMS,		
+	POWER_SUPPLY_TYPE_USB_PARALLEL,		
+	POWER_SUPPLY_TYPE_WIPOWER,		
 };
 
 union power_supply_propval {
@@ -233,10 +245,10 @@ struct power_supply {
 	void (*external_power_changed)(struct power_supply *psy);
 	void (*set_charged)(struct power_supply *psy);
 
-	/* For APM emulation, think legacy userspace. */
+	
 	int use_for_apm;
 
-	/* private */
+	
 	struct device *dev;
 	struct work_struct changed_work;
 	spinlock_t changed_lock;
@@ -260,12 +272,6 @@ struct power_supply {
 #endif
 };
 
-/*
- * This is recommended structure to specify static power supply parameters.
- * Generic one, parametrizable for different power supplies. Power supply
- * class itself does not use it, but that's what implementing most platform
- * drivers, should try reuse for consistency.
- */
 
 struct power_supply_info {
 	const char *name;
@@ -297,7 +303,7 @@ extern int power_supply_set_supply_type(struct power_supply *psy,
 extern int power_supply_set_hi_power_state(struct power_supply *psy, int value);
 extern int power_supply_set_low_power_state(struct power_supply *psy,
 							int value);
-extern int power_supply_set_allow_detection(struct power_supply *psy,
+extern int power_supply_set_dp_dm(struct power_supply *psy,
 							int value);
 extern int power_supply_is_system_supplied(void);
 extern int power_supply_register(struct device *parent,
@@ -357,7 +363,6 @@ static inline int power_supply_powers(struct power_supply *psy,
 							{ return -ENOSYS; }
 #endif
 
-/* For APM emulation, think legacy userspace. */
 extern struct class *power_supply_class;
 
 static inline bool power_supply_is_amp_property(enum power_supply_property psp)
@@ -413,4 +418,4 @@ static inline bool power_supply_is_watt_property(enum power_supply_property psp)
 	return 0;
 }
 
-#endif /* __LINUX_POWER_SUPPLY_H__ */
+#endif 

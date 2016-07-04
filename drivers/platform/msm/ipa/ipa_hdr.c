@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -170,7 +170,7 @@ static int ipa_generate_hdr_proc_ctx_hw_tbl(u32 hdr_sys_addr,
  * __ipa_commit_hdr() commits hdr to hardware
  * This function needs to be called with a locked mutex.
  */
-int __ipa_commit_hdr_v1(void)
+int __ipa_commit_hdr_v1_1(void)
 {
 	struct ipa_desc desc = { 0 };
 	struct ipa_mem_buffer *mem;
@@ -464,6 +464,17 @@ end:
 	return rc;
 }
 
+/**
+ * __ipa_commit_hdr_v2_6L() - Commits a header to the IPA HW.
+ *
+ * This function needs to be called with a locked mutex.
+ */
+int __ipa_commit_hdr_v2_6L(void)
+{
+	/* Same implementation as IPAv2 */
+	return __ipa_commit_hdr_v2();
+}
+
 static int __ipa_add_hdr_proc_ctx(struct ipa_hdr_proc_ctx_add *proc_ctx,
 	bool add_ref_hdr)
 {
@@ -577,7 +588,7 @@ static int __ipa_add_hdr(struct ipa_hdr_add *hdr)
 	int id;
 	int mem_size;
 
-	if (hdr->hdr_len == 0) {
+	if (hdr->hdr_len == 0 || hdr->hdr_len > IPA_HDR_MAX_SIZE) {
 		IPAERR("bad parm\n");
 		goto error;
 	}
@@ -624,10 +635,11 @@ static int __ipa_add_hdr(struct ipa_hdr_add *hdr)
 
 	/*
 	 * if header does not fit to table, place it in DDR
-	 * This is valid for IPA 2.5 and above
+	 * This is valid for IPA 2.5 and on,
+	 * with the exception of IPA2.6L.
 	 */
 	if (htbl->end + ipa_hdr_bin_sz[bin] > mem_size) {
-		if (ipa_ctx->ipa_hw_type < IPA_HW_v2_5) {
+		if (ipa_ctx->ipa_hw_type != IPA_HW_v2_5) {
 			IPAERR("not enough room for header\n");
 			goto bad_hdr_len;
 		} else {
@@ -817,6 +829,11 @@ int ipa_add_hdr(struct ipa_ioc_add_hdr *hdrs)
 	int i;
 	int result = -EFAULT;
 
+	if (unlikely(!ipa_ctx)) {
+		IPAERR("IPA driver was not initialized\n");
+		return -EINVAL;
+	}
+
 	if (hdrs == NULL || hdrs->num_hdrs == 0) {
 		IPAERR("bad parm\n");
 		return -EINVAL;
@@ -862,6 +879,11 @@ int ipa_del_hdr(struct ipa_ioc_del_hdr *hdls)
 	int i;
 	int result = -EFAULT;
 
+	if (unlikely(!ipa_ctx)) {
+		IPAERR("IPA driver was not initialized\n");
+		return -EINVAL;
+	}
+
 	if (hdls == NULL || hdls->num_hdls == 0) {
 		IPAERR("bad parm\n");
 		return -EINVAL;
@@ -903,6 +925,13 @@ int ipa_add_hdr_proc_ctx(struct ipa_ioc_add_hdr_proc_ctx *proc_ctxs)
 {
 	int i;
 	int result = -EFAULT;
+
+	if (ipa_ctx->ipa_hw_type <= IPA_HW_v2_0 ||
+	    ipa_ctx->ipa_hw_type == IPA_HW_v2_6L) {
+		IPAERR("Processing context not supported on IPA HW %d\n",
+			ipa_ctx->ipa_hw_type);
+		return -EFAULT;
+	}
 
 	if (proc_ctxs == NULL || proc_ctxs->num_proc_ctxs == 0) {
 		IPAERR("bad parm\n");
@@ -949,6 +978,13 @@ int ipa_del_hdr_proc_ctx(struct ipa_ioc_del_hdr_proc_ctx *hdls)
 {
 	int i;
 	int result;
+
+	if (ipa_ctx->ipa_hw_type <= IPA_HW_v2_0 ||
+	    ipa_ctx->ipa_hw_type == IPA_HW_v2_6L) {
+		IPAERR("Processing context not supported on IPA HW %d\n",
+			ipa_ctx->ipa_hw_type);
+		return -EFAULT;
+	}
 
 	if (hdls == NULL || hdls->num_hdls == 0) {
 		IPAERR("bad parm\n");
@@ -1110,10 +1146,10 @@ int ipa_reset_hdr(void)
 		list_del(&ctx_entry->link);
 		ctx_entry->ref_cnt = 0;
 		ctx_entry->cookie = 0;
-		kmem_cache_free(ipa_ctx->hdr_proc_ctx_cache, ctx_entry);
 
 		/* remove the handle from the database */
 		ipa_id_remove(ctx_entry->id);
+		kmem_cache_free(ipa_ctx->hdr_proc_ctx_cache, ctx_entry);
 
 	}
 	for (i = 0; i < IPA_HDR_PROC_CTX_BIN_MAX; i++) {
@@ -1169,6 +1205,11 @@ int ipa_get_hdr(struct ipa_ioc_get_hdr *lookup)
 {
 	struct ipa_hdr_entry *entry;
 	int result = -1;
+
+	if (unlikely(!ipa_ctx)) {
+		IPAERR("IPA driver was not initialized\n");
+		return -EINVAL;
+	}
 
 	if (lookup == NULL) {
 		IPAERR("bad parm\n");

@@ -130,13 +130,15 @@ struct eth_dev {
 	unsigned long		rx_throttle;
 	unsigned int		tx_aggr_cnt[DL_MAX_PKTS_PER_XFER];
 	unsigned int		tx_pkts_rcvd;
+	unsigned int		tx_bytes_rcvd;
 	unsigned int		loop_brk_cnt;
 	struct dentry		*uether_dent;
-	struct dentry		*uether_dfile;
 
 	enum ifc_state		state;
 	struct notifier_block	cpufreq_notifier;
 	struct work_struct	cpu_policy_w;
+
+	bool			sg_enabled;
 };
 
 /* when sg is enabled, sg_ctx is used to track skb each usb request will
@@ -390,7 +392,6 @@ static void rx_complete(struct usb_ep *ep, struct usb_request *req)
 	/* normal completion */
 	case 0:
 		skb_put(skb, req->actual);
-
 		if (dev->unwrap) {
 			unsigned long	flags;
 
@@ -546,12 +547,12 @@ static int alloc_requests(struct eth_dev *dev, struct gether *link, unsigned n)
 
 	spin_lock(&dev->req_lock);
 	status = prealloc(&dev->tx_reqs, link->in_ep, n * tx_qmult,
-				dev->gadget->sg_supported,
+				dev->sg_enabled,
 				dev->header_len);
 	if (status < 0)
 		goto fail;
 	status = prealloc(&dev->rx_reqs, link->out_ep, n,
-				dev->gadget->sg_supported,
+				dev->sg_enabled,
 				dev->header_len);
 	if (status < 0)
 		goto fail;
@@ -702,6 +703,15 @@ static void tx_complete(struct usb_ep *ep, struct usb_request *req)
 	case -ESHUTDOWN:		/* disconnect etc */
 		break;
 	case 0:
+		/*
+		 * Remove the header length, before updating tx_bytes in
+		 * net->stats, since when packet is received from network layer
+		 * this header is not added. So this will now give the exact
+		 * number of bytes sent to the host.
+		 */
+		if (req->num_sgs)
+			req->actual -= (req->num_sgs/2) * dev->header_len;
+
 		if (!req->zero)
 			dev->net->stats.tx_bytes += req->actual-1;
 		else
@@ -810,7 +820,8 @@ static void tx_complete(struct usb_ep *ep, struct usb_request *req)
 		skb = req->context;
 		/* Is aggregation already enabled and buffers allocated ? */
 		if (dev->port_usb->multi_pkt_xfer && dev->tx_req_bufsize) {
-			req->buf = kzalloc(dev->tx_req_bufsize, GFP_ATOMIC);
+			req->buf = kzalloc(dev->tx_req_bufsize
+				+ dev->gadget->extra_buf_alloc, GFP_ATOMIC);
 			req->context = NULL;
 		} else {
 			req->buf = NULL;
@@ -849,8 +860,8 @@ static int alloc_tx_buffer(struct eth_dev *dev)
 	list_for_each(act, &dev->tx_reqs) {
 		req = container_of(act, struct usb_request, list);
 		if (!req->buf) {
-			req->buf = kzalloc(dev->tx_req_bufsize,
-						GFP_ATOMIC);
+			req->buf = kzalloc(dev->tx_req_bufsize
+				+ dev->gadget->extra_buf_alloc, GFP_ATOMIC);
 			if (!req->buf)
 				goto free_buf;
 		}
@@ -1064,7 +1075,8 @@ static netdev_tx_t eth_start_xmit(struct sk_buff *skb,
 	}
 
 	dev->tx_pkts_rcvd++;
-	if (dev->gadget->sg_supported) {
+	dev->tx_bytes_rcvd += skb->len;
+	if (dev->sg_enabled) {
 		skb_queue_tail(&dev->tx_skb_q, skb);
 		if (dev->tx_skb_q.qlen > tx_stop_threshold) {
 			dev->tx_throttle++;
@@ -1348,6 +1360,8 @@ static int eth_stop(struct net_device *net)
 
 /*-------------------------------------------------------------------------*/
 
+static u8 host_ethaddr[ETH_ALEN];
+
 /* initial value, changed by "ifconfig usb0 hw ether xx:xx:xx:xx:xx:xx" */
 static char *dev_addr;
 module_param(dev_addr, charp, S_IRUGO);
@@ -1380,6 +1394,17 @@ static int get_ether_addr(const char *str, u8 *dev_addr)
 }
 
 static int ether_ioctl(struct net_device *, struct ifreq *, int);
+
+static int get_host_ether_addr(u8 *str, u8 *dev_addr)
+{
+	memcpy(dev_addr, str, ETH_ALEN);
+	if (is_valid_ether_addr(dev_addr))
+		return 0;
+
+	random_ether_addr(dev_addr);
+	memcpy(str, dev_addr, ETH_ALEN);
+	return 1;
+}
 
 static const struct net_device_ops eth_netdev_ops = {
 	.ndo_open		= eth_open,
@@ -1631,9 +1656,11 @@ struct eth_dev *gether_setup_name(struct usb_gadget *g, u8 ethaddr[ETH_ALEN],
 	if (get_ether_addr(dev_addr, net->dev_addr))
 		dev_warn(&g->dev,
 			"using random %s ethernet address\n", "self");
-	if (get_ether_addr(host_addr, dev->host_mac))
-		dev_warn(&g->dev,
-			"using random %s ethernet address\n", "host");
+
+	if (get_host_ether_addr(host_ethaddr, dev->host_mac))
+		dev_warn(&g->dev, "using random %s ethernet address\n", "host");
+	else
+		dev_warn(&g->dev, "using previous %s ethernet address\n", "host");
 
 	if (ethaddr)
 		memcpy(ethaddr, dev->host_mac, ETH_ALEN);
@@ -1712,6 +1739,13 @@ void gether_update_dl_max_xfer_size(struct gether *link, uint32_t s)
 	spin_unlock_irqrestore(&dev->lock, flags);
 }
 
+void gether_enable_sg(struct gether *link, bool enable)
+{
+	struct eth_dev		*dev = link->ioport;
+
+	dev->sg_enabled = enable ? dev->gadget->sg_supported : false;
+}
+
 void gether_update_dl_max_pkts_per_xfer(struct gether *link, uint32_t n)
 {
 	struct eth_dev		*dev = link->ioport;
@@ -1753,7 +1787,7 @@ struct net_device *gether_connect(struct gether *link)
 	/* if scatter/gather or sg is supported then headers can be part of
 	 * req->buf which is allocated later
 	 */
-	if (!dev->gadget->sg_supported) {
+	if (!dev->sg_enabled) {
 		link->header = kzalloc(sizeof(struct rndis_packet_msg_type),
 						GFP_ATOMIC);
 		if (!link->header) {
@@ -1877,11 +1911,11 @@ void gether_disconnect(struct gether *link)
 
 		spin_unlock(&dev->req_lock);
 		if (link->multi_pkt_xfer ||
-				dev->gadget->sg_supported) {
+				dev->sg_enabled) {
 			kfree(req->buf);
 			req->buf = NULL;
 		}
-		if (dev->gadget->sg_supported) {
+		if (dev->sg_enabled) {
 			kfree(req->context);
 			kfree(req->sg);
 		}
@@ -1891,7 +1925,7 @@ void gether_disconnect(struct gether *link)
 	}
 
 	/* Free rndis header buffer memory */
-	if (!dev->gadget->sg_supported)
+	if (!dev->sg_enabled)
 		kfree(link->header);
 	link->header = NULL;
 	spin_unlock(&dev->req_lock);
@@ -1999,6 +2033,38 @@ const struct file_operations uether_stats_ops = {
 	.write = uether_stat_reset,
 };
 
+static int uether_bytes_rcvd_show(struct seq_file *s, void *unused)
+{
+	struct eth_dev *dev = s->private;
+
+	if (dev)
+		seq_printf(s, "%u\n", dev->tx_bytes_rcvd);
+
+	return 0;
+}
+
+static int uether_bytes_rcvd_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, uether_bytes_rcvd_show, inode->i_private);
+}
+
+static ssize_t uether_bytes_rcvd_reset(struct file *file,
+		const char __user *ubuf, size_t count, loff_t *ppos)
+{
+	struct seq_file *s = file->private_data;
+	struct eth_dev *dev = s->private;
+
+	dev->tx_bytes_rcvd = 0;
+
+	return count;
+}
+
+const struct file_operations uether_bytes_rcvd_ops = {
+	.open = uether_bytes_rcvd_open,
+	.read = seq_read,
+	.write = uether_bytes_rcvd_reset,
+};
+
 static void uether_debugfs_init(struct eth_dev *dev, const char *name)
 {
 	struct dentry *uether_dent;
@@ -2013,15 +2079,16 @@ static void uether_debugfs_init(struct eth_dev *dev, const char *name)
 				uether_dent, dev, &uether_stats_ops);
 	if (!uether_dfile || IS_ERR(uether_dfile))
 		debugfs_remove(uether_dent);
-	dev->uether_dfile = uether_dfile;
+
+	uether_dfile = debugfs_create_file("tx_bytes_rcvd", S_IRUGO | S_IWUSR,
+				uether_dent, dev, &uether_bytes_rcvd_ops);
+	if (!uether_dfile || IS_ERR(uether_dfile))
+		debugfs_remove_recursive(uether_dent);
 }
 
 static void uether_debugfs_exit(struct eth_dev *dev)
 {
-	debugfs_remove(dev->uether_dfile);
-	debugfs_remove(dev->uether_dent);
-	dev->uether_dent = NULL;
-	dev->uether_dfile = NULL;
+	debugfs_remove_recursive(dev->uether_dent);
 }
 
 static int __init gether_init(void)

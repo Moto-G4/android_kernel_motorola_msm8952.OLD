@@ -136,8 +136,14 @@ extern const struct gtype##_id __mod_##gtype##_table		\
 /* What your module does. */
 #define MODULE_DESCRIPTION(_description) MODULE_INFO(description, _description)
 
-#define MODULE_DEVICE_TABLE(type,name)		\
-  MODULE_GENERIC_TABLE(type##_device,name)
+#ifdef MODULE
+/* Creates an alias so file2alias.c can find device table. */
+#define MODULE_DEVICE_TABLE(type, name)					\
+extern const typeof(name) __mod_##type##__##name##_device_table		\
+  __attribute__ ((unused, alias(__stringify(name))))
+#else  /* !MODULE */
+#define MODULE_DEVICE_TABLE(type, name)
+#endif
 
 /* Version of form [<epoch>:]<version>[-<extra-version>].
    Or for CVS/RCS ID version, everything but the number is stripped.
@@ -368,13 +374,6 @@ struct module
 	void (*exit)(void);
 
 	struct module_ref __percpu *refptr;
-#endif
-
-#ifdef CONFIG_MODULE_EXTRA_COPY
-	void *raw_binary_ptr;
-	unsigned long raw_binary_size;
-	void *linked_binary_ptr;
-	unsigned long linked_binary_size;
 #endif
 
 #ifdef CONFIG_CONSTRUCTORS

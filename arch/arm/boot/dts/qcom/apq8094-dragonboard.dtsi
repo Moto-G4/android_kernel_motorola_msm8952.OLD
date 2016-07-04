@@ -1,4 +1,4 @@
-/* Copyright (c) 2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2014-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -10,9 +10,9 @@
  * GNU General Public License for more details.
  */
 
-/ {
-	qcom,msm-id = <207 0x10000>, <253 0x10000>;
+ #include "apq8094-camera-sensor-dragonboard.dtsi"
 
+/ {
 	bt_qca6174 {
 		compatible = "qca,qca6174";
 		qca,bt-reset-gpio = <&pm8994_gpios 19 0>; /* BT_EN */
@@ -57,6 +57,10 @@
 	};
 };
 
+&tspp {
+	status = "disabled";
+};
+
 &tlmm_pinmux{
 	spi_0 {
 		status = "disabled";
@@ -90,11 +94,19 @@
 		};
 	};
 
-	pmx_pri_mi2s {
+	pmx_pri_mi2s_sleep {
 		qcom,pins = <&gp 58>, <&gp 59>;
 	};
 
-	pmx_pri_mi2s_sd0 {
+	pmx_pri_mi2s_active {
+		qcom,pins = <&gp 58>, <&gp 59>;
+	};
+
+	pmx_pri_mi2s_sd0_sleep {
+		qcom,pins = <&gp 60>;
+	};
+
+	pmx_pri_mi2s_sd0_active {
 		qcom,pins = <&gp 60>;
 	};
 };
@@ -130,13 +142,15 @@
 	qcom,platform-reset-gpio = <&msm_gpio 78 0>;
 	qcom,platform-te-gpio = <&msm_gpio 10 0>;
 	qcom,platform-bklight-en-gpio = <&pmi8994_gpios 2 0>;
-
-	qcom,dsi-panel-bias-vreg;
-	qcom,regulator-ldo-mode;
 };
 
 &mdss_dsi1 {
 	status = "disabled";
+};
+
+&labibb {
+	status = "ok";
+	qpnp,qpnp-labibb-mode = "lcd";
 };
 
 &pmx_hdmi_cec {
@@ -235,13 +249,25 @@
 	status = "ok";
 };
 
+&ufs1 {
+	status = "ok";
+};
+
+&ufsphy1 {
+	status = "ok";
+};
+
 &usb_otg {
 	status = "ok";
 	reg = <0xf9a55000 0x400>,
 		<0xf9b39000 0x17f>;
+	reg-names = "core", "phy_csr";
 	qcom,hsusb-otg-otg-control = <2>; /* PMIC control */
 	qcom,hsusb-otg-mode = <1>;   /* USB_PERIPHERAL */
-	qcom,hsusb-otg-phy-type = <3>; /* QUSB_ULPI_PHY */
+	qcom,hsusb-otg-phy-type = <4>; /* QUSB_ULPI_PHY */
+	qcom,hsusb-otg-phy-init-seq =
+		<0x80 0xA0 0x84 0xA5 0x88 0x81 0x8c 0x85 0xffffffff>;
+
 	vbus_otg-supply = <&vph_pwr_vreg>;
 	qcom,dp-manual-pullup;
 
@@ -253,7 +279,7 @@
 		 <&clock_gcc clk_gcc_usb_phy_cfg_ahb2phy_clk>,
 		 <&clock_gcc clk_gcc_qusb2_phy_reset>;
 	clock-names = "core_clk", "iface_clk", "sleep_clk", "xo",
-			"phy_ref_clk", "ahb2phy_clk", "phy_reset";
+			"phy_ref_clk", "phy_csr_clk", "phy_reset_clk";
 };
 
 &usb3 {
@@ -262,7 +288,7 @@
 			 0x0 1 &intc 0 180 0>;
 	interrupt-names = "hs_phy_irq", "pwr_event_irq";
 	qcom,charging-disabled;
-	/delete-property/ qcom,otg-capability;
+	vbus_dwc3-supply = <&vph_pwr_vreg>;
 	qcom,ext-hub-reset-gpio =  <&pm8994_gpios 1 0>;
 	dwc3@f9200000 {
 		snps,host-only-mode;
@@ -503,6 +529,8 @@
 			"RX_BIAS", "MCLK",
 			"LDO_H", "MCLK",
 			"AIF4 MAD", "MCLK",
+			"AMIC1", "MIC BIAS1 External",
+			"MIC BIAS1 External", "Analog Mic4",
 			"AMIC2", "MIC BIAS2 External",
 			"MIC BIAS2 External", "Headset Mic",
 			"AMIC3", "MIC BIAS2 External",
@@ -513,10 +541,10 @@
 			"MIC BIAS3 External", "Analog Mic7",
 			"AMIC6", "MIC BIAS4 External",
 			"MIC BIAS4 External", "Analog Mic8",
-			"DMIC1", "MIC BIAS1 External",
-			"MIC BIAS1 External", "Digital Mic1",
-			"DMIC2", "MIC BIAS1 External",
-			"MIC BIAS1 External", "Digital Mic2",
+			"DMIC1", "MIC BIAS3 External",
+			"MIC BIAS3 External", "Digital Mic1",
+			"DMIC2", "MIC BIAS3 External",
+			"MIC BIAS3 External", "Digital Mic2",
 			"DMIC3", "MIC BIAS4 External",
 			"MIC BIAS4 External", "Digital Mic3",
 			"DMIC4", "MIC BIAS4 External",
@@ -526,11 +554,28 @@
 			"DMIC6", "MIC BIAS3 External",
 			"MIC BIAS3 External", "Digital Mic6";
 
+		pinctrl-names = "sleep",
+				"auxpcm-active",
+				"mi2s-active",
+				"active";
+		pinctrl-0 = <&pri_mi2s_sleep>, <&pri_mi2s_sd0_sleep>,
+				<&sec_aux_pcm_sleep>, <&sec_aux_pcm_din_sleep>;
+		pinctrl-1 = <&pri_mi2s_sleep>, <&pri_mi2s_sd0_sleep>,
+				<&sec_aux_pcm_active>, <&sec_aux_pcm_din_active>;
+		pinctrl-2 = <&pri_mi2s_active>, <&pri_mi2s_sd0_active>,
+				<&sec_aux_pcm_sleep>, <&sec_aux_pcm_din_sleep>;
+		pinctrl-3 = <&pri_mi2s_active>, <&pri_mi2s_sd0_active>,
+				<&sec_aux_pcm_active>, <&sec_aux_pcm_din_active>;
+		pinctrl-4 = <&audio_ext_speakers>;
+
 		qcom,ext-spk-rear-panel-irq = <&pm8994_gpios 13 0x1>;
-		qcom,ext-spk-front-panel-irq = <&pm8994_gpios 11 0x1>;
+		qcom,ext-spk-front-panel-irq = <&msm_gpio 96 0>;
+		qcom,ext-mic-front-panel-irq = <&pm8994_gpios 11 0x1>;
 		qcom,cdc-micbias2-headset-only;
 		qcom,mbhc-audio-jack-type = "6-pole-jack";
 		qcom,hdmi-audio-rx;
+		asoc-codec = <&stub_codec>, <&hdmi_audio>;
+		asoc-codec-names = "msm-stub-codec.1", "msm-hdmi-audio-codec-rx";
 	};
 
 	usb_detect {
@@ -555,7 +600,7 @@
 };
 
 &pmi8994_charger {
-	qcom,charging-disabled;
+	status = "disabled";
 };
 
 &rpm_bus {
@@ -595,6 +640,7 @@
 		qcom,vin-sel = <2>;	/* 1.8v */
 		qcom,src-sel = <0>;	/* Constant */
 		qcom,master-en = <1>;	/* Enable GPIO */
+		status = "okay";
 	};
 
 	gpio@c200 { /* GPIO 3 - KEY_VOLP_N */
@@ -603,6 +649,7 @@
 		qcom,vin-sel = <2>;
 		qcom,src-sel = <0>;
 		qcom,master-en = <1>;
+		status = "okay";
 	};
 
 	gpio@c300 { /* GPIO 4 - EDU_GPIO2 */
@@ -610,6 +657,7 @@
 		qcom,pull = <1>;
 		qcom,vin-sel = <2>;
 		qcom,src-sel = <0>;
+		status = "okay";
 	};
 
 	gpio@c400 { /* GPIO 5 - BL1_PWM */
@@ -617,6 +665,7 @@
 		qcom,pull = <1>;	/* PULL DOWN */
 		qcom,vin-sel = <2>;	/* 1.8 */
 		qcom,src-sel = <4>;	/*  */
+		status = "okay";
 	};
 
 	gpio@c500 { /* GPIO 6 - EXT_CHARGER_INT */
@@ -624,6 +673,7 @@
 		qcom,pull = <1>;
 		qcom,vin-sel = <2>;
 		qcom,src-sel = <0>;
+		status = "okay";
 	};
 
 	gpio@c600 { /* GPIO 7 - NFC_PWR_REQ */
@@ -632,6 +682,7 @@
 		qcom,vin-sel = <2>;	/* 1.8 */
 		qcom,src-sel = <0>;	/* CONSTANT */
 		qcom,master-en = <1>;	/* ENABLE GPIO */
+		status = "okay";
 	};
 
 	gpio@c700 { /* GPIO 8 - SD_CARD_DET_N */
@@ -640,6 +691,7 @@
 		qcom,vin-sel = <2>;
 		qcom,src-sel = <0>;
 		qcom,master-en = <1>;
+		status = "okay";
 	};
 
 	gpio@c900 { /* GPIO 10 - NFC_CLK_REQ */
@@ -648,6 +700,7 @@
 		qcom,vin-sel = <2>;	/* 1.8 */
 		qcom,src-sel = <2>;	/* QPNP_PIN_SEL_FUNC_1 */
 		qcom,master-en = <1>;	/* ENABLE GPIO */
+		status = "okay";
 	};
 
 	gpio@ca00 { /* GPIO 11 - FP_LINEOUT_PLUG_DET_N */
@@ -655,6 +708,7 @@
 		qcom,pull = <5>; /* No Pull */
 		qcom,vin-sel = <2>; /* 1.8 */
 		qcom,src-sel = <0>; /* CONSTANT */
+		status = "okay";
 	};
 
 	gpio@cc00 { /* GPIO 13 - RP_LINEOUT_PLUG_DETCT */
@@ -662,6 +716,7 @@
 		qcom,pull = <5>;	/* No Pull */
 		qcom,vin-sel = <2>;	/* 1.8 */
 		qcom,src-sel = <0>;	/* CONSTANT */
+		status = "okay";
 	};
 
 	gpio@cd00 { /* GPIO 14 - BL1_EN */
@@ -670,6 +725,7 @@
 		qcom,vin-sel = <2>;
 		qcom,src-sel = <0>;
 		qcom,master-en = <1>;
+		status = "okay";
 	};
 
 	gpio@ce00 { /* GPIO 15 - DIVCLK1 */
@@ -680,6 +736,7 @@
 		qcom,out-strength = <1>;
 		qcom,src-sel = <2>;
 		qcom,master-en = <1>;
+		status = "okay";
 	};
 
 	gpio@cf00 { /* GPIO 16 - DIVCLK2 */
@@ -690,6 +747,7 @@
 		qcom,out-strength = <1>;
 		qcom,src-sel = <2>;
 		qcom,master-en = <1>;
+		status = "okay";
 	};
 
 	gpio@d100 { /* GPIO 18 - DIVCLK4 */
@@ -700,6 +758,7 @@
 		qcom,out-strength = <1>;
 		qcom,src-sel = <2>;
 		qcom,master-en = <1>;
+		status = "okay";
 	};
 
 	gpio@d200 { /* GPIO 19 - BT_EN */
@@ -708,9 +767,11 @@
 		qcom,vin-sel = <2>;      /* VIN2 */
 		qcom,src-sel = <0>;      /* GPIO */
 		qcom,master-en = <1>;    /* Enable GPIO */
+		status = "okay";
 	};
 
 	gpio@d300 { /* GPIO 20 - PMI_SPON */
+		status = "okay";
 	};
 };
 
@@ -720,6 +781,7 @@
 		qcom,pull = <1>;	/* PULL DOWN */
 		qcom,vin-sel = <2>;	/* 1.8 */
 		qcom,src-sel = <0>;	/* CONSTANT */
+		status = "okay";
 	};
 
 	mpp@a300 { /* MPP 4 - EDU_MPP4 */
@@ -727,6 +789,7 @@
 		qcom,pull = <1>;	/* PULL DOWN */
 		qcom,vin-sel = <2>;	/* 1.8 */
 		qcom,src-sel = <0>;	/* CONSTANT */
+		status = "okay";
 	};
 
 	mpp@a400 { /* MPP 5 - EDU_MPP2 */
@@ -734,6 +797,7 @@
 		qcom,pull = <1>;	/* PULL DOWN */
 		qcom,vin-sel = <2>;	/* 1.8 */
 		qcom,src-sel = <0>;	/* CONSTANT */
+		status = "okay";
 	};
 
 	mpp@a500 { /* MPP 6 - EDU_MPP3 */
@@ -741,6 +805,7 @@
 		qcom,pull = <1>;	/* PULL DOWN */
 		qcom,vin-sel = <2>;	/* 1.8 */
 		qcom,src-sel = <0>;	/* CONSTANT */
+		status = "okay";
 	};
 
 	mpp@a600 { /* MPP 7 - DBU1_EN */
@@ -749,6 +814,7 @@
 		qcom,vin-sel = <2>;	/* 1.8 */
 		qcom,src-sel = <0>;	/* CONSTANT */
 		qcom,master-en = <1>;
+		status = "okay";
 	};
 
 	mpp@a700 { /* MPP 8 - EXP_LED_SINK */
@@ -757,6 +823,7 @@
 		qcom,vin-sel = <2>;	/* 1.8 */
 		qcom,src-sel = <0>;	/* CONSTANT */
 		qcom,master-en = <1>;
+		status = "okay";
 	};
 };
 
@@ -767,6 +834,7 @@
 		qcom,vin-sel = <2>;
 		qcom,src-sel = <0>;
 		qcom,master-en = <1>;
+		status = "okay";
 	};
 
 	gpio@c200 { /* GPIO 3 - EDU_GPIO1 */
@@ -774,6 +842,7 @@
 		qcom,pull = <1>;
 		qcom,vin-sel = <2>;
 		qcom,src-sel = <0>;
+		status = "okay";
 	};
 
 
@@ -783,6 +852,7 @@
 		qcom,vin-sel = <2>;/*  1.8 */
 		qcom,src-sel = <0>;
 		qcom,master-en = <1>;	/* ENABLE GPIO */
+		status = "okay";
 	};
 
 	gpio@c600 { /* GPIO 7 - EDU_GPIO3 */
@@ -790,6 +860,7 @@
 		qcom,pull = <1>;
 		qcom,vin-sel = <2>;
 		qcom,src-sel = <0>;
+		status = "okay";
 	};
 };
 
@@ -800,12 +871,15 @@
 		qcom,src-sel = <7>;	/* DTEST4 */
 		qcom,vin-sel = <2>;	/* 1.8 */
 		qcom,master-en = <1>;	/* Enable MPP */
+		status = "okay";
 	};
 
 	mpp@a100 { /* MPP 2 - FLASH_STROBE (DNI) */
+		status = "okay";
 	};
 
 	mpp@a200 { /* MPP 3 - PMI_SPON */
+		status = "okay";
 	};
 
 	mpp@a300 { /* MPP 4 - EXT_FET_WLED_PWR_EN */
@@ -813,6 +887,7 @@
 		qcom,src-sel = <0>;	/* FUNC GPIO */
 		qcom,vin-sel = <0>;	/* VPH_PWR */
 		qcom,master-en = <1>;	/* Enable MPP */
+		status = "okay";
 	};
 };
 
@@ -832,6 +907,11 @@
 	regulator-min-microvolt = <2800000>;
 	regulator-max-microvolt = <2800000>;
 	qcom,init-voltage = <2800000>;
+};
+
+&pm8994_l16 { /* GPS ELNA */
+	status = "okay";
+	regulator-always-on;
 };
 
 &pm8994_l17 { /* CAMERAS */

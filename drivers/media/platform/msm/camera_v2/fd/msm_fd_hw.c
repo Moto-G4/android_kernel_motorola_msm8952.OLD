@@ -1,4 +1,4 @@
-/* Copyright (c) 2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2014-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -28,46 +28,20 @@
 #include "msm_fd_dev.h"
 #include "msm_fd_hw.h"
 #include "msm_fd_regs.h"
+#include "cam_smmu_api.h"
 
+/* After which revision misc irq for engine is needed */
+#define MSM_FD_MISC_IRQ_FROM_REV 0x10010000
+/* Face detection workqueue name */
+#define MSM_FD_WORQUEUE_NAME "face-detection"
+/* Face detection bus client name */
+#define MSM_FD_BUS_CLIENT_NAME "msm_face_detect"
 /* Face detection processing timeout in ms */
 #define MSM_FD_PROCESSING_TIMEOUT_MS 500
+/* Face detection halt timeout in ms */
+#define MSM_FD_HALT_TIMEOUT_MS 100
 
-/* Fd iommu partition definition */
-static struct msm_iova_partition msm_fd_fw_partition = {
-	.start = SZ_128K,
-	.size = SZ_2G - SZ_128K,
-};
-
-/* Fd iommu domain definition */
-static struct msm_iova_layout msm_fd_fw_layout = {
-	.partitions = &msm_fd_fw_partition,
-	.npartitions = 1,
-	.client_name = "fd_iommu",
-	.domain_flags = 0,
-};
-
-/* Face detection bus bandwidth definitions */
-static struct msm_bus_vectors msm_fd_bandwidth_vectors[] = {
-	{
-		.src = MSM_BUS_MASTER_VPU,
-		.dst = MSM_BUS_SLAVE_EBI_CH0,
-		.ab  = 450000000,
-		.ib  = 900000000,
-	},
-};
-
-static struct msm_bus_paths msm_fd_bus_client_config[] = {
-	{
-		ARRAY_SIZE(msm_fd_bandwidth_vectors),
-		msm_fd_bandwidth_vectors,
-	},
-};
-
-static struct msm_bus_scale_pdata msm_fd_bus_scale_data = {
-	msm_fd_bus_client_config,
-	ARRAY_SIZE(msm_fd_bus_client_config),
-	.name = "msm_face_detect",
-};
+#define MSM_FD_SMMU_CB_NAME "camera_fd"
 
 /*
  * msm_fd_hw_read_reg - Fd read from register.
@@ -292,7 +266,7 @@ static inline void msm_fd_hw_run(struct msm_fd_device *fd)
  *
  * NOTE: If finish bit is not set, we should not read the result.
  */
-int msm_fd_hw_is_finished(struct msm_fd_device *fd)
+static int msm_fd_hw_is_finished(struct msm_fd_device *fd)
 {
 	u32 reg;
 
@@ -305,13 +279,87 @@ int msm_fd_hw_is_finished(struct msm_fd_device *fd)
  * msm_fd_hw_is_runnig - Check if fd hw engine is busy.
  * @fd: Pointer to fd device.
  */
-int msm_fd_hw_is_runnig(struct msm_fd_device *fd)
+static int msm_fd_hw_is_runnig(struct msm_fd_device *fd)
 {
 	u32 reg;
 
 	reg = msm_fd_hw_read_reg(fd, MSM_FD_IOMEM_CORE, MSM_FD_CONTROL);
 
 	return reg & MSM_FD_CONTROL_RUN;
+}
+
+/*
+ * msm_fd_hw_misc_irq_is_core - Check if fd received misc core irq.
+ * @fd: Pointer to fd device.
+ */
+static int msm_fd_hw_misc_irq_is_core(struct msm_fd_device *fd)
+{
+	u32 reg;
+
+	reg = msm_fd_hw_read_reg(fd, MSM_FD_IOMEM_MISC,
+		MSM_FD_MISC_IRQ_STATUS);
+
+	return reg & MSM_FD_MISC_IRQ_STATUS_CORE_IRQ;
+}
+
+/*
+ * msm_fd_hw_misc_irq_is_halt - Check if fd received misc halt irq.
+ * @fd: Pointer to fd device.
+ */
+static int msm_fd_hw_misc_irq_is_halt(struct msm_fd_device *fd)
+{
+	u32 reg;
+
+	reg = msm_fd_hw_read_reg(fd, MSM_FD_IOMEM_MISC,
+		MSM_FD_MISC_IRQ_STATUS);
+
+	return reg & MSM_FD_MISC_IRQ_STATUS_HALT_REQ;
+}
+
+/*
+* msm_fd_hw_misc_clear_all_irq - Clear all misc irq statuses.
+* @fd: Pointer to fd device.
+*/
+static void msm_fd_hw_misc_clear_all_irq(struct msm_fd_device *fd)
+{
+	msm_fd_hw_write_reg(fd, MSM_FD_IOMEM_MISC, MSM_FD_MISC_IRQ_CLEAR,
+		MSM_FD_MISC_IRQ_CLEAR_HALT | MSM_FD_MISC_IRQ_CLEAR_CORE);
+}
+
+/*
+* msm_fd_hw_misc_irq_enable - Enable fd misc core and halt irq.
+* @fd: Pointer to fd device.
+*/
+static void msm_fd_hw_misc_irq_enable(struct msm_fd_device *fd)
+{
+	msm_fd_hw_reg_set(fd, MSM_FD_IOMEM_MISC, MSM_FD_MISC_IRQ_MASK,
+		MSM_FD_MISC_IRQ_CLEAR_HALT | MSM_FD_MISC_IRQ_CLEAR_CORE);
+}
+
+/*
+* msm_fd_hw_misc_irq_disable - Disable fd misc core and halt irq.
+* @fd: Pointer to fd device.
+*/
+static void msm_fd_hw_misc_irq_disable(struct msm_fd_device *fd)
+{
+	msm_fd_hw_reg_clr(fd, MSM_FD_IOMEM_MISC, MSM_FD_MISC_IRQ_MASK,
+		MSM_FD_MISC_IRQ_CLEAR_HALT | MSM_FD_MISC_IRQ_CLEAR_CORE);
+}
+
+/*
+ * msm_fd_hw_get_revision - Get hw revision and store in to device.
+ * @fd: Pointer to fd device.
+ */
+int msm_fd_hw_get_revision(struct msm_fd_device *fd)
+{
+	u32 reg;
+
+	reg = msm_fd_hw_read_reg(fd, MSM_FD_IOMEM_MISC,
+		MSM_FD_MISC_HW_VERSION);
+
+	dev_dbg(fd->dev, "Face detection hw revision 0x%x\n", reg);
+
+	return reg;
 }
 
 /*
@@ -374,11 +422,174 @@ void msm_fd_hw_get_result_angle_pose(struct msm_fd_device *fd, int idx,
 	u32 *angle, u32 *pose)
 {
 	u32 reg;
+	u32 pose_reg;
 
 	reg = msm_fd_hw_read_reg(fd, MSM_FD_IOMEM_CORE,
 		MSM_FD_RESULT_ANGLE_POSE(idx));
 	*angle = (reg >> MSM_FD_RESULT_ANGLE_SHIFT) & MSM_FD_RESULT_ANGLE_MASK;
-	*pose = (reg >> MSM_FD_RESULT_POSE_SHIFT) & MSM_FD_RESULT_POSE_MASK;
+	pose_reg = (reg >> MSM_FD_RESULT_POSE_SHIFT) & MSM_FD_RESULT_POSE_MASK;
+
+	switch (pose_reg) {
+	case MSM_FD_RESULT_POSE_FRONT:
+		*pose = MSM_FD_POSE_FRONT;
+		break;
+	case MSM_FD_RESULT_POSE_RIGHT_DIAGONAL:
+		*pose = MSM_FD_POSE_RIGHT_DIAGONAL;
+		break;
+	case MSM_FD_RESULT_POSE_RIGHT:
+		*pose = MSM_FD_POSE_RIGHT;
+		break;
+	case MSM_FD_RESULT_POSE_LEFT_DIAGONAL:
+		*pose = MSM_FD_POSE_LEFT_DIAGONAL;
+		break;
+	case MSM_FD_RESULT_POSE_LEFT:
+		*pose = MSM_FD_POSE_LEFT;
+		break;
+	default:
+		dev_err(fd->dev, "Invalid pose from the engine\n");
+		*pose = MSM_FD_POSE_FRONT;
+		break;
+	}
+}
+
+/*
+ * msm_fd_hw_misc_irq_supported - Check if misc irq is supported.
+ * @fd: Pointer to fd device.
+ */
+static int msm_fd_hw_misc_irq_supported(struct msm_fd_device *fd)
+{
+	return fd->hw_revision >= MSM_FD_MISC_IRQ_FROM_REV;
+}
+
+/*
+ * msm_fd_hw_halt - Halt fd core.
+ * @fd: Pointer to fd device.
+ */
+static void msm_fd_hw_halt(struct msm_fd_device *fd)
+{
+	unsigned long time;
+
+	if (msm_fd_hw_misc_irq_supported(fd)) {
+		init_completion(&fd->hw_halt_completion);
+
+		msm_fd_hw_write_reg(fd, MSM_FD_IOMEM_MISC, MSM_FD_HW_STOP, 1);
+
+		time = wait_for_completion_timeout(&fd->hw_halt_completion,
+			msecs_to_jiffies(MSM_FD_HALT_TIMEOUT_MS));
+		if (!time)
+			dev_err(fd->dev, "Face detection halt timeout\n");
+
+	}
+}
+
+/*
+ * msm_fd_core_irq - Face detection core irq handler.
+ * @irq: Irq number.
+ * @dev_id: Pointer to fd device.
+ */
+static irqreturn_t msm_fd_hw_core_irq(int irq, void *dev_id)
+{
+	struct msm_fd_device *fd = dev_id;
+
+	if (msm_fd_hw_is_finished(fd))
+		queue_work(fd->work_queue, &fd->work);
+	else
+		dev_err(fd->dev, "Something wrong! FD still running\n");
+
+	return IRQ_HANDLED;
+}
+
+/*
+ * msm_fd_hw_misc_irq - Face detection misc irq handler.
+ * @irq: Irq number.
+ * @dev_id: Pointer to fd device.
+ */
+static irqreturn_t msm_fd_hw_misc_irq(int irq, void *dev_id)
+{
+	struct msm_fd_device *fd = dev_id;
+
+	if (msm_fd_hw_misc_irq_is_core(fd))
+		msm_fd_hw_core_irq(irq, dev_id);
+
+	if (msm_fd_hw_misc_irq_is_halt(fd))
+		complete_all(&fd->hw_halt_completion);
+
+	msm_fd_hw_misc_clear_all_irq(fd);
+
+	return IRQ_HANDLED;
+}
+
+/*
+ * msm_fd_hw_request_irq - Configure and enable vbif interface.
+ * @pdev: Pointer to platform device.
+ * @fd: Pointer to fd device.
+ * @work_func: Pointer to work func used for irq bottom half.
+ */
+int msm_fd_hw_request_irq(struct platform_device *pdev,
+	struct msm_fd_device *fd, work_func_t work_func)
+{
+	int ret;
+
+	fd->irq_num = platform_get_irq(pdev, 0);
+	if (fd->irq_num < 0) {
+		dev_err(fd->dev, "Can not get fd core irq resource\n");
+		ret = -ENODEV;
+		goto error_irq;
+	}
+
+	/* If vbif is shared we will need wrapper irq for releasing vbif */
+	if (msm_fd_hw_misc_irq_supported(fd)) {
+		ret = devm_request_irq(fd->dev, fd->irq_num,
+			msm_fd_hw_misc_irq, IRQF_TRIGGER_RISING,
+			dev_name(&pdev->dev), fd);
+		if (ret) {
+			dev_err(fd->dev, "Can not claim wrapper IRQ %d\n",
+				fd->irq_num);
+			goto error_irq;
+		}
+	} else {
+		ret = devm_request_irq(fd->dev, fd->irq_num,
+			msm_fd_hw_core_irq, IRQF_TRIGGER_RISING,
+			dev_name(fd->dev), fd);
+		if (ret) {
+			dev_err(&pdev->dev, "Can not claim core IRQ %d\n",
+				fd->irq_num);
+			goto error_irq;
+		}
+
+	}
+
+	fd->work_queue = alloc_workqueue(MSM_FD_WORQUEUE_NAME,
+		WQ_HIGHPRI | WQ_NON_REENTRANT | WQ_UNBOUND, 0);
+	if (!fd->work_queue) {
+		dev_err(fd->dev, "Can not register workqueue\n");
+		ret = -ENOMEM;
+		goto error_alloc_workqueue;
+	}
+	INIT_WORK(&fd->work, work_func);
+
+	return 0;
+
+error_alloc_workqueue:
+	devm_free_irq(fd->dev, fd->irq_num, fd);
+error_irq:
+	return ret;
+}
+
+/*
+ * msm_fd_hw_release_irq - Free core and wrap irq.
+ * @fd: Pointer to fd device.
+ */
+void msm_fd_hw_release_irq(struct msm_fd_device *fd)
+{
+	if (fd->irq_num >= 0) {
+		devm_free_irq(fd->dev, fd->irq_num, fd);
+		fd->irq_num = -1;
+	}
+	if (fd->work_queue) {
+		destroy_workqueue(fd->work_queue);
+		fd->work_queue = NULL;
+	}
 }
 
 /*
@@ -387,9 +598,17 @@ void msm_fd_hw_get_result_angle_pose(struct msm_fd_device *fd, int idx,
  */
 void msm_fd_hw_vbif_register(struct msm_fd_device *fd)
 {
-
 	msm_fd_hw_reg_set(fd, MSM_FD_IOMEM_VBIF,
 		MSM_FD_VBIF_CLKON, 0x1);
+
+	msm_fd_hw_write_reg(fd, MSM_FD_IOMEM_VBIF,
+		MSM_FD_VBIF_QOS_OVERRIDE_EN, 0x10001);
+
+	msm_fd_hw_write_reg(fd, MSM_FD_IOMEM_VBIF,
+		MSM_FD_VBIF_QOS_OVERRIDE_REQPRI, 0x1);
+
+	msm_fd_hw_write_reg(fd, MSM_FD_IOMEM_VBIF,
+		MSM_FD_VBIF_QOS_OVERRIDE_PRILVL, 0x1);
 
 	msm_fd_hw_write_reg(fd, MSM_FD_IOMEM_VBIF,
 		MSM_FD_VBIF_IN_RD_LIM_CONF0, 0x10);
@@ -404,7 +623,7 @@ void msm_fd_hw_vbif_register(struct msm_fd_device *fd)
 		MSM_FD_VBIF_OUT_WR_LIM_CONF0, 0x10);
 
 	msm_fd_hw_write_reg(fd, MSM_FD_IOMEM_VBIF,
-		MSM_FD_VBIF_DDR_OUT_MAX_BURST, 0x0F);
+		MSM_FD_VBIF_DDR_OUT_MAX_BURST, 0xF0F);
 
 	msm_fd_hw_write_reg(fd, MSM_FD_IOMEM_VBIF,
 		MSM_FD_VBIF_ARB_CTL, 0x30);
@@ -500,59 +719,6 @@ int msm_fd_hw_get_mem_resources(struct platform_device *pdev,
 		msm_fd_hw_release_mem_resources(fd);
 
 	return ret;
-}
-
-/*
- * msm_fd_hw_get_iommu - Get fd iommu.
- * @fd: Pointer to fd device.
- *
- * Registers and get fd iommu domain.
- */
-int msm_fd_hw_get_iommu(struct msm_fd_device *fd)
-{
-	int ret;
-
-	fd->iommu_domain_num = msm_register_domain(&msm_fd_fw_layout);
-	if (fd->iommu_domain_num < 0) {
-		dev_err(fd->dev, "Can not register iommu domain\n");
-		ret = -ENODEV;
-		goto error;
-	}
-
-	fd->iommu_domain = msm_get_iommu_domain(fd->iommu_domain_num);
-	if (!fd->iommu_domain) {
-		dev_err(fd->dev, "Can not get iommu domain\n");
-		ret = -ENODEV;
-		goto error;
-	}
-
-	fd->iommu_dev = msm_iommu_get_ctx("camera_fd");
-	if (IS_ERR(fd->iommu_dev)) {
-		dev_err(fd->dev, "Can not get iommu device\n");
-		ret = -EPROBE_DEFER;
-		goto error_iommu_get_dev;
-	}
-
-	return 0;
-
-error_iommu_get_dev:
-	msm_unregister_domain(fd->iommu_domain);
-	fd->iommu_domain = NULL;
-	fd->iommu_domain_num = -1;
-error:
-	return ret;
-}
-
-/*
- * msm_fd_hw_get_iommu - Put fd iommu.
- * @fd: Pointer to fd device.
- *
- * Unregisters fd iommu domain.
- */
-void msm_fd_hw_put_iommu(struct msm_fd_device *fd)
-{
-	msm_unregister_domain(fd->iommu_domain);
-	fd->iommu_domain = NULL;
 }
 
 /*
@@ -652,8 +818,10 @@ static int msm_fd_hw_set_clock_rate_idx(struct msm_fd_device *fd,
 	long clk_rate;
 	int i;
 
-	if (idx >= fd->clk_rates_num)
-		idx = fd->clk_rates_num - 1;
+	if (idx >= fd->clk_rates_num) {
+		dev_err(fd->dev, "Invalid clock index %u\n", idx);
+		return -EINVAL;
+	}
 
 	for (i = 0; i < fd->clk_num; i++) {
 
@@ -720,20 +888,97 @@ static void msm_fd_hw_disable_clocks(struct msm_fd_device *fd)
 }
 
 /*
- * msm_fd_hw_bus_request - Request bus for memory access.
+ * msm_fd_hw_get_bus - Get bus bandwidth.
+ * @fd: Pointer to fd device.
+ *
+ * Read bus bandwidth information from device tree.
+ */
+int msm_fd_hw_get_bus(struct msm_fd_device *fd)
+{
+	size_t cnt;
+	unsigned int ab;
+	unsigned int ib;
+	unsigned int idx;
+	int usecase;
+	int ret;
+
+	idx = MSM_FD_MAX_CLK_RATES;
+
+	fd->bus_vectors = kzalloc(sizeof(*fd->bus_vectors) * idx, GFP_KERNEL);
+	if (!fd->bus_vectors) {
+		dev_err(fd->dev, "No memory for bus vectors\n");
+		return -ENOMEM;
+	}
+
+	fd->bus_paths = kzalloc(sizeof(*fd->bus_paths) * idx, GFP_KERNEL);
+	if (!fd->bus_paths) {
+		dev_err(fd->dev, "No memory for bus paths\n");
+		kfree(fd->bus_vectors);
+		fd->bus_vectors = NULL;
+		return -ENOMEM;
+	}
+
+	cnt = 0;
+	for (usecase = 0; usecase < idx; usecase++) {
+		ret = of_property_read_u32_index(fd->dev->of_node,
+			"bus-bandwidth-vectors", cnt++, &ab);
+		if (ret < 0)
+			break;
+
+		ret = of_property_read_u32_index(fd->dev->of_node,
+			"bus-bandwidth-vectors", cnt++, &ib);
+		if (ret < 0)
+			break;
+
+		fd->bus_vectors[usecase].src = MSM_BUS_MASTER_VPU;
+		fd->bus_vectors[usecase].dst = MSM_BUS_SLAVE_EBI_CH0;
+		fd->bus_vectors[usecase].ab = ab;
+		fd->bus_vectors[usecase].ib = ib;
+
+		fd->bus_paths[usecase].num_paths = 1;
+		fd->bus_paths[usecase].vectors = &fd->bus_vectors[usecase];
+
+		dev_dbg(fd->dev, "Bus bandwidth idx %d ab %u ib %u\n",
+			usecase, ab, ib);
+	}
+
+	fd->bus_scale_data.usecase = fd->bus_paths;
+	fd->bus_scale_data.num_usecases = usecase;
+	fd->bus_scale_data.name = MSM_FD_BUS_CLIENT_NAME;
+
+	return 0;
+}
+
+/*
+ * msm_fd_hw_put_bus - Put bus bandwidth.
  * @fd: Pointer to fd device.
  */
-static int msm_fd_hw_bus_request(struct msm_fd_device *fd)
+void msm_fd_hw_put_bus(struct msm_fd_device *fd)
+{
+	kfree(fd->bus_vectors);
+	fd->bus_vectors = NULL;
+
+	kfree(fd->bus_paths);
+	fd->bus_paths = NULL;
+
+	fd->bus_scale_data.num_usecases = 0;
+}
+/*
+ * msm_fd_hw_bus_request - Request bus for memory access.
+ * @fd: Pointer to fd device.
+ * @idx: Bus bandwidth array index described in device tree.
+ */
+static int msm_fd_hw_bus_request(struct msm_fd_device *fd, unsigned int idx)
 {
 	int ret;
 
-	fd->bus_client = msm_bus_scale_register_client(&msm_fd_bus_scale_data);
+	fd->bus_client = msm_bus_scale_register_client(&fd->bus_scale_data);
 	if (!fd->bus_client) {
 		dev_err(fd->dev, "Fail to register bus client\n");
 		return -ENOENT;
 	}
 
-	ret = msm_bus_scale_client_update_request(fd->bus_client, 0);
+	ret = msm_bus_scale_client_update_request(fd->bus_client, idx);
 	if (ret < 0) {
 		dev_err(fd->dev, "Fail bus scale update %d\n", ret);
 		return -EINVAL;
@@ -769,16 +1014,22 @@ int msm_fd_hw_get(struct msm_fd_device *fd, unsigned int clock_rate_idx)
 	mutex_lock(&fd->lock);
 
 	if (fd->ref_count == 0) {
-		ret = msm_fd_hw_set_clock_rate_idx(fd, clock_rate_idx);
+		ret = regulator_enable(fd->vdd);
 		if (ret < 0) {
 			dev_err(fd->dev, "Fail to enable vdd\n");
 			goto error;
 		}
 
-		ret = regulator_enable(fd->vdd);
+		ret = msm_fd_hw_bus_request(fd, clock_rate_idx);
 		if (ret < 0) {
-			dev_err(fd->dev, "Fail to enable vdd\n");
-			goto error;
+			dev_err(fd->dev, "Fail bus request\n");
+			goto error_bus_request;
+		}
+
+		ret = msm_fd_hw_set_clock_rate_idx(fd, clock_rate_idx);
+		if (ret < 0) {
+			dev_err(fd->dev, "Fail to set clock index\n");
+			goto error_clocks;
 		}
 
 		ret = msm_fd_hw_enable_clocks(fd);
@@ -787,11 +1038,9 @@ int msm_fd_hw_get(struct msm_fd_device *fd, unsigned int clock_rate_idx)
 			goto error_clocks;
 		}
 
-		ret = msm_fd_hw_bus_request(fd);
-		if (ret < 0) {
-			dev_err(fd->dev, "Fail bus request\n");
-			goto error_bus_request;
-		}
+		if (msm_fd_hw_misc_irq_supported(fd))
+			msm_fd_hw_misc_irq_enable(fd);
+
 		msm_fd_hw_vbif_register(fd);
 	}
 
@@ -800,9 +1049,9 @@ int msm_fd_hw_get(struct msm_fd_device *fd, unsigned int clock_rate_idx)
 
 	return 0;
 
-error_bus_request:
-	msm_fd_hw_disable_clocks(fd);
 error_clocks:
+	msm_fd_hw_bus_release(fd);
+error_bus_request:
 	regulator_disable(fd->vdd);
 error:
 	mutex_unlock(&fd->lock);
@@ -822,6 +1071,11 @@ void msm_fd_hw_put(struct msm_fd_device *fd)
 	BUG_ON(fd->ref_count == 0);
 
 	if (--fd->ref_count == 0) {
+		msm_fd_hw_halt(fd);
+
+		if (msm_fd_hw_misc_irq_supported(fd))
+			msm_fd_hw_misc_irq_disable(fd);
+
 		msm_fd_hw_vbif_unregister(fd);
 		msm_fd_hw_bus_release(fd);
 		msm_fd_hw_disable_clocks(fd);
@@ -849,10 +1103,16 @@ static int msm_fd_hw_attach_iommu(struct msm_fd_device *fd)
 	}
 
 	if (fd->iommu_attached_cnt == 0) {
-		ret = iommu_attach_device(fd->iommu_domain, fd->iommu_dev);
+		ret = cam_smmu_get_handle(MSM_FD_SMMU_CB_NAME, &fd->iommu_hdl);
 		if (ret < 0) {
-			dev_err(fd->dev, "Can not attach iommu domain\n");
+			dev_err(fd->dev, "get handle failed\n");
+			ret = -ENOMEM;
 			goto error;
+		}
+		ret = cam_smmu_ops(fd->iommu_hdl, CAM_SMMU_ATTACH);
+		if (ret < 0) {
+			dev_err(fd->dev, "Can not attach iommu domain.\n");
+			goto error_attach;
 		}
 	}
 	fd->iommu_attached_cnt++;
@@ -860,6 +1120,8 @@ static int msm_fd_hw_attach_iommu(struct msm_fd_device *fd)
 
 	return 0;
 
+error_attach:
+	cam_smmu_destroy_handle(fd->iommu_hdl);
 error:
 	mutex_unlock(&fd->lock);
 	return ret;
@@ -880,10 +1142,10 @@ static void msm_fd_hw_detach_iommu(struct msm_fd_device *fd)
 		mutex_unlock(&fd->lock);
 		return;
 	}
-
-	if (--fd->iommu_attached_cnt == 0)
-		iommu_detach_device(fd->iommu_domain, fd->iommu_dev);
-
+	if (--fd->iommu_attached_cnt == 0) {
+		cam_smmu_ops(fd->iommu_hdl, CAM_SMMU_DETACH);
+		cam_smmu_destroy_handle(fd->iommu_hdl);
+	}
 	mutex_unlock(&fd->lock);
 }
 
@@ -905,28 +1167,18 @@ int msm_fd_hw_map_buffer(struct msm_fd_mem_pool *pool, int fd,
 
 	ret = msm_fd_hw_attach_iommu(pool->fd_device);
 	if (ret < 0)
-		goto error;
+		return -ENOMEM;
 
 	buf->pool = pool;
 	buf->fd = fd;
-
-	buf->handle = ion_import_dma_buf(pool->client, buf->fd);
-	if (IS_ERR_OR_NULL(buf->handle))
-		goto error_import_dma;
-
-	ret = ion_map_iommu(pool->client, buf->handle, pool->domain_num,
-		0, SZ_4K, 0, &buf->addr, &buf->size, 0, 0);
-	if (ret < 0)
-		goto error_map_iommu;
-
+	ret = cam_smmu_get_phy_addr(pool->fd_device->iommu_hdl,
+			buf->fd, CAM_SMMU_MAP_RW,
+			&buf->addr, (size_t *)&buf->size);
+	if (ret < 0) {
+		pr_err("Error: cannot get phy addr\n");
+		return -ENOMEM;
+	}
 	return buf->size;
-
-error_map_iommu:
-	ion_free(pool->client, buf->handle);
-error_import_dma:
-	msm_fd_hw_detach_iommu(pool->fd_device);
-error:
-	return -ENOMEM;
 }
 
 /*
@@ -936,17 +1188,13 @@ error:
 void msm_fd_hw_unmap_buffer(struct msm_fd_buf_handle *buf)
 {
 	if (buf->size) {
-		ion_unmap_iommu(buf->pool->client, buf->handle,
-			buf->pool->domain_num, 0);
+		cam_smmu_put_phy_addr(buf->pool->fd_device->iommu_hdl,
+		buf->fd);
 		msm_fd_hw_detach_iommu(buf->pool->fd_device);
 	}
 
-	if (!IS_ERR_OR_NULL(buf->handle))
-		ion_free(buf->pool->client, buf->handle);
-
 	buf->fd = -1;
 	buf->pool = NULL;
-	buf->handle = NULL;
 }
 
 /*
@@ -1004,6 +1252,25 @@ static int msm_fd_hw_try_enable(struct msm_fd_device *fd,
 		enabled = 1;
 	}
 	return enabled;
+}
+
+/*
+ * msm_fd_hw_remove_active_buffer - Remove active buffer from processing queue.
+ * @fd: Fd device.
+ */
+static int msm_fd_hw_remove_active_buffer(struct msm_fd_device *fd)
+{
+	struct msm_fd_buffer *buffer;
+	int active_removed = 0;
+
+	if (!list_empty(&fd->buf_queue)) {
+		buffer = list_first_entry(&fd->buf_queue,
+			struct msm_fd_buffer, list);
+		list_del(&buffer->list);
+		active_removed = 1;
+	}
+
+	return active_removed;
 }
 
 /*
@@ -1071,8 +1338,6 @@ void msm_fd_hw_remove_buffers_from_queue(struct msm_fd_device *fd,
 		time = wait_for_completion_timeout(&active_buffer->completion,
 			msecs_to_jiffies(MSM_FD_PROCESSING_TIMEOUT_MS));
 		if (!time) {
-			/* Remove active buffer */
-			msm_fd_hw_get_active_buffer(fd);
 			/* Schedule if other buffers are present in device */
 			msm_fd_hw_schedule_next_buffer(fd);
 		}
@@ -1118,7 +1383,6 @@ struct msm_fd_buffer *msm_fd_hw_get_active_buffer(struct msm_fd_device *fd)
 	if (!list_empty(&fd->buf_queue)) {
 		buffer = list_first_entry(&fd->buf_queue,
 			struct msm_fd_buffer, list);
-		list_del(&buffer->list);
 	}
 	spin_unlock(&fd->slock);
 
@@ -1161,6 +1425,13 @@ int msm_fd_hw_schedule_next_buffer(struct msm_fd_device *fd)
 	/* We can schedule next buffer only in running state */
 	if (fd->state != MSM_FD_DEVICE_RUNNING) {
 		dev_err(fd->dev, "Can not schedule next buffer\n");
+		spin_unlock(&fd->slock);
+		return -EBUSY;
+	}
+
+	ret = msm_fd_hw_remove_active_buffer(fd);
+	if (ret == 0) {
+		dev_err(fd->dev, "Active buffer is missing\n");
 		spin_unlock(&fd->slock);
 		return -EBUSY;
 	}

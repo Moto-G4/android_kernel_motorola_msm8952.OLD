@@ -49,8 +49,11 @@
 #define SSCTL_SERVICE_ID			0x2B
 #define SSCTL_VER_2				2
 #define SERVER_TIMEOUT				500
+#if 1 
+#define SHUTDOWN_TIMEOUT                        8000
+#else
 #define SHUTDOWN_TIMEOUT			5000
-
+#endif 
 #define QMI_EOTI_DATA_TYPE	\
 {				\
 	.data_type = QMI_EOTI,	\
@@ -76,6 +79,8 @@ struct sysmon_qmi_data {
 	struct completion ind_recv;
 	struct list_head list;
 };
+
+static struct workqueue_struct *sysmon_wq;
 
 static LIST_HEAD(sysmon_list);
 static DEFINE_MUTEX(sysmon_list_lock);
@@ -119,10 +124,10 @@ static int sysmon_svc_event_notify(struct notifier_block *this,
 
 	switch (code) {
 	case QMI_SERVER_ARRIVE:
-		schedule_work(&data->svc_arrive);
+		queue_work(sysmon_wq, &data->svc_arrive);
 		break;
 	case QMI_SERVER_EXIT:
-		schedule_work(&data->svc_exit);
+		queue_work(sysmon_wq, &data->svc_exit);
 		break;
 	default:
 		break;
@@ -151,7 +156,7 @@ static void sysmon_clnt_svc_arrive(struct work_struct *work)
 	struct sysmon_qmi_data *data = container_of(work,
 					struct sysmon_qmi_data, svc_arrive);
 
-	/* Create a Local client port for QMI communication */
+	
 	data->clnt_handle = qmi_handle_create(sysmon_clnt_notify, work);
 	if (!data->clnt_handle) {
 		pr_err("QMI client handle alloc failed for %s\n", data->name);
@@ -280,24 +285,6 @@ static struct elem_info qmi_ssctl_subsys_event_resp_msg_ei[] = {
 	QMI_EOTI_DATA_TYPE
 };
 
-/**
- * sysmon_send_event() - Notify a subsystem of another's state change
- * @dest_desc:	Subsystem descriptor of the subsystem the notification
- * should be sent to
- * @event_desc:	Subsystem descriptor of the subsystem that generated the
- * notification
- * @notif:	ID of the notification type (ex. SUBSYS_BEFORE_SHUTDOWN)
- *
- * Reverts to using legacy sysmon API (sysmon_send_event_no_qmi()) if
- * client handle is not set.
- *
- * Returns 0 for success, -EINVAL for invalid destination or notification IDs,
- * -ENODEV if the transport channel is not open, -ETIMEDOUT if the destination
- * subsystem does not respond, and -ENOSYS if the destination subsystem
- * responds, but with something other than an acknowledgement.
- *
- * If CONFIG_MSM_SYSMON_COMM is not defined, always return success (0).
- */
 int sysmon_send_event(struct subsys_desc *dest_desc,
 			struct subsys_desc *event_desc,
 			enum subsys_notif_type notif)
@@ -355,7 +342,7 @@ int sysmon_send_event(struct subsys_desc *dest_desc,
 		goto out;
 	}
 
-	/* Check the response */
+	
 	if (QMI_RESP_BIT_SHIFT(resp.resp.result) != QMI_RESULT_SUCCESS_V01) {
 		pr_debug("QMI request failed 0x%x\n",
 					QMI_RESP_BIT_SHIFT(resp.resp.error));
@@ -392,21 +379,6 @@ static struct elem_info qmi_ssctl_shutdown_resp_msg_ei[] = {
 	QMI_EOTI_DATA_TYPE
 };
 
-/**
- * sysmon_send_shutdown() - send shutdown command to a
- * subsystem.
- * @dest_desc:	Subsystem descriptor of the subsystem to send to
- *
- * Reverts to using legacy sysmon API (sysmon_send_shutdown_no_qmi()) if
- * client handle is not set.
- *
- * Returns 0 for success, -EINVAL for an invalid destination, -ENODEV if
- * the SMD transport channel is not open, -ETIMEDOUT if the destination
- * subsystem does not respond, and -ENOSYS if the destination subsystem
- * responds with something unexpected.
- *
- * If CONFIG_MSM_SYSMON_COMM is not defined, always return success (0).
- */
 int sysmon_send_shutdown(struct subsys_desc *dest_desc)
 {
 	struct msg_desc req_desc, resp_desc;
@@ -455,7 +427,7 @@ int sysmon_send_shutdown(struct subsys_desc *dest_desc)
 		goto out;
 	}
 
-	/* Check the response */
+	
 	if (QMI_RESP_BIT_SHIFT(resp.resp.result) != QMI_RESULT_SUCCESS_V01) {
 		pr_err("QMI request failed 0x%x\n",
 					QMI_RESP_BIT_SHIFT(resp.resp.error));
@@ -537,22 +509,6 @@ static struct elem_info qmi_ssctl_get_failure_reason_resp_msg_ei[] = {
 	QMI_EOTI_DATA_TYPE
 };
 
-/**
- * sysmon_get_reason() - Retrieve failure reason from a subsystem.
- * @dest_desc:	Subsystem descriptor of the subsystem to query
- * @buf:	Caller-allocated buffer for the returned NUL-terminated reason
- * @len:	Length of @buf
- *
- * Reverts to using legacy sysmon API (sysmon_get_reason_no_qmi()) if client
- * handle is not set.
- *
- * Returns 0 for success, -EINVAL for an invalid destination, -ENODEV if
- * the SMD transport channel is not open, -ETIMEDOUT if the destination
- * subsystem does not respond, and -ENOSYS if the destination subsystem
- * responds with something unexpected.
- *
- * If CONFIG_MSM_SYSMON_COMM is not defined, always return success (0).
- */
 int sysmon_get_reason(struct subsys_desc *dest_desc, char *buf, size_t len)
 {
 	struct msg_desc req_desc, resp_desc;
@@ -601,7 +557,7 @@ int sysmon_get_reason(struct subsys_desc *dest_desc, char *buf, size_t len)
 		goto out;
 	}
 
-	/* Check the response */
+	
 	if (QMI_RESP_BIT_SHIFT(resp.resp.result) != QMI_RESULT_SUCCESS_V01) {
 		pr_err("QMI request failed 0x%x\n",
 					QMI_RESP_BIT_SHIFT(resp.resp.error));
@@ -621,17 +577,6 @@ out:
 }
 EXPORT_SYMBOL(sysmon_get_reason);
 
-/**
- * sysmon_notifier_register() - Initialize sysmon data for a subsystem.
- * @dest_desc:	Subsystem descriptor of the subsystem
- *
- * Returns 0 for success. If the subsystem does not support SSCTL v2, a
- * value of 0 is returned after adding the subsystem entry to the sysmon_list.
- * In addition, if the SSCTL v2 support exists, the notifier block to receive
- * events from the SSCTL service on the subsystem is registered.
- *
- * If CONFIG_MSM_SYSMON_COMM is not defined, always return success (0).
- */
 int sysmon_notifier_register(struct subsys_desc *desc)
 {
 	struct sysmon_qmi_data *data;
@@ -651,6 +596,19 @@ int sysmon_notifier_register(struct subsys_desc *desc)
 		goto add_list;
 	}
 
+	mutex_lock(&sysmon_list_lock);
+	if (sysmon_wq)
+		goto notif_register;
+
+	sysmon_wq = create_singlethread_workqueue("sysmon_wq");
+	if (!sysmon_wq) {
+		mutex_unlock(&sysmon_list_lock);
+		pr_err("Could not create workqueue\n");
+		kfree(data);
+		return -ENOMEM;
+	}
+
+notif_register:
 	data->notifier.notifier_call = sysmon_svc_event_notify;
 	init_completion(&data->ind_recv);
 
@@ -663,7 +621,6 @@ int sysmon_notifier_register(struct subsys_desc *desc)
 	if (rc < 0)
 		pr_err("Notifier register failed for %s\n", data->name);
 add_list:
-	mutex_lock(&sysmon_list_lock);
 	INIT_LIST_HEAD(&data->list);
 	list_add_tail(&data->list, &sysmon_list);
 	mutex_unlock(&sysmon_list_lock);
@@ -672,14 +629,6 @@ add_list:
 }
 EXPORT_SYMBOL(sysmon_notifier_register);
 
-/**
- * sysmon_notifier_unregister() - Cleanup the subsystem's sysmon data.
- * @dest_desc:	Subsystem descriptor of the subsystem
- *
- * If the subsystem does not support SSCTL v2, its entry is simply removed from
- * the sysmon_list. In addition, if the SSCTL v2 support exists, the notifier
- * block to receive events from the SSCTL service is unregistered.
- */
 void sysmon_notifier_unregister(struct subsys_desc *desc)
 {
 	struct sysmon_qmi_data *data = NULL, *sysmon_data, *tmp;
@@ -690,14 +639,18 @@ void sysmon_notifier_unregister(struct subsys_desc *desc)
 			data = sysmon_data;
 			list_del(&data->list);
 		}
-	mutex_unlock(&sysmon_list_lock);
 
 	if (data == NULL)
-		return;
+		goto exit;
 
 	if (data->instance_id > 0)
 		qmi_svc_event_notifier_unregister(SSCTL_SERVICE_ID,
 			SSCTL_VER_2, data->instance_id, &data->notifier);
+
+	if (sysmon_wq && list_empty(&sysmon_list))
+		destroy_workqueue(sysmon_wq);
+exit:
+	mutex_unlock(&sysmon_list_lock);
 	kfree(data);
 }
 EXPORT_SYMBOL(sysmon_notifier_unregister);

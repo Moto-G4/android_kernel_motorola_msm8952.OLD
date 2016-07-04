@@ -1652,12 +1652,12 @@ static bool qtaguid_mt(const struct sk_buff *skb, struct xt_action_param *par)
 	struct sock *sk;
 	uid_t sock_uid;
 	bool res;
-	bool set_sk_callback_lock = false;
 	/*
 	 * TODO: unhack how to force just accounting.
 	 * For now we only do tag stats when the uid-owner is not requested
 	 */
 	bool do_tag_stat = !(info->match & XT_QTAGUID_UID);
+	bool set_sk_callback_lock = false;
 
 	if (unlikely(module_passive))
 		return (info->match ^ info->invert) == 0;
@@ -2265,21 +2265,6 @@ static int ctrl_cmd_tag(const char *input)
 			 "st@%p ...->f_count=%ld\n",
 			 input, el_socket->sk, sock_tag_entry,
 			 atomic_long_read(&el_socket->file->f_count));
-
-		/*
-		 * The tagged socket should be the same as the one from this
-		 * sockfd_lookup(). Otherwise, some unexpected error happens,
-		 * we just put back this ref and return.
-		 */
-		if (sock_tag_entry->socket != el_socket) {
-			pr_err("qtaguid: ctrl_tag(%s): "
-			       "socket mismatch\n",
-			       input);
-			spin_unlock_bh(&sock_tag_list_lock);
-			res = -EINVAL;
-			goto err_tag_unref_put;
-		}
-
 		/*
 		 * This is a re-tagging, so release the sock_fd that was
 		 * locked at the time of the 1st tagging.

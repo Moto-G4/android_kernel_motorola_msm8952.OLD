@@ -126,7 +126,6 @@ int C_A_D = 1;
 struct pid *cad_pid;
 EXPORT_SYMBOL(cad_pid);
 
-atomic_t reboot_triggered;
 /*
  * If set, this is used for preparing the system to power off.
  */
@@ -406,10 +405,6 @@ void kernel_restart(char *cmd)
 		printk(KERN_EMERG "Restarting system.\n");
 	else
 		printk(KERN_EMERG "Restarting system with command '%s'.\n", cmd);
-	printk(KERN_EMERG "Current task:%s(%d) Parent task:%s(%d)\n",
-		current->comm, current->pid,
-		current->real_parent->comm,
-		current->real_parent->pid);
 	kmsg_dump(KMSG_DUMP_RESTART);
 	machine_restart(cmd);
 }
@@ -453,20 +448,10 @@ void kernel_power_off(void)
 	migrate_to_reboot_cpu();
 	syscore_shutdown();
 	printk(KERN_EMERG "Power down.\n");
-	printk(KERN_EMERG "Current task:%s(%d) Parent task:%s(%d)\n",
-		current->comm, current->pid,
-		current->real_parent->comm,
-		current->real_parent->pid);
 	kmsg_dump(KMSG_DUMP_POWEROFF);
 	machine_power_off();
 }
 EXPORT_SYMBOL_GPL(kernel_power_off);
-
-int reboot_in_progress(void)
-{
-	return atomic_cmpxchg(&reboot_triggered, 0, 1);
-}
-EXPORT_SYMBOL_GPL(reboot_in_progress);
 
 static DEFINE_MUTEX(reboot_mutex);
 
@@ -505,12 +490,6 @@ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
 	ret = reboot_pid_ns(pid_ns, cmd);
 	if (ret)
 		return ret;
-
-	/* return if reboot is already triggered */
-	if (atomic_cmpxchg(&reboot_triggered, 0, 1)) {
-		pr_err("Reboot already triggered\n");
-		return ret;
-	}
 
 	/* Instead of trying to make the power_off code look like
 	 * halt when pm_power_off is not set do it the easy way.
@@ -2398,26 +2377,6 @@ SYSCALL_DEFINE5(prctl, int, option, unsigned long, arg2, unsigned long, arg3,
 			else
 				return -EINVAL;
 			break;
-		case PR_SET_TIMERSLACK_PID:
-			if (current->pid != (pid_t)arg3 &&
-					!capable(CAP_SYS_NICE))
-				return -EPERM;
-			rcu_read_lock();
-			tsk = find_task_by_pid_ns((pid_t)arg3, &init_pid_ns);
-			if (tsk == NULL) {
-				rcu_read_unlock();
-				return -EINVAL;
-			}
-			get_task_struct(tsk);
-			rcu_read_unlock();
-			if (arg2 <= 0)
-				tsk->timer_slack_ns =
-					tsk->default_timer_slack_ns;
-			else
-				tsk->timer_slack_ns = arg2;
-			put_task_struct(tsk);
-			error = 0;
-			break;
 		default:
 			return -EINVAL;
 		}
@@ -2436,6 +2395,26 @@ SYSCALL_DEFINE5(prctl, int, option, unsigned long, arg2, unsigned long, arg3,
 		break;
 	case PR_GET_TID_ADDRESS:
 		error = prctl_get_tid_address(me, (int __user **)arg2);
+		break;
+	case PR_SET_TIMERSLACK_PID:
+		if (task_pid_vnr(current) != (pid_t)arg3 &&
+				!capable(CAP_SYS_NICE))
+			return -EPERM;
+		rcu_read_lock();
+		tsk = find_task_by_vpid((pid_t)arg3);
+		if (tsk == NULL) {
+			rcu_read_unlock();
+			return -EINVAL;
+		}
+		get_task_struct(tsk);
+		rcu_read_unlock();
+		if (arg2 <= 0)
+			tsk->timer_slack_ns =
+				tsk->default_timer_slack_ns;
+		else
+			tsk->timer_slack_ns = arg2;
+		put_task_struct(tsk);
+		error = 0;
 		break;
 	case PR_SET_CHILD_SUBREAPER:
 		me->signal->is_child_subreaper = !!arg2;

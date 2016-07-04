@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -190,6 +190,13 @@ void mdss_mdp_release_splash_pipe(struct msm_fb_data_type *mfd)
 	if (sinfo->pipe_ndx[1] != INVALID_PIPE_INDEX)
 		mdss_mdp_overlay_release(mfd, sinfo->pipe_ndx[1]);
 	sinfo->splash_pipe_allocated = false;
+
+	/*
+	 * Once the splash pipe is released, reset the splash flag which
+	 * is being stored in var.reserved[3].
+	 */
+	mfd->fbi->var.reserved[3] = mfd->panel_info->cont_splash_enabled |
+					mfd->splash_info.splash_pipe_allocated;
 }
 
 /*
@@ -226,24 +233,11 @@ int mdss_mdp_splash_cleanup(struct msm_fb_data_type *mfd,
 	if (!ctl)
 		return -EINVAL;
 
-	if (!mfd->panel_info->cont_splash_enabled ||
-		(mfd->splash_info.iommu_dynamic_attached && !use_borderfill)) {
-		if (mfd->splash_info.iommu_dynamic_attached &&
-			use_borderfill) {
-			mdss_mdp_splash_unmap_splash_mem(mfd);
-			memblock_free(mdp5_data->splash_mem_addr,
-					mdp5_data->splash_mem_size);
-			mdss_free_bootmem(mdp5_data->splash_mem_addr,
-					mdp5_data->splash_mem_size);
-		}
+	if (mfd->splash_info.iommu_dynamic_attached ||
+			!mfd->panel_info->cont_splash_enabled)
 		goto end;
-	}
 
-	/* 1-to-1 mapping */
-	mdss_mdp_splash_iommu_attach(mfd);
-
-	if (use_borderfill && mdp5_data->handoff &&
-		!mfd->splash_info.iommu_dynamic_attached) {
+	if (use_borderfill && mdp5_data->handoff) {
 		/*
 		 * Set up border-fill on the handed off pipes.
 		 * This is needed to ensure that there are no memory
@@ -279,15 +273,22 @@ int mdss_mdp_splash_cleanup(struct msm_fb_data_type *mfd,
 
 	mdss_mdp_ctl_splash_finish(ctl, mdp5_data->handoff);
 
-	if (mdp5_data->splash_mem_addr &&
-		!mfd->splash_info.iommu_dynamic_attached) {
+	/*
+	 * Once the splash cleanup is done, reset the splash flag which
+	 * is being stored in var.reserved[3].
+	 */
+	mfd->fbi->var.reserved[3] = mfd->panel_info->cont_splash_enabled |
+					mfd->splash_info.splash_pipe_allocated;
+
+#if 0
+	if (mdp5_data->splash_mem_addr) {
 		/* Give back the reserved memory to the system */
 		memblock_free(mdp5_data->splash_mem_addr,
 					mdp5_data->splash_mem_size);
 		mdss_free_bootmem(mdp5_data->splash_mem_addr,
 					mdp5_data->splash_mem_size);
 	}
-
+#endif
 	mdss_mdp_footswitch_ctrl_splash(0);
 end:
 	return rc;
@@ -312,7 +313,13 @@ static struct mdss_mdp_pipe *mdss_mdp_splash_get_pipe(
 		return NULL;
 	}
 
-	buf = &pipe->back_buf;
+	buf = mdss_mdp_overlay_buf_alloc(mfd, pipe);
+	if (!buf) {
+		pr_err("unable to allocate memory for splash buffer\n");
+		mdss_mdp_pipe_unmap(pipe);
+		return NULL;
+	}
+
 	buf->p[0].addr = mfd->splash_info.iova;
 	buf->p[0].len = image_size;
 	buf->num_planes = 1;

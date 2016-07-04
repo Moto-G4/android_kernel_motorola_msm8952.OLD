@@ -35,6 +35,10 @@
 #include <asm/page.h>
 #include <asm/virt.h>
 
+#ifdef CONFIG_HTC_DEBUG_FOOTPRINT
+#include <htc_mnemosyne/htc_footprint.h>
+#endif
+
 /*
  * swapper_pg_dir is the virtual address of the initial page table. We place
  * the page tables 3 * PAGE_SIZE below KERNEL_RAM_VADDR. The idmap_pg_dir has
@@ -606,6 +610,35 @@ ENTRY(secondary_holding_pen)
 	bl	el2_setup			// Drop to EL1, w20=cpu_boot_mode
 	bl	__calc_phys_offset		// x24=PHYS_OFFSET, x28=PHYS_OFFSET-PAGE_OFFSET
 	bl	set_cpu_boot_mode_flag
+
+#ifdef CONFIG_HTC_DEBUG_FOOTPRINT
+       MPIDR2INDEX     x0, x1
+       VIRT2PHYS       x1, mnemosyne_phys, secondary_holding_pen, x2
+       ldr             x1, [x1]                                        /* Store mnemosyne_phys in x1 */
+
+       cmp     x1, #0
+       beq     skip_footprint                                          /* If phys is NULL, skip it */
+
+       ldr     x2, =mnemosyne_kernel_exit_counter_from_cpu             /* Get the offset of an element */
+       add     x2, x1, x2                                              /* Get the address of an element */
+       add     x2, x2, x0, LSL #MNEMOSYNE_ELEMENT_SIZE_BIT_SHIFT       /* calculate data offset with cpu index first. */
+
+       ldr     x3, [x2]
+       add     x3, x3, #1
+       str     x3, [x2]
+       dsb     sy
+
+       ldr     x2, =mnemosyne_kernel_footprint_cpu                     /* Get the offset of an element */
+       add     x2, x1, x2                                              /* Get the address of an element */
+       add     x2, x2, x0, LSL #MNEMOSYNE_ELEMENT_SIZE_BIT_SHIFT       /* calculate data offset with cpu index first. */
+
+       ldr     x3, =0x05
+       strb    w3, [x2]                                                /* write footprint 5, only the lowest byte */
+       dsb     sy
+
+       skip_footprint:
+#endif
+
 	mrs	x0, mpidr_el1
 	ldr     x1, =MPIDR_HWID_BITMASK
 	and	x0, x0, x1
@@ -705,8 +738,13 @@ ENDPROC(__enable_mmu)
  *  x27 = *virtual* address to jump to upon completion
  *
  * other registers depend on the function called upon completion
+ *
+ * We align the entire function to the smallest power of two larger than it to
+ * ensure it fits within a single block map entry. Otherwise were PHYS_OFFSET
+ * close to the end of a 512MB or 1GB block we might require an additional
+ * table to map the entire function.
  */
-	.align	6
+	.align	4
 __turn_mmu_on:
 	msr	sctlr_el1, x0
 	isb

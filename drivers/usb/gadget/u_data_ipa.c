@@ -1,4 +1,4 @@
-/* Copyright (c) 2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2014-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -217,7 +217,8 @@ void ipa_data_disconnect(struct gadget_ipa_port *gp, u8 port_num)
 			 * complete function will be called, where we try
 			 * to obtain the spinlock as well.
 			 */
-			msm_ep_unconfig(port->port_usb->in);
+			if (gadget_is_dwc3(gadget))
+				msm_ep_unconfig(port->port_usb->in);
 			spin_unlock_irqrestore(&port->port_lock, flags);
 			usb_ep_disable(port->port_usb->in);
 			spin_lock_irqsave(&port->port_lock, flags);
@@ -225,7 +226,8 @@ void ipa_data_disconnect(struct gadget_ipa_port *gp, u8 port_num)
 		}
 
 		if (port->port_usb->out) {
-			msm_ep_unconfig(port->port_usb->out);
+			if (gadget_is_dwc3(gadget))
+				msm_ep_unconfig(port->port_usb->out);
 			spin_unlock_irqrestore(&port->port_lock, flags);
 			usb_ep_disable(port->port_usb->out);
 			spin_lock_irqsave(&port->port_lock, flags);
@@ -334,7 +336,8 @@ static void ipa_data_connect_work(struct work_struct *w)
 
 	/* update IPA Parameteres here. */
 	port->ipa_params.usb_connection_speed = gadget->speed;
-	port->ipa_params.reset_pipe_after_lpm =
+	if (gadget_is_dwc3(gadget))
+		port->ipa_params.reset_pipe_after_lpm =
 				msm_dwc3_reset_ep_after_lpm(gadget);
 	port->ipa_params.skip_ep_cfg = true;
 	port->ipa_params.keep_ipa_awake = true;
@@ -356,12 +359,18 @@ static void ipa_data_connect_work(struct work_struct *w)
 			pr_err("usb_bam_connect_ipa out failed err:%d\n", ret);
 			goto free_rx_tx_req;
 		}
+		gadget->bam2bam_func_enabled = true;
 
 		gport->ipa_consumer_ep = port->ipa_params.ipa_cons_ep_idx;
 
-		sps_params = MSM_SPS_MODE | MSM_DISABLE_WB
-				| MSM_PRODUCER | port->src_pipe_idx;
-		port->rx_req->length = 32*1024;
+		if (gadget_is_dwc3(gadget)) {
+			sps_params = MSM_SPS_MODE | MSM_DISABLE_WB
+					| MSM_PRODUCER | port->src_pipe_idx;
+			port->rx_req->length = 32*1024;
+		} else {
+			sps_params = (MSM_SPS_MODE | port->src_pipe_idx |
+				       MSM_VENDOR_ID) & ~MSM_IS_FINITE_TRANSFER;
+		}
 		port->rx_req->udc_priv = sps_params;
 
 		port->src_bam_idx = usb_bam_get_connection_idx(
@@ -373,11 +382,13 @@ static void ipa_data_connect_work(struct work_struct *w)
 			goto disconnect_usb_bam_ipa_out;
 		}
 
-		configure_fifo(port->src_bam_idx, port->port_usb->out);
-		ret = msm_ep_config(port->port_usb->out);
-		if (ret) {
-			pr_err("msm_ep_config() failed for OUT EP\n");
-			goto disconnect_usb_bam_ipa_out;
+		if (gadget_is_dwc3(gadget)) {
+			configure_fifo(port->src_bam_idx, port->port_usb->out);
+			ret = msm_ep_config(port->port_usb->out);
+			if (ret) {
+				pr_err("msm_ep_config() failed for OUT EP\n");
+				goto disconnect_usb_bam_ipa_out;
+			}
 		}
 		is_ipa_disconnected = false;
 	}
@@ -391,10 +402,17 @@ static void ipa_data_connect_work(struct work_struct *w)
 			pr_err("usb_bam_connect_ipa IN failed err:%d\n", ret);
 			goto unconfig_msm_ep_out;
 		}
+		gadget->bam2bam_func_enabled = true;
 
 		gport->ipa_producer_ep = port->ipa_params.ipa_prod_ep_idx;
-		sps_params = MSM_SPS_MODE | MSM_DISABLE_WB | port->dst_pipe_idx;
-		port->tx_req->length = 32*1024;
+		if (gadget_is_dwc3(gadget)) {
+			sps_params = MSM_SPS_MODE | MSM_DISABLE_WB |
+							port->dst_pipe_idx;
+			port->tx_req->length = 32*1024;
+		} else {
+			sps_params = (MSM_SPS_MODE | port->dst_pipe_idx |
+				       MSM_VENDOR_ID) & ~MSM_IS_FINITE_TRANSFER;
+		}
 		port->tx_req->udc_priv = sps_params;
 
 		port->dst_bam_idx = usb_bam_get_connection_idx(gadget->name,
@@ -404,11 +422,13 @@ static void ipa_data_connect_work(struct work_struct *w)
 			pr_err("dst_bam: get_connection_idx failed\n");
 			goto disconnect_usb_bam_ipa_in;
 		}
-		configure_fifo(port->dst_bam_idx, gport->in);
-		ret = msm_ep_config(gport->in);
-		if (ret) {
-			pr_err("msm_ep_config() failed for IN EP\n");
-			goto disconnect_usb_bam_ipa_in;
+		if (gadget_is_dwc3(gadget)) {
+			configure_fifo(port->dst_bam_idx, gport->in);
+			ret = msm_ep_config(gport->in);
+			if (ret) {
+				pr_err("msm_ep_config() failed for IN EP\n");
+				goto disconnect_usb_bam_ipa_in;
+			}
 		}
 		is_ipa_disconnected = false;
 	}
@@ -720,7 +740,9 @@ void ipa_data_resume(struct gadget_ipa_port *gp, u8 port_num)
 	if (msm_dwc3_reset_ep_after_lpm(gadget)) {
 		configure_fifo(port->src_bam_idx, port->port_usb->out);
 		configure_fifo(port->dst_bam_idx, port->port_usb->in);
+		spin_unlock_irqrestore(&port->port_lock, flags);
 		msm_dwc3_reset_dbm_ep(port->port_usb->in);
+		spin_lock_irqsave(&port->port_lock, flags);
 		usb_bam_resume(&port->ipa_params);
 	}
 

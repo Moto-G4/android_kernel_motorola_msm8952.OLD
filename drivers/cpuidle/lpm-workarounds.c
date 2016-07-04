@@ -51,10 +51,8 @@ static int lpm_wa_callback(struct notifier_block *cpu_nb,
 
 	if ((action != CPU_POST_DEAD) && (action != CPU_ONLINE))
 		return NOTIFY_OK;
-
 	if (cpu >= non_boot_cpu_index)
 		return NOTIFY_OK;
-
 
 	switch (action & ~CPU_TASKS_FROZEN) {
 	case CPU_POST_DEAD:
@@ -80,19 +78,18 @@ static struct notifier_block __refdata lpm_wa_nblk = {
 
 static void process_lpm_workarounds(struct work_struct *w)
 {
-	int ret = 0, status = 0;
-
+	int ret = 0, status = 0, cpu = 0;
 
 	/* MSM8952 have L1/L2 dynamic clock gating disabled in HW for
 	 * performance cluster cores. Enable it via SW to reduce power
 	 * impact.
 	 */
+
 	if (enable_dynamic_clock_gating) {
 
 		/* Skip enabling L1/L2 clock gating if perf l2 is not in low
 		 * power mode.
 		 */
-
 		status = (__raw_readl(l2_pwr_sts) & L2_HS_STS_SET)
 							== L2_HS_STS_SET;
 		if (status) {
@@ -102,21 +99,23 @@ static void process_lpm_workarounds(struct work_struct *w)
 			return;
 		}
 
-		l2_status = __raw_readl(l2_pwr_sts);
+		cpu = get_cpu();
 
+		l2_status = __raw_readl(l2_pwr_sts);
 		pr_err("Set L1_L2_GCC from cpu%d when perf L2 status=0x%x\n",
-			smp_processor_id(), l2_status);
+			cpu, l2_status);
 
 		if (is_l1_l2_gcc_secure) {
 			scm_io_write((u32)(l1_l2_gcc_res->start), 0x0);
-			if (scm_io_read((u32)(l1_l2_gcc_res->start)) !=0)
+			if (scm_io_read((u32)(l1_l2_gcc_res->start)) != 0)
 				pr_err("Failed to set L1_L2_GCC\n");
-		}
-		else {
+		} else {
 			__raw_writel(0x0, l1_l2_gcc);
 			if (__raw_readl(l1_l2_gcc) != 0x0)
 				pr_err("Failed to set L1_L2_GCC\n");
 		}
+
+		put_cpu();
 
 		HOTPLUG_NO_MITIGATION(&curr_req.offline_mask);
 		ret = devmgr_client_request_mitigation(
@@ -138,6 +137,8 @@ bool lpm_wa_get_skip_l2_spm(void)
 }
 EXPORT_SYMBOL(lpm_wa_get_skip_l2_spm);
 
+
+
 static ssize_t store_clock_gating_enabled(struct kobject *kobj,
 		struct kobj_attribute *attr, const char *buf, size_t count)
 {
@@ -148,6 +149,7 @@ static ssize_t store_clock_gating_enabled(struct kobject *kobj,
 		pr_err("Invalid input%s %s. err:%d\n", __func__, buf, ret);
 		return count;
 	}
+
 	cpumask_copy(&curr_req.offline_mask, &l1_l2_offline_mask);
 	ret = devmgr_client_request_mitigation(
 			hotplug_handle,
@@ -159,6 +161,9 @@ static ssize_t store_clock_gating_enabled(struct kobject *kobj,
 	}
 
 	store_clock_gating = true;
+	if (cpumask_equal(&offline_mask, &l1_l2_offline_mask))
+		queue_work(lpm_wa_wq, &lpm_wa_work);
+
 	return count;
 }
 
@@ -174,6 +179,7 @@ static int lpm_wa_probe(struct platform_device *pdev)
 	unsigned long cpu_mask = 0;
 	char *key;
 
+
 	skip_l2_spm = of_property_read_bool(pdev->dev.of_node,
 					"qcom,lpm-wa-skip-l2-spm");
 
@@ -187,7 +193,7 @@ static int lpm_wa_probe(struct platform_device *pdev)
 	if (!enable_dynamic_clock_gating)
 		return ret;
 	is_l1_l2_gcc_secure = of_property_read_bool(pdev->dev.of_node,
-					"qcom,l1_l2_gcc_secure");
+					"qcom,l1-l2-gcc-secure");
 
 	res = platform_get_resource_byname(pdev, IORESOURCE_MEM,
 							"l2-pwr-sts");
@@ -225,7 +231,7 @@ static int lpm_wa_probe(struct platform_device *pdev)
 	key = "qcom,non-boot-cpu-index";
 	ret = of_property_read_u32(pdev->dev.of_node, key,
 						&non_boot_cpu_index);
-	if (!ret) {
+	if (ret) {
 		pr_err("%s: Missing qcom,non_boot_cpu_index property\n"
 							, __func__);
 	}

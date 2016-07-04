@@ -1,4 +1,5 @@
-/* Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
+/*
+ * Copyright (c) 2013-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -95,8 +96,29 @@ static const char *msm8929_dt_match[] __initconst = {
 	NULL
 };
 
-static const char *msmtellurium_dt_match[] __initconst = {
-	"qcom,msmtellurium",
+static const char *msm8952_dt_match[] __initconst = {
+	"qcom,msm8952",
+	"qcom,apq8052",
+	NULL
+};
+
+static const char *msm8976_dt_match[] __initconst = {
+	"qcom,msm8976",
+	NULL
+};
+
+static const char *msm8956_dt_match[] __initconst = {
+	"qcom,msm8956",
+	NULL
+};
+
+static const char *apq8076_dt_match[] __initconst = {
+	"qcom,apq8076",
+	NULL
+};
+
+static const char *apq8056_dt_match[] __initconst = {
+	"qcom,apq8056",
 	NULL
 };
 
@@ -136,11 +158,47 @@ DT_MACHINE_START(MSM8929_DT,
 	.smp = &msm8936_smp_ops,
 MACHINE_END
 
-DT_MACHINE_START(MSMTellurium_DT,
-	"Qualcomm Technologies, Inc. MSM Tellurium (Flattened Device Tree)")
+DT_MACHINE_START(MSM8952_DT,
+	"Qualcomm Technologies, Inc. MSM 8952 (Flattened Device Tree)")
 	.map_io = msm8916_map_io,
 	.init_machine = msm8916_init,
-	.dt_compat = msmtellurium_dt_match,
+	.dt_compat = msm8952_dt_match,
 	.reserve = msm8916_dt_reserve,
 	.smp = &msm8936_smp_ops,
+MACHINE_END
+
+DT_MACHINE_START(MSM8976_DT,
+	"Qualcomm Technologies, Inc. MSM 8976 (Flattened Device Tree)")
+	.map_io = msm8916_map_io,
+	.init_machine = msm8916_init,
+	.dt_compat = msm8976_dt_match,
+	.reserve = msm8916_dt_reserve,
+	.smp = &msm8976_smp_ops,
+MACHINE_END
+
+DT_MACHINE_START(MSM8956_DT,
+	"Qualcomm Technologies, Inc. MSM 8956 (Flattened Device Tree)")
+	.map_io = msm8916_map_io,
+	.init_machine = msm8916_init,
+	.dt_compat = msm8956_dt_match,
+	.reserve = msm8916_dt_reserve,
+	.smp = &msm8976_smp_ops,
+MACHINE_END
+
+DT_MACHINE_START(APQ8076_DT,
+	"Qualcomm Technologies, Inc. APQ 8076 (Flattened Device Tree)")
+	.map_io = msm8916_map_io,
+	.init_machine = msm8916_init,
+	.dt_compat = apq8076_dt_match,
+	.reserve = msm8916_dt_reserve,
+	.smp = &msm8976_smp_ops,
+MACHINE_END
+
+DT_MACHINE_START(APQ8056_DT,
+	"Qualcomm Technologies, Inc. APQ 8056 (Flattened Device Tree)")
+	.map_io = msm8916_map_io,
+	.init_machine = msm8916_init,
+	.dt_compat = apq8056_dt_match,
+	.reserve = msm8916_dt_reserve,
+	.smp = &msm8976_smp_ops,
 MACHINE_END

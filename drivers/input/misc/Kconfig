@@ -493,6 +493,16 @@ config INPUT_ISA1200_FF_MEMLESS
 	  To compile this driver as a module, choose M here: the
 	  module will be called isa1200-ff-memless.
 
+config INPUT_DUMMY_KEYPAD
+       tristate "Dummy Keypad driver support"
+       help
+         Say Y here if you want to support dummy keypad driver, wheels etc...
+
+config AK8789_HALLSENSOR
+	tristate "ak8789 hall sensor support"
+	help
+	  if you say yes here, you get support for ak8789 hall sensor
+
 config HP_SDC_RTC
 	tristate "HP SDC Real Time Clock"
 	depends on (GSC || HP300) && SERIO
@@ -735,6 +745,26 @@ config SENSORS_MMA_POSITION
 	help
 	  this provide the sensor position setting , value is between 0~7
 
+config SENSORS_AP3426
+	tristate "AP3426 3-in-1 digital ALPS+PS+IRLED sensor driver"
+	depends on I2C
+	help
+	  Say Y here if you want to enable the AP3426 ALPS sensor
+	  driver.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called ap3426.
+
+config SENSORS_LTR553
+	tristate "LTR553 light and proximity device driver"
+	depends on I2C
+	help
+	  Say Y here if you want to enable the LTR553 light and
+	  proximity sensor driver.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called ltr553.
+
 config SENSORS_MMC3416X
 	tristate "MMC3416xPJ 3-axis magnetic sensor driver"
 	depends on I2C
@@ -829,6 +859,19 @@ config SENSORS_BMI058
 	help
 	 If you say yes here, you get support for Bosch Sensortec's
 	 sensor driver of BMI058.
+
+config SENSORS_MC3430
+	tristate "MC3430 acceleration sensor support"
+	depends on I2C
+	help
+	 Say Y here if you want to enable the MC3430 acceleration sensor
+	 driver.
+
+config SENSORS_ISL29044A
+	tristate "INTERSIL P/L sensor"
+	depends on I2C
+	help
+	 This option enables support for the INTERSIL ISL29044A P/L sensor.
 
 endif
 

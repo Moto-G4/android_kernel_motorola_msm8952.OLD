@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -91,6 +91,9 @@ enum {
 	IDX_GLOBAL_CFG,
 	IDX_AUDIO_PORT_ID_I2S_RX,
 	IDX_AFE_PORT_ID_SECONDARY_MI2S_RX_SD1,
+	IDX_AFE_PORT_ID_QUINARY_MI2S_RX = 51,
+	IDX_AFE_PORT_ID_QUINARY_MI2S_TX = 52,
+	IDX_AFE_PORT_ID_SENARY_MI2S_TX = 53,
 	AFE_MAX_PORTS
 };
 
@@ -102,12 +105,17 @@ enum afe_mad_type {
 	MAD_SW_AUDIO = 0x05,
 };
 
+enum afe_cal_mode {
+	AFE_CAL_MODE_DEFAULT = 0x00,
+	AFE_CAL_MODE_NONE,
+};
+
 struct afe_audio_buffer {
 	dma_addr_t phys;
 	void       *data;
 	uint32_t   used;
-	uint32_t   size;/* size of buffer */
-	uint32_t   actual_size; /* actual number of bytes read by DSP */
+	uint32_t   size;
+	uint32_t   actual_size; 
 	struct      ion_handle *handle;
 	struct      ion_client *client;
 };
@@ -119,19 +127,19 @@ struct afe_audio_port_data {
 	uint32_t	    cpu_buf;
 	struct list_head    mem_map_handle;
 	uint32_t	    tmp_hdl;
-	/* read or write locks */
+	
 	struct mutex	    lock;
 	spinlock_t	    dsp_lock;
 };
 
 struct afe_audio_client {
 	atomic_t	       cmd_state;
-	/* Relative or absolute TS */
+	
 	uint32_t	       time_flag;
 	void		       *priv;
 	uint64_t	       time_stamp;
 	struct mutex	       cmd_lock;
-	/* idx:1 out port, 0: in port*/
+	
 	struct afe_audio_port_data port[2];
 	wait_queue_head_t      cmd_wait;
 	uint32_t               mem_map_handle;
@@ -171,8 +179,11 @@ int afe_register_get_events(u16 port_id,
 		uint32_t token, uint32_t *payload, void *priv),
 		void *private_data);
 int afe_unregister_get_events(u16 port_id);
-int afe_rt_proxy_port_write(u32 buf_addr_p, u32 mem_map_handle, int bytes);
-int afe_rt_proxy_port_read(u32 buf_addr_p, u32 mem_map_handle, int bytes);
+int afe_rt_proxy_port_write(phys_addr_t buf_addr_p,
+			u32 mem_map_handle, int bytes);
+int afe_rt_proxy_port_read(phys_addr_t buf_addr_p,
+			u32 mem_map_handle, int bytes);
+void afe_set_cal_mode(u16 port_id, enum afe_cal_mode afe_cal_mode);
 int afe_port_start(u16 port_id, union afe_port_config *afe_config,
 	u32 rate);
 int afe_spk_prot_feed_back_cfg(int src_port, int dst_port,
@@ -190,9 +201,6 @@ struct afe_audio_client *q6afe_audio_client_alloc(void *priv);
 int q6afe_audio_client_buf_free_contiguous(unsigned int dir,
 			struct afe_audio_client *ac);
 void q6afe_audio_client_free(struct afe_audio_client *ac);
-/* if port_id is virtual, convert to physical..
- * if port_id is already physical, return physical
- */
 int afe_convert_virtual_to_portid(u16 port_id);
 
 int afe_pseudo_port_start_nowait(u16 port_id);
@@ -202,6 +210,8 @@ int afe_set_digital_codec_core_clock(u16 port_id,
 			struct afe_digital_clk_cfg *cfg);
 int afe_set_lpass_internal_digital_codec_clock(u16 port_id,
 				struct afe_digital_clk_cfg *cfg);
+int afe_enable_lpass_core_shared_clock(u16 port_id, u32 enable);
+
 int q6afe_check_osr_clk_freq(u32 freq);
 
 int afe_send_spdif_clk_cfg(struct afe_param_id_spdif_clk_cfg *cfg,
@@ -225,4 +235,4 @@ int afe_port_group_set_param(u16 *port_id, int channel_count);
 int afe_port_group_enable(u16 enable);
 int afe_unmap_rtac_block(uint32_t *mem_map_handle);
 int afe_map_rtac_block(struct rtac_cal_block_data *cal_block);
-#endif /* __Q6AFE_V2_H__ */
+#endif 
