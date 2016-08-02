@@ -34,6 +34,7 @@
 #include <linux/moduleparam.h>
 #include <linux/sched.h>
 #include <linux/cpu_pm.h>
+#include <linux/irqchip/arm-gic.h>
 #include <soc/qcom/spm.h>
 #include <soc/qcom/pm.h>
 #include <soc/qcom/rpm-notifier.h>
@@ -59,6 +60,7 @@ static remote_spinlock_t scm_handoff_lock;
 enum {
 	MSM_LPM_LVL_DBG_SUSPEND_LIMITS = BIT(0),
 	MSM_LPM_LVL_DBG_IDLE_LIMITS = BIT(1),
+	MSM_LPM_LVL_DBG_IDLE_CLK = BIT(2),
 };
 
 enum debug_event {
@@ -87,6 +89,8 @@ static struct hrtimer lpm_hrtimer;
 static struct lpm_debug *lpm_debug;
 static phys_addr_t lpm_debug_phys;
 static const int num_dbg_elements = 0x100;
+uint32_t cl0_sleep_us;
+uint32_t cl1_sleep_us;
 static int lpm_cpu_callback(struct notifier_block *cpu_nb,
 				unsigned long action, void *hcpu);
 
@@ -118,10 +122,10 @@ static bool sleep_disabled;
 module_param_named(sleep_disabled,
 	sleep_disabled, bool, S_IRUGO | S_IWUSR | S_IWGRP);
 
-#ifdef CONFIG_HTC_POWER_DEBUG
-static int htc_pm_debug_mask = 0;
-module_param_named(htc_pm_debug_mask, htc_pm_debug_mask, int, S_IRUGO | S_IWUSR | S_IWGRP);
-#endif
+static int lpm_level_debug_mask;
+module_param_named(
+	debug_mask, lpm_level_debug_mask, int, S_IRUGO | S_IWUSR | S_IWGRP
+);
 
 s32 msm_cpuidle_get_deep_idle_latency(void)
 {
@@ -202,6 +206,44 @@ static int lpm_cpu_callback(struct notifier_block *cpu_nb,
 		break;
 	}
 	return NOTIFY_OK;
+}
+
+void lpm_cluster_mode_disable(void)
+{
+	struct list_head *list;
+	int i;
+
+	 list_for_each(list, &lpm_root_node->child) {
+		struct lpm_cluster *n;
+
+		n = list_entry(list, typeof(*n), list);
+		if (!n)
+			return;
+		for (i = 0; i < n->nlevels; i++) {
+			struct lpm_level_avail *l = &n->levels[i].available;
+
+			l->idle_enabled = 0;
+		}
+	}
+}
+
+void lpm_cluster_mode_enable(void)
+{
+	struct list_head *list;
+	int i;
+
+	 list_for_each(list, &lpm_root_node->child) {
+		struct lpm_cluster *n;
+
+		n = list_entry(list, typeof(*n), list);
+		if (!n)
+			return;
+		for (i = 0; i < n->nlevels; i++) {
+			struct lpm_level_avail *l = &n->levels[i].available;
+
+			l->idle_enabled = 1;
+		}
+	}
 }
 
 static enum hrtimer_restart lpm_hrtimer_cb(struct hrtimer *h)
@@ -452,6 +494,10 @@ static int cluster_select(struct lpm_cluster *cluster, bool from_idle)
 		return -EINVAL;
 
 	sleep_us = (uint32_t)get_cluster_sleep_time(cluster, NULL, from_idle);
+	if (smp_processor_id() < 4)
+		cl0_sleep_us = sleep_us;
+	else
+		cl1_sleep_us = sleep_us;
 
 	if (cpumask_and(&mask, cpu_online_mask, &cluster->child_cpus))
 		latency_us = pm_qos_request_for_cpumask(PM_QOS_CPU_DMA_LATENCY,
@@ -527,8 +573,15 @@ static int cluster_configure(struct lpm_cluster *cluster, int idx,
 {
 	struct lpm_cluster_level *level = &cluster->levels[idx];
 	int ret, i;
+	uint32_t sleep_us;
+
 
 	spin_lock(&cluster->sync_lock);
+
+	if (smp_processor_id() < 4)
+		sleep_us = cl0_sleep_us;
+	else
+		sleep_us = cl1_sleep_us;
 
 	if (!cpumask_equal(&cluster->num_children_in_sync, &cluster->child_cpus)
 			|| is_IPI_pending(&cluster->num_children_in_sync)) {
@@ -539,7 +592,7 @@ static int cluster_configure(struct lpm_cluster *cluster, int idx,
 	if (idx != cluster->default_level) {
 		update_debug_pc_event(CLUSTER_ENTER, idx,
 			cluster->num_children_in_sync.bits[0],
-			cluster->child_cpus.bits[0], from_idle);
+			cluster->child_cpus.bits[0], sleep_us);
 		trace_cluster_enter(cluster->cluster_name, idx,
 			cluster->num_children_in_sync.bits[0],
 			cluster->child_cpus.bits[0], from_idle);
@@ -676,6 +729,10 @@ static void cluster_unprepare(struct lpm_cluster *cluster,
 		msm_mpm_exit_sleep(from_idle);
 	}
 
+	if (smp_processor_id() < 4)
+		cl0_sleep_us = 0;
+	else
+		cl1_sleep_us = 0;
 	update_debug_pc_event(CLUSTER_EXIT, cluster->last_level,
 			cluster->num_children_in_sync.bits[0],
 			cluster->child_cpus.bits[0], from_idle);
@@ -825,6 +882,7 @@ static int lpm_cpuidle_enter(struct cpuidle_device *dev,
 	int idx = cpu_power_select(dev, cluster->cpu, &index);
 	const struct cpumask *cpumask = get_cpu_mask(dev->cpu);
 	struct power_params *pwr_params;
+	struct lpm_cluster_level *level;
 
 	if (idx < 0) {
 		local_irq_enable();
@@ -847,9 +905,15 @@ static int lpm_cpuidle_enter(struct cpuidle_device *dev,
 
 	cluster_prepare(cluster, cpumask, idx, true);
 	lpm_stats_cpu_enter(idx);
+
+	level = &cluster->parent->levels[cluster->parent->last_level];
+	if ((lpm_level_debug_mask & MSM_LPM_LVL_DBG_IDLE_CLK) &&
+	    !strcmp(level->level_name, "system-cci-pc"))
+		clock_debug_print_enabled();
+
 	if (idx > 0)
-		update_debug_pc_event(CPU_ENTER, idx, 0xdeaffeed, 0xdeaffeed,
-					true);
+		update_debug_pc_event(CPU_ENTER, idx, 0xdeaffeed,
+			gic_return_irq_pending(), true);
 	if (!use_psci)
 		success = msm_cpu_pm_enter_sleep(cluster->cpu->levels[idx].mode,
 				true);
@@ -857,8 +921,8 @@ static int lpm_cpuidle_enter(struct cpuidle_device *dev,
 		success = psci_enter_sleep(cluster, idx, true);
 
 	if (idx > 0)
-		update_debug_pc_event(CPU_EXIT, idx, success, 0xdeaffeed,
-					true);
+		update_debug_pc_event(CPU_EXIT, idx, success,
+			gic_return_irq_pending(), true);
 	lpm_stats_cpu_exit(idx, success);
 	cluster_unprepare(cluster, cpumask, idx, true);
 	cpu_unprepare(cluster, idx, true);
@@ -1081,11 +1145,6 @@ static int lpm_suspend_enter(suspend_state_t state)
 	 * LPMs(XO and Vmin).
 	 */
 	clock_debug_print_enabled();
-
-#ifdef CONFIG_HTC_POWER_DEBUG
-	if(htc_pm_debug_mask)
-		clock_blocked_print();
-#endif
 
 	if (!use_psci)
 		msm_cpu_pm_enter_sleep(cluster->cpu->levels[idx].mode, false);

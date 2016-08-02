@@ -127,15 +127,6 @@ static int wlan_ftm_register_wext(hdd_adapter_t *pAdapter);
 static int wlan_ftm_stop(hdd_context_t *pHddCtx);
 VOS_STATUS wlan_write_to_efs (v_U8_t *pData, v_U16_t data_len);
 
-/* for PRIMA: all the available frequency, channal pair i the table are defined for channel frequency @ RF center frequency
-   Since it is associated to agc.channel_freq register for mapping.
-   For channel bonding, the channel number is +2 or -2 for CB with primary high, or with primary low respectively.
-*/
-static const freq_chan_t  freq_chan_tbl[] = {
-     {2412, 1}, {2417, 2},{2422, 3}, {2427, 4}, {2432, 5}, {2437, 6}, {2442, 7},
-     {2447, 8}, {2452, 9},{2457, 10},{2462, 11},{2467 ,12},{2472, 13},{2484, 14}
-};
-
 static rateStr2rateIndex_t rateName_rateIndex_tbl[] =
 {
    { HAL_PHY_RATE_11B_LONG_1_MBPS,       "11B_LONG_1_MBPS"},
@@ -834,12 +825,26 @@ static VOS_STATUS wlan_ftm_vos_close( v_CONTEXT_t vosContext )
      VOS_ASSERT( VOS_IS_STATUS_SUCCESS( vosStatus ) );
   }
 
-  vosStatus = WDA_close( vosContext );
-  if (!VOS_IS_STATUS_SUCCESS(vosStatus))
+  if ( TRUE == WDA_needShutdown(vosContext))
   {
-     VOS_TRACE( VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_ERROR,
-         "%s: Failed to close WDA %d", __func__, vosStatus);
-     VOS_ASSERT( VOS_IS_STATUS_SUCCESS( vosStatus ) );
+     vosStatus = WDA_shutdown(vosContext, VOS_TRUE);
+     if (!VOS_IS_STATUS_SUCCESS(vosStatus))
+     {
+        VOS_TRACE( VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_FATAL,
+                            "%s: Failed to shutdown WDA %d", __func__, vosStatus);
+        VOS_ASSERT(VOS_IS_STATUS_SUCCESS(vosStatus));
+     }
+
+  }
+  else
+  {
+     vosStatus = WDA_close(vosContext);
+     if (!VOS_IS_STATUS_SUCCESS(vosStatus))
+     {
+        VOS_TRACE( VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_ERROR,
+            "%s: Failed to close WDA %d", __func__, vosStatus);
+        VOS_ASSERT(VOS_IS_STATUS_SUCCESS(vosStatus));
+     }
   }
 
   vos_mq_deinit(&((pVosContextType)vosContext)->freeVosMq);
@@ -1772,6 +1777,7 @@ static int wlan_hdd_ftm_start(hdd_context_t *pHddCtx)
                     "%s: WDA_NVDownload_Start reporting  other error",__func__);
        }
        VOS_ASSERT(0);
+       WDA_setNeedShutdown(pHddCtx->pvosContext);
        goto err_status_failure;
     }
 
@@ -2492,7 +2498,7 @@ int wlan_hdd_ftm_get_nv_field
       case NV_COMMON_MAC_ADDR:
          memcpy((void *)&nvField->fieldData,
              &nvFieldDataBuffer.macAddr[0],
-             NV_FIELD_MAC_ADDR_SIZE);
+             NV_FIELD_MAC_ADDR_SIZE * VOS_MAX_CONCURRENCY_PERSONA); // Motorola, IKLOCSEN-984 Return all MACs
          break;
 
       case NV_COMMON_MFG_SERIAL_NUMBER:
@@ -4326,7 +4332,6 @@ static VOS_STATUS wlan_ftm_priv_get_channel(hdd_adapter_t *pAdapter,v_U16_t *pCh
     uPttMsgs *pMsgBody;
     VOS_STATUS status;
     v_U16_t  freq;
-    v_U8_t indx=0;
     long ret;
 
     hdd_context_t *pHddCtx = (hdd_context_t *)pAdapter->pHddCtx;
@@ -4393,16 +4398,8 @@ static VOS_STATUS wlan_ftm_priv_get_channel(hdd_adapter_t *pAdapter,v_U16_t *pCh
 
     freq = ((v_U16_t)pMsgBody->DbgReadRegister.regValue & QWLAN_AGC_CHANNEL_FREQ_FREQ_MASK);
 
-    while ((indx <  SIZE_OF_TABLE(freq_chan_tbl)) && (freq != freq_chan_tbl[indx].freq))
-            indx++;
-    if (indx >= SIZE_OF_TABLE(freq_chan_tbl))
-    {
-        VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_FATAL, "%s:Invalid Frequency!!!",__func__);
-        status = VOS_STATUS_E_FAILURE;
-        goto done;
-    }
-
-    *pChannel = freq_chan_tbl[indx].chan;
+    *pChannel = vos_freq_to_chan(freq);
+    (*pChannel) ? (status = VOS_STATUS_SUCCESS) : (status = VOS_STATUS_E_FAILURE);
 
      VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_INFO_HIGH, "Channel = %d  freq = %d",*pChannel, freq);
  done:
@@ -4741,7 +4738,12 @@ done:
 static VOS_STATUS wlan_ftm_priv_get_mac_address(hdd_adapter_t *pAdapter,char *buf)
 {
     v_BOOL_t itemIsValid = VOS_FALSE;
-    v_U8_t macAddr[VOS_MAC_ADDRESS_LEN] = {0, 0x0a, 0xf5, 4,5, 6};
+
+    /* Motorola, BEGIN IKLOCSEN-984 Return all MACs */
+    v_MACADDR_t macAddr[VOS_MAX_CONCURRENCY_PERSONA];
+    v_U8_t      macLoop;
+    /* Motorola, END IKLOCSEN-984 Return all MACs */
+
     int ret;
 
     hdd_context_t *pHddCtx = (hdd_context_t *)pAdapter->pHddCtx;
@@ -4756,28 +4758,37 @@ static VOS_STATUS wlan_ftm_priv_get_mac_address(hdd_adapter_t *pAdapter,char *bu
     {
        if (itemIsValid == VOS_TRUE)
        {
-            vos_nv_readMacAddress(macAddr);
+          /* Motorola, BEGIN IKLOCSEN-984 Return all MACs */
+          vos_nv_readMultiMacAddress((v_U8_t *)&macAddr[0].bytes[0], VOS_MAX_CONCURRENCY_PERSONA);
 
-         ret = snprintf(buf, WE_FTM_MAX_STR_LEN,
-                             "%02x:%02x:%02x:%02x:%02x:%02x",
-                        MAC_ADDR_ARRAY(macAddr));
-         if( ret < 0 || ret >= WE_FTM_MAX_STR_LEN )
+         for(macLoop = 0; macLoop < VOS_MAX_CONCURRENCY_PERSONA; macLoop++)
          {
-             return VOS_STATUS_E_FAILURE;
+             ret = snprintf(buf, WE_FTM_MAX_STR_LEN,
+                            "%02x:%02x:%02x:%02x:%02x:%02x",
+                            MAC_ADDR_ARRAY(&macAddr[macLoop].bytes[0]));
+
+             if( ret < 0 || ret >= WE_FTM_MAX_STR_LEN )
+             {
+                return VOS_STATUS_E_FAILURE;
+             }
          }
-       }
+      }
    }
    else
    {
-         /*Return Hard coded mac address*/
-      ret = snprintf(buf, WE_FTM_MAX_STR_LEN,
-                            "%02x:%02x:%02x:%02x:%02x:%02x",
-                     MAC_ADDR_ARRAY(macAddr));
-
-      if( ret < 0 || ret >= WE_FTM_MAX_STR_LEN )
+      /* Return Hard coded mac address */
+      for(macLoop = 0; macLoop < VOS_MAX_CONCURRENCY_PERSONA; macLoop++)
       {
-          return VOS_STATUS_E_FAILURE;
+          ret = snprintf(buf, WE_FTM_MAX_STR_LEN,
+                         "%02x:%02x:%02x:%02x:%02x:%02x",
+                         MAC_ADDR_ARRAY(&macAddr[macLoop].bytes[0]));
+
+          if( ret < 0 || ret >= WE_FTM_MAX_STR_LEN )
+          {
+              return VOS_STATUS_E_FAILURE;
+          }
       }
+      /* Motorola, END IKLOCSEN-984 Return all MACs */
    }
     return VOS_STATUS_SUCCESS;
 }
@@ -4913,6 +4924,13 @@ static int __iw_ftm_setchar_getnone(struct net_device *dev, struct iw_request_in
     struct iw_point s_priv_data;
 
     ENTER();
+
+    if (!capable(CAP_NET_ADMIN))
+    {
+        VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_ERROR,
+                  FL("permission check failed"));
+        return -EPERM;
+    }
 
     ret =0;
     /* helper function to get iwreq_data with compat handling. */
@@ -5535,7 +5553,7 @@ static int __iw_ftm_set_var_ints_getnone(struct net_device *dev, struct iw_reque
 
     if(wrqu->data.length != 2)
     {
-        hddLog(LOGE, "Invalid number of Arguments  %d  \n",  wrqu->data.length);
+        hddLog(LOGE, "Invalid number of Arguments  %d ",  wrqu->data.length);
         return -EINVAL;
     }
     pAdapter = (netdev_priv(dev));
@@ -5574,7 +5592,7 @@ static int __iw_ftm_set_var_ints_getnone(struct net_device *dev, struct iw_reque
 
         default:
         {
-            hddLog(LOGE, "Invalid IOCTL command %d  \n", sub_cmd );
+            hddLog(LOGE, "Invalid IOCTL command %d ", sub_cmd );
             break;
         }
     }
@@ -5588,6 +5606,13 @@ static int iw_ftm_set_var_ints_getnone(struct net_device *dev, struct iw_request
         union iwreq_data *wrqu, char *extra)
 {
    int ret;
+
+   if (!capable(CAP_NET_ADMIN))
+   {
+        VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_ERROR,
+           FL("permission check failed"));
+        return -EPERM;
+   }
 
    vos_ssr_protect(__func__);
    ret = __iw_ftm_set_var_ints_getnone(dev, info, wrqu, extra);

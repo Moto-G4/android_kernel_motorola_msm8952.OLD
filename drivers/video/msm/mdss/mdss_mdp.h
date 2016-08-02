@@ -1153,6 +1153,7 @@ void mdss_rect_split(struct mdss_rect *in_roi, struct mdss_rect *l_roi,
 int mdss_mdp_wb_kickoff(struct msm_fb_data_type *mfd,
 		struct mdss_mdp_commit_cb *commit_cb);
 int mdss_mdp_wb_ioctl_handler(struct msm_fb_data_type *mfd, u32 cmd, void *arg);
+int mdss_dsi_ioctl_handler(struct mdss_panel_data *pdata, u32 cmd, void *arg);
 
 int mdss_mdp_get_ctl_mixers(u32 fb_num, u32 *mixer_id);
 u32 mdss_mdp_get_mixercfg(struct mdss_mdp_mixer *mixer);
@@ -1186,6 +1187,5 @@ int mdss_mdp_cmd_set_autorefresh_mode(struct mdss_mdp_ctl *ctl,
 		int frame_cnt);
 int mdss_mdp_ctl_cmd_autorefresh_enable(struct mdss_mdp_ctl *ctl,
 		int frame_cnt);
-int mdss_mdp_user_pcc_config(struct mdp_pcc_cfg_data *config);
 
 #endif /* MDSS_MDP_H */

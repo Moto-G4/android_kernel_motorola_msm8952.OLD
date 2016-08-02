@@ -324,14 +324,12 @@ int clk_prepare(struct clk *clk)
 	if (clk->prepare_count == 0) {
 		parent = clk->parent;
 
-		if (!(clk->flags&CLKFLAG_IGNORE)) {
-			ret = clk_prepare(parent);
-			if (ret)
-				goto out;
-			ret = clk_prepare(clk->depends);
-			if (ret)
-				goto err_prepare_depends;
-		}
+		ret = clk_prepare(parent);
+		if (ret)
+			goto out;
+		ret = clk_prepare(clk->depends);
+		if (ret)
+			goto err_prepare_depends;
 
 		ret = vote_rate_vdd(clk, clk->rate);
 		if (ret)
@@ -377,16 +375,15 @@ int clk_enable(struct clk *clk)
 	if (clk->count == 0) {
 		parent = clk->parent;
 
-		if (!(clk->flags&CLKFLAG_IGNORE)) {
-			ret = clk_enable(parent);
-			if (ret)
-				goto err_enable_parent;
-			ret = clk_enable(clk->depends);
-			if (ret)
-				goto err_enable_depends;
-		}
+		ret = clk_enable(parent);
+		if (ret)
+			goto err_enable_parent;
+		ret = clk_enable(clk->depends);
+		if (ret)
+			goto err_enable_depends;
 
 		trace_clock_enable(name, 1, smp_processor_id());
+		clock_debug_update_rate_stats(clk);
 		if (clk->ops->enable)
 			ret = clk->ops->enable(clk);
 		if (ret)
@@ -417,10 +414,6 @@ void clk_disable(struct clk *clk)
 	name = clk->dbg_name;
 
 	spin_lock_irqsave(&clk->lock, flags);
-	
-	
-	if (!strcmp(name, "blsp1_uart2_apps_clk_src"))
-		WARN(!clk->prepare_count,"%s is the parent of bypassing node, should be no problem", name);
 	WARN(!clk->prepare_count,
 			"%s: Never called prepare or calling disable after unprepare\n",
 			name);
@@ -430,6 +423,7 @@ void clk_disable(struct clk *clk)
 		struct clk *parent = clk->parent;
 
 		trace_clock_disable(name, 0, smp_processor_id());
+		clock_debug_update_rate_stats(clk);
 		if (clk->ops->disable)
 			clk->ops->disable(clk);
 		clk_disable(clk->depends);
@@ -450,10 +444,6 @@ void clk_unprepare(struct clk *clk)
 	name = clk->dbg_name;
 
 	mutex_lock(&clk->prepare_lock);
-	
-        
-	if (!strcmp(name, "blsp1_uart2_apps_clk_src"))
-                WARN(!clk->prepare_count,"%s is the parent of bypassing node, should be no problem", name);
 	if (WARN(!clk->prepare_count, "%s is unbalanced (prepare)", name))
 		goto out;
 	if (clk->prepare_count == 1) {
@@ -681,6 +671,7 @@ int clk_set_rate(struct clk *clk, unsigned long rate)
 	}
 
 	trace_clock_set_rate(name, rate, raw_smp_processor_id());
+	clock_debug_update_rate_stats(clk);
 
 	start_rate = clk->rate;
 
@@ -895,36 +886,33 @@ static int __handoff_clk(struct clk *clk)
 	if (clk->flags & CLKFLAG_EPROBE_DEFER)
 		return -EPROBE_DEFER;
 
-	
-	if (!(clk->flags&CLKFLAG_IGNORE)) {
-		/* Handoff any 'depends' clock first. */
-		rc = __handoff_clk(clk->depends);
+	/* Handoff any 'depends' clock first. */
+	rc = __handoff_clk(clk->depends);
+	if (rc)
+		goto err;
+
+	/*
+	 * Handoff functions for the parent must be called before the
+	 * children can be handed off. Without handing off the parents and
+	 * knowing their rate and state (on/off), it's impossible to figure
+	 * out the rate and state of the children.
+	 */
+	if (clk->ops->get_parent)
+		clk->parent = clk->ops->get_parent(clk);
+
+	if (IS_ERR(clk->parent)) {
+		rc = PTR_ERR(clk->parent);
+		goto err;
+	}
+
+	rc = __handoff_clk(clk->parent);
+	if (rc)
+		goto err;
+
+	for (i = 0; i < clk->num_parents; i++) {
+		rc = __handoff_clk(clk->parents[i].src);
 		if (rc)
 			goto err;
-
-		/*
-		 * Handoff functions for the parent must be called before the
-		 * children can be handed off. Without handing off the parents and
-		 * knowing their rate and state (on/off), it's impossible to figure
-		 * out the rate and state of the children.
-		 */
-		if (clk->ops->get_parent)
-			clk->parent = clk->ops->get_parent(clk);
-
-		if (IS_ERR(clk->parent)) {
-			rc = PTR_ERR(clk->parent);
-			goto err;
-		}
-
-		rc = __handoff_clk(clk->parent);
-		if (rc)
-			goto err;
-
-		for (i = 0; i < clk->num_parents; i++) {
-			rc = __handoff_clk(clk->parents[i].src);
-			if (rc)
-				goto err;
-		}
 	}
 
 	if (clk->ops->handoff)
@@ -938,15 +926,13 @@ static int __handoff_clk(struct clk *clk)
 			goto err;
 		}
 
-		if (!(clk->flags&CLKFLAG_IGNORE)) {
-			rc = clk_prepare_enable(clk->parent);
-			if (rc)
-				goto err;
+		rc = clk_prepare_enable(clk->parent);
+		if (rc)
+			goto err;
 
-			rc = clk_prepare_enable(clk->depends);
-			if (rc)
-				goto err_depends;
-		}
+		rc = clk_prepare_enable(clk->depends);
+		if (rc)
+			goto err_depends;
 
 		rc = vote_rate_vdd(clk, clk->rate);
 		WARN(rc, "%s unable to vote for voltage!\n", clk->dbg_name);
@@ -1023,10 +1009,6 @@ int msm_clock_register(struct clk_lookup *table, size_t size)
 
 	for (n = 0; n < size; n++)
 		__handoff_clk(table[n].clk);
-
-	#ifdef CONFIG_HTC_POWER_DEBUG
-	htc_clock_status_debug_init(table, size);
-	#endif
 
 	/* maintain backwards compatibility */
 	if (table[0].con_id || table[0].dev_id)

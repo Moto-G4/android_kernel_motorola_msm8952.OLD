@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2013 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2013,2016 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -271,12 +271,17 @@
 #define QWLAN_HAL_CFG_BTC_STATIC_OPP_WLAN_IDLE_WLAN_LEN      213
 #define QWLAN_HAL_CFG_BTC_STATIC_OPP_WLAN_IDLE_BT_LEN        214
 #define QWLAN_HAL_CFG_LINK_FAIL_TX_CNT                       215
+#define QWLAN_HAL_CFG_TOGGLE_ARP_BDRATES                     216
+#define QWLAN_HAL_CFG_OPTIMIZE_CA_EVENT                      217
+#define QWLAN_HAL_CFG_EXT_SCAN_CONC_MODE                     218
+#define QWLAN_HAL_CFG_BAR_WAKEUP_HOST_DISABLE                219
+#define QWLAN_HAL_CFG_SAR_BOFFSET_CORRECTION_ENABLE          220
 
-#define QWLAN_HAL_CFG_MAX_PARAMS                             216
+#define QWLAN_HAL_CFG_MAX_PARAMS                             221
 
 
 /* Total number of Integer CFGs. This is used while allocating the memory for TLV */
-#define QWLAN_HAL_CFG_INTEGER_PARAM                     216
+#define QWLAN_HAL_CFG_INTEGER_PARAM                     221
 
 /*-------------------------------------------------------------------------
   Configuration Parameter min, max, defaults
@@ -1074,5 +1079,13 @@
 #define QWLAN_HAL_CFG_LINK_FAIL_TX_CNT_MIN    50
 #define QWLAN_HAL_CFG_LINK_FAIL_TX_CNT_MAX    1000
 #define QWLAN_HAL_CFG_LINK_FAIL_TX_CNT_DEF    200
+/*QWLAN_HAL_CFG_TOGGLE_ARP_BDRATES*/
+#define QWLAN_HAL_CFG_TOGGLE_ARP_BDRATES_MIN  0
+#define QWLAN_HAL_CFG_TOGGLE_ARP_BDRATES_MAX  1
+#define QWLAN_HAL_CFG_TOGGLE_ARP_BDRATES_DEF  0
+/* QWLAN_HAL_CFG_OPTIMIZE_CA_EVENT */
+#define QWLAN_HAL_CFG_OPTIMIZE_CA_EVENT_DISABLE  0
+#define QWLAN_HAL_CFG_OPTIMIZE_CA_EVENT_ENABLE   1
+#define QWLAN_HAL_CFG_OPTIMIZE_CA_EVENT_DEFAULT  0
 
 #endif //__WLAN_HAL_CFG_H__

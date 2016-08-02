@@ -3,7 +3,6 @@
 
 #include <linux/types.h>
 #include <linux/fb.h>
-#include <linux/minifb.h>
 
 #define MSMFB_IOCTL_MAGIC 'm'
 #define MSMFB_GRP_DISP          _IOW(MSMFB_IOCTL_MAGIC, 1, unsigned int)
@@ -68,12 +67,8 @@
 #define MSMFB_OVERLAY_PREPARE		_IOWR(MSMFB_IOCTL_MAGIC, 169, \
 						struct mdp_overlay_list)
 #define MSMFB_LPM_ENABLE	_IOWR(MSMFB_IOCTL_MAGIC, 170, unsigned int)
-
-
-#define MSMFB_USBFB_INIT _IOW(MSMFB_IOCTL_MAGIC, 304, struct minifb_session)
-#define MSMFB_USBFB_TERMINATE _IOW(MSMFB_IOCTL_MAGIC, 305, struct minifb_session)
-#define MSMFB_USBFB_QUEUE_BUFFER _IOW(MSMFB_IOCTL_MAGIC, 306, struct minifb_req)
-#define MSMFB_USBFB_DEQUEUE_BUFFER _IOW(MSMFB_IOCTL_MAGIC, 307, struct minifb_req)
+#define MSMFB_REG_READ   _IOWR(MSMFB_IOCTL_MAGIC, 64, struct msmfb_reg_access)
+#define MSMFB_REG_WRITE  _IOW(MSMFB_IOCTL_MAGIC, 65, struct msmfb_reg_access)
 
 #define FB_TYPE_3D_PANEL 0x10101010
 #define MDP_IMGTYPE2_START 0x10000
@@ -1192,6 +1187,13 @@ struct msmfb_mixer_info_req {
 	int mixer_num;
 	int cnt;
 	struct mdp_mixer_info info[MAX_PIPE_PER_MIXER];
+};
+
+struct msmfb_reg_access {
+	uint8_t address;
+	uint8_t use_hs_mode;
+	uint32_t buffer_size;
+	uint8_t *buffer;
 };
 
 enum {

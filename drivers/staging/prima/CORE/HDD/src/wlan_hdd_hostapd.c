@@ -75,6 +75,7 @@
 #include "wlan_nlink_common.h"
 #include "wlan_btc_svc.h"
 #include <bap_hdd_main.h>
+#include "wlan_hdd_tdls.h"
 #include "wlan_hdd_p2p.h"
 #include "cfgApi.h"
 #include "wniCfg.h"
@@ -153,6 +154,7 @@ safeChannelType safeChannels[NUM_20MHZ_RF_CHANNELS] =
 };
 #endif /* FEATURE_WLAN_CH_AVOID */
 
+#define MIN_MTU_SIZE 256     // Motorola, IKHSS7-19443, A21623, Hotspot MTU changes
 /*---------------------------------------------------------------------------
  *   Function definitions
  *-------------------------------------------------------------------------*/
@@ -311,6 +313,12 @@ int hdd_hostapd_hard_start_xmit(struct sk_buff *skb, struct net_device *dev)
 
 int __hdd_hostapd_change_mtu(struct net_device *dev, int new_mtu)
 {
+//  Motorola, IKHSS7-19443, A21623, Hotspot MTU changes
+    if ( (new_mtu  < MIN_MTU_SIZE)  || (new_mtu > IEEE80211_MAX_DATA_LEN - 26) )
+        return EINVAL;
+
+    dev->mtu = new_mtu;
+//  End IKHSS7-19443
     return 0;
 }
 
@@ -444,6 +452,10 @@ static int hdd_hostapd_driver_command(hdd_adapter_t *pAdapter,
        }
        hdd_tx_rx_pkt_cnt_stat_timer_handler(pHddCtx);
        sme_SetMiracastMode(pHddCtx->hHal, pHddCtx->drvr_miracast);
+   }
+   else if (strncasecmp(command, "DISABLE_CA_EVENT", 16) == 0)
+   {
+       ret = hdd_enable_disable_ca_event(pHddCtx, command, 16);
    }
 
 exit:
@@ -806,6 +818,7 @@ VOS_STATUS hdd_hostapd_SAPEventCB( tpSap_Event pSapEvent, v_PVOID_t usrDataForCa
     struct iw_michaelmicfailure msg;
     v_CONTEXT_t pVosContext = NULL;
     ptSapContext pSapCtx = NULL;
+    hdd_config_t *cfg_param;
 
     dev = (struct net_device *)usrDataForCallback;
     pHostapdAdapter = netdev_priv(dev);
@@ -829,6 +842,8 @@ VOS_STATUS hdd_hostapd_SAPEventCB( tpSap_Event pSapEvent, v_PVOID_t usrDataForCa
     sapEvent = pSapEvent->sapHddEventCode;
     memset(&wrqu, '\0', sizeof(wrqu));
     pHddCtx = (hdd_context_t*)(pHostapdAdapter->pHddCtx);
+    cfg_param = pHddCtx->cfg_ini;
+
 
     switch(sapEvent)
     {
@@ -840,14 +855,27 @@ VOS_STATUS hdd_hostapd_SAPEventCB( tpSap_Event pSapEvent, v_PVOID_t usrDataForCa
 
             pHostapdState->vosStatus = pSapEvent->sapevt.sapStartBssCompleteEvent.status;
             vos_status = vos_event_set(&pHostapdState->vosEvent);
-   
+
             if (!VOS_IS_STATUS_SUCCESS(vos_status) || pHostapdState->vosStatus)
-            {     
+            {
                 VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_ERROR, ("ERROR: startbss event failed!!"));
                 goto stopbss;
             }
             else
-            {                
+            {
+                if (pHostapdAdapter->device_mode == WLAN_HDD_P2P_GO)
+                {
+                    if ((cfg_param->dynSplitscan) &&
+                            (!pHddCtx->issplitscan_enabled))
+                    {
+                        pHddCtx->issplitscan_enabled = TRUE;
+                        sme_enable_disable_split_scan(
+                                WLAN_HDD_GET_HAL_CTX(pHostapdAdapter),
+                                cfg_param->nNumStaChanCombinedConc,
+                                cfg_param->nNumP2PChanCombinedConc);
+                    }
+                }
+
                 pHddApCtx->uBCStaId = pSapEvent->sapevt.sapStartBssCompleteEvent.staId;
                 //@@@ need wep logic here to set privacy bit
                 vos_status = hdd_softap_Register_BC_STA(pHostapdAdapter, pHddApCtx->uPrivacy);
@@ -857,7 +885,7 @@ VOS_STATUS hdd_hostapd_SAPEventCB( tpSap_Event pSapEvent, v_PVOID_t usrDataForCa
                     hdd_stop_bss_link(pHostapdAdapter, usrDataForCallback);
                 }
             }
-            
+
             if (0 != (WLAN_HDD_GET_CTX(pHostapdAdapter))->cfg_ini->nAPAutoShutOff)
             {
                 // AP Inactivity timer init and start
@@ -924,21 +952,11 @@ VOS_STATUS hdd_hostapd_SAPEventCB( tpSap_Event pSapEvent, v_PVOID_t usrDataForCa
 
             pHddApCtx->operatingChannel = 0; //Invalidate the channel info.
 
-            if ((TRUE == pHddCtx->cfg_ini->fEnableTDLSSupport) &&
-                    (TRUE == sme_IsFeatureSupportedByFW(TDLS)) &&
-                    (eTDLS_SUPPORT_ENABLED == pHddCtx->tdls_mode_last ||
-                     eTDLS_SUPPORT_EXPLICIT_TRIGGER_ONLY ==
-                                                pHddCtx->tdls_mode_last))
+            if (pHostapdAdapter->device_mode == WLAN_HDD_P2P_GO)
             {
-                if (pHostapdAdapter->device_mode == WLAN_HDD_P2P_GO)
-                {
-                    /* Enable TDLS support Once P2P session ends since
-                     * upond detection of concurrency TDLS would be disabled
-                     */
-                    hddLog(LOG1, FL("Enable TDLS support"));
-                    wlan_hdd_tdls_set_mode(pHddCtx, pHddCtx->tdls_mode_last,
-                                           FALSE);
-                }
+                hddLog(LOG1,
+                       FL("P2P Go is getting removed and we are trying to re-enable TDLS"));
+                wlan_hdd_tdls_reenable(pHddCtx);
             }
 
             goto stopbss;
@@ -1200,15 +1218,14 @@ VOS_STATUS hdd_hostapd_SAPEventCB( tpSap_Event pSapEvent, v_PVOID_t usrDataForCa
             break;
 
         case eSAP_MAX_ASSOC_EXCEEDED:
-            snprintf(maxAssocExceededEvent, IW_CUSTOM_MAX, "Peer %02x:%02x:%02x:%02x:%02x:%02x denied"
-                    " assoc due to Maximum Mobile Hotspot connections reached. Please disconnect"
-                    " one or more devices to enable the new device connection",
-                    pSapEvent->sapevt.sapMaxAssocExceeded.macaddr.bytes[0],
-                    pSapEvent->sapevt.sapMaxAssocExceeded.macaddr.bytes[1],
-                    pSapEvent->sapevt.sapMaxAssocExceeded.macaddr.bytes[2],
-                    pSapEvent->sapevt.sapMaxAssocExceeded.macaddr.bytes[3],
-                    pSapEvent->sapevt.sapMaxAssocExceeded.macaddr.bytes[4],
-                    pSapEvent->sapevt.sapMaxAssocExceeded.macaddr.bytes[5]);
+            /* Beging Motorola IKHSS7-18970 fpx478, 30/03/2012, nottification to MHS */
+            /* Redefining the Custom Message
+             * IW_CUSTOM_MAX will inform when STA is denied when assoc due to Maximum Mobile
+             * Hotspot connections reached. Please disconnect one or more devices to enable
+             * the new device connection, and we dont require the MAC address of the STA
+             */
+            snprintf(maxAssocExceededEvent, IW_CUSTOM_MAX, "eSAP_MAX_ASSOC_EXCEEDED");
+            /* END IKHSS7-18970 */
             we_event = IWEVCUSTOM; /* Discovered a new node (AP mode). */
             wrqu.data.pointer = maxAssocExceededEvent;
             wrqu.data.length = strlen(maxAssocExceededEvent);
@@ -1805,7 +1822,7 @@ static __iw_softap_setparam(struct net_device *dev,
     hdd_adapter_t *pHostapdAdapter = (netdev_priv(dev));
     tHalHandle hHal;
     hdd_context_t *pHddCtx = NULL;
-    int *value = (int *)extra;
+    int *value = (int *)(wrqu->data.pointer);
     int sub_cmd = value[0];
     int set_value = value[1];
     eHalStatus status;
@@ -1952,7 +1969,20 @@ static __iw_softap_setparam(struct net_device *dev,
                 }
                 break;
             }
-
+        case QCSAP_PARAM_GET_FRAME_LOGS:
+            {
+                if (wlan_hdd_get_frame_logs(pHostapdAdapter, set_value)
+                         != VOS_STATUS_SUCCESS)
+                {
+                    ret = -EINVAL;
+                }
+                break;
+            }
+        case QCSAP_PARAM_SET_PROXIMITY:
+            {
+                ret = wlan_hdd_set_proximity(set_value);
+                break;
+            }
         default:
             hddLog(LOGE, FL("Invalid setparam command %d value %d"),
                     sub_cmd, set_value);
@@ -2255,8 +2285,9 @@ static __iw_softap_set_max_tx_power(struct net_device *dev,
     hdd_adapter_t *pHostapdAdapter;
     tHalHandle hHal;
     hdd_context_t *pHddCtx;
-    int *value = (int *)extra;
     int set_value, ret = 0;
+    int cmd_len = wrqu->data.length;
+    int *value = (int *)kmalloc(cmd_len+1, GFP_KERNEL);
     tSirMacAddr bssid = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
     tSirMacAddr selfMac = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
 
@@ -2284,6 +2315,12 @@ static __iw_softap_set_max_tx_power(struct net_device *dev,
     }
     if (NULL == value)
         return -ENOMEM;
+    if(copy_from_user((char *) value, (char*)(wrqu->data.pointer), cmd_len)) {
+        hddLog(VOS_TRACE_LEVEL_FATAL, "%s -- copy_from_user --data pointer failed! bailing",
+                __func__);
+        kfree(value);
+        return -EFAULT;
+    }
 
     /* Assign correct slef MAC address */
     vos_mem_copy(bssid, pHostapdAdapter->macAddressCurrent.bytes,
@@ -2292,6 +2329,7 @@ static __iw_softap_set_max_tx_power(struct net_device *dev,
                  VOS_MAC_ADDR_SIZE);
 
     set_value = value[0];
+    kfree(value);
     if (eHAL_STATUS_SUCCESS != sme_SetMaxTxPower(hHal, bssid, selfMac, set_value))
     {
         hddLog(VOS_TRACE_LEVEL_ERROR, "%s: Setting maximum tx power failed",
@@ -2674,6 +2712,13 @@ static __iw_softap_disassoc_sta(struct net_device *dev,
     int ret = 0;
 
     ENTER();
+
+    if (!capable(CAP_NET_ADMIN)) {
+        VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_ERROR,
+                  FL("permission check failed"));
+        return -EPERM;
+    }
+
     pHostapdAdapter = (netdev_priv(dev));
     if (NULL == pHostapdAdapter)
     {
@@ -2690,7 +2735,7 @@ static __iw_softap_disassoc_sta(struct net_device *dev,
     /* iwpriv tool or framework calls this ioctl with
      * data passed in extra (less than 16 octets);
      */
-    peerMacAddr = (v_U8_t *)(extra);
+    peerMacAddr = (v_U8_t *)(wrqu->data.pointer);
 
     hddLog(LOG1, "%s data "  MAC_ADDRESS_STR,
            __func__, MAC_ADDR_ARRAY(peerMacAddr));
@@ -2804,6 +2849,13 @@ static int __iw_softap_set_channel_range(struct net_device *dev,
     int ret = 0; /* success */
 
     ENTER();
+
+    if (!capable(CAP_NET_ADMIN))
+    {
+        VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_ERROR,
+                  FL("permission check failed"));
+        return -EPERM;
+    }
 
     pHostapdAdapter = (netdev_priv(dev));
     if (NULL == pHostapdAdapter)
@@ -3709,6 +3761,13 @@ static int __iw_softap_setwpsie(struct net_device *dev,
 
    ENTER();
 
+   if (!capable(CAP_NET_ADMIN))
+   {
+       VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_ERROR,
+                 FL("permission check failed"));
+       return -EPERM;
+   }
+
    pHostapdAdapter = (netdev_priv(dev));
    if (NULL == pHostapdAdapter)
    {
@@ -3772,9 +3831,8 @@ static int __iw_softap_setwpsie(struct net_device *dev,
          case DOT11F_EID_WPA: 
             if (wps_genie[1] < 2 + 4)
             {
-               vos_mem_free(pSap_WPSIe); 
-               kfree(fwps_genie);
-               return -EINVAL;
+               ret = -EINVAL;
+               goto exit;
             }
             else if (memcmp(&wps_genie[2], "\x00\x50\xf2\x04", 4) == 0) 
             {
@@ -3832,6 +3890,11 @@ static int __iw_softap_setwpsie(struct net_device *dev,
                       pos += 2; 
                       length = *pos<<8 | *(pos+1);
                       pos += 2;
+                      if (length > sizeof(pSap_WPSIe->sapwpsie.sapWPSBeaconIE.UUID_E))
+                      {
+                          ret = -EINVAL;
+                          goto exit;
+                      }
                       vos_mem_copy(pSap_WPSIe->sapwpsie.sapWPSBeaconIE.UUID_E, pos, length);
                       pSap_WPSIe->sapwpsie.sapWPSBeaconIE.FieldPresent |= WPS_BEACON_UUIDE_PRESENT; 
                       pos += length;
@@ -3846,9 +3909,8 @@ static int __iw_softap_setwpsie(struct net_device *dev,
                    
                    default:
                       hddLog (LOGW, "UNKNOWN TLV in WPS IE(%x)", (*pos<<8 | *(pos+1)));
-                      vos_mem_free(pSap_WPSIe);
-                      kfree(fwps_genie);
-                      return -EINVAL; 
+                      ret = -EINVAL;
+                      goto exit;
                 }
               }  
             }
@@ -3860,9 +3922,8 @@ static int __iw_softap_setwpsie(struct net_device *dev,
                  
          default:
             hddLog (LOGE, "%s Set UNKNOWN IE %X",__func__, wps_genie[0]);
-            vos_mem_free(pSap_WPSIe);
-            kfree(fwps_genie);
-            return 0;
+            ret = -EINVAL;
+            goto exit;
       }
     } 
     else if( wps_genie[0] == eQC_WPS_PROBE_RSP_IE)
@@ -3874,9 +3935,8 @@ static int __iw_softap_setwpsie(struct net_device *dev,
          case DOT11F_EID_WPA: 
             if (wps_genie[1] < 2 + 4)
             {
-               vos_mem_free(pSap_WPSIe); 
-               kfree(fwps_genie);
-               return -EINVAL;
+                ret = -EINVAL;
+                goto exit;
             }
             else if (memcmp(&wps_genie[2], "\x00\x50\xf2\x04", 4) == 0) 
             {
@@ -3940,6 +4000,11 @@ static int __iw_softap_setwpsie(struct net_device *dev,
                       pos += 2; 
                       length = *pos<<8 | *(pos+1);
                       pos += 2;
+                      if (length > (sizeof(pSap_WPSIe->sapwpsie.sapWPSProbeRspIE.UUID_E)))
+                      {
+                          ret = -EINVAL;
+                          goto exit;
+                      }
                       vos_mem_copy(pSap_WPSIe->sapwpsie.sapWPSProbeRspIE.UUID_E, pos, length);
                       pSap_WPSIe->sapwpsie.sapWPSProbeRspIE.FieldPresent |= WPS_PROBRSP_UUIDE_PRESENT;
                       pos += length;
@@ -3949,6 +4014,11 @@ static int __iw_softap_setwpsie(struct net_device *dev,
                       pos += 2;
                       length = *pos<<8 | *(pos+1);
                       pos += 2;
+                      if (length >  (sizeof(pSap_WPSIe->sapwpsie.sapWPSProbeRspIE.Manufacture.name)))
+                      {
+                          ret = -EINVAL;
+                          goto exit;
+                      }
                       pSap_WPSIe->sapwpsie.sapWPSProbeRspIE.Manufacture.num_name = length;
                       vos_mem_copy(pSap_WPSIe->sapwpsie.sapWPSProbeRspIE.Manufacture.name, pos, length);
                       pSap_WPSIe->sapwpsie.sapWPSProbeRspIE.FieldPresent |= WPS_PROBRSP_MANUFACTURE_PRESENT;
@@ -3959,6 +4029,11 @@ static int __iw_softap_setwpsie(struct net_device *dev,
                       pos += 2;
                       length = *pos<<8 | *(pos+1);
                       pos += 2;
+                      if (length > (sizeof(pSap_WPSIe->sapwpsie.sapWPSProbeRspIE.ModelName.text)))
+                      {
+                          ret = -EINVAL;
+                          goto exit;
+                      }
                       pSap_WPSIe->sapwpsie.sapWPSProbeRspIE.ModelName.num_text = length;
                       vos_mem_copy(pSap_WPSIe->sapwpsie.sapWPSProbeRspIE.ModelName.text, pos, length);
                       pSap_WPSIe->sapwpsie.sapWPSProbeRspIE.FieldPresent |= WPS_PROBRSP_MODELNAME_PRESENT;
@@ -3968,6 +4043,11 @@ static int __iw_softap_setwpsie(struct net_device *dev,
                       pos += 2;
                       length = *pos<<8 | *(pos+1);
                       pos += 2;
+                      if (length > (sizeof(pSap_WPSIe->sapwpsie.sapWPSProbeRspIE.ModelNumber.text)))
+                      {
+                          ret = -EINVAL;
+                          goto exit;
+                      }
                       pSap_WPSIe->sapwpsie.sapWPSProbeRspIE.ModelNumber.num_text = length;
                       vos_mem_copy(pSap_WPSIe->sapwpsie.sapWPSProbeRspIE.ModelNumber.text, pos, length);
                       pSap_WPSIe->sapwpsie.sapWPSProbeRspIE.FieldPresent |= WPS_PROBRSP_MODELNUMBER_PRESENT;
@@ -3977,6 +4057,11 @@ static int __iw_softap_setwpsie(struct net_device *dev,
                       pos += 2;
                       length = *pos<<8 | *(pos+1);
                       pos += 2;
+                      if (length > (sizeof(pSap_WPSIe->sapwpsie.sapWPSProbeRspIE.SerialNumber.text)))
+                      {
+                          ret = -EINVAL;
+                          goto exit;
+                      }
                       pSap_WPSIe->sapwpsie.sapWPSProbeRspIE.SerialNumber.num_text = length;
                       vos_mem_copy(pSap_WPSIe->sapwpsie.sapWPSProbeRspIE.SerialNumber.text, pos, length);
                       pSap_WPSIe->sapwpsie.sapWPSProbeRspIE.FieldPresent |= WPS_PROBRSP_SERIALNUMBER_PRESENT;
@@ -4000,6 +4085,11 @@ static int __iw_softap_setwpsie(struct net_device *dev,
                       pos += 2;
                       length = *pos<<8 | *(pos+1);
                       pos += 2;
+                      if (length > (sizeof(pSap_WPSIe->sapwpsie.sapWPSProbeRspIE.DeviceName.text)))
+                      {
+                          ret = -EINVAL;
+                          goto exit;
+                      }
                       pSap_WPSIe->sapwpsie.sapWPSProbeRspIE.DeviceName.num_text = length;
                       vos_mem_copy(pSap_WPSIe->sapwpsie.sapWPSProbeRspIE.DeviceName.text, pos, length);
                       pos += length;
@@ -4031,6 +4121,8 @@ static int __iw_softap_setwpsie(struct net_device *dev,
       } // switch
     }
     halStatus = WLANSAP_Set_WpsIe(pVosContext, pSap_WPSIe);
+    if (halStatus != eHAL_STATUS_SUCCESS)
+        ret = -EINVAL;
     pHostapdState = WLAN_HDD_GET_HOSTAP_STATE_PTR(pHostapdAdapter);
     if( pHostapdState->bCommit && WPSIeType == eQC_WPS_PROBE_RSP_IE)
     {
@@ -4039,10 +4131,11 @@ static int __iw_softap_setwpsie(struct net_device *dev,
         WLANSAP_Update_WpsIe ( pVosContext );
     }
  
+exit:
     vos_mem_free(pSap_WPSIe);   
     kfree(fwps_genie);
     EXIT();
-    return halStatus;
+    return ret;
 }
 
 static int iw_softap_setwpsie(struct net_device *dev,
@@ -4593,12 +4686,16 @@ static const struct iw_priv_args hostapd_private_args[] = {
       IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 2, 0, "setparam" },
   { QCSAP_IOCTL_SETPARAM,
       IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, 0, "" },
+  { QCSAP_PARAM_GET_FRAME_LOGS,
+      IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, 0, "getFrameLogs" },
   { QCSAP_PARAM_MAX_ASSOC,
       IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, 0, "setMaxAssoc" },
    { QCSAP_PARAM_HIDE_SSID,
       IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, 0,  "hideSSID" },
    { QCSAP_PARAM_SET_MC_RATE,
       IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, 0,  "setMcRate" },
+  { QCSAP_PARAM_SET_PROXIMITY,
+      IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, 0,  "setProximity" },
   { QCSAP_IOCTL_GETPARAM,
       IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1,
       IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1,    "getparam" },

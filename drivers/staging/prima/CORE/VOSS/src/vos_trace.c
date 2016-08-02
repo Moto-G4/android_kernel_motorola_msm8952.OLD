@@ -196,6 +196,38 @@ void vos_trace_setValue( VOS_MODULE_ID module, VOS_TRACE_LEVEL level, v_U8_t on)
    }
 }
 
+//Begin Motorola dcw476 4/17/13 IKJBXLINE-5577:changing wlan driver log level dynamically
+void vos_trace_setValue_till_level( VOS_MODULE_ID module, VOS_TRACE_LEVEL level, v_U8_t on) {
+  // Make sure the caller is passing in a valid LEVEL.
+   if ( level < 0  || level >= VOS_TRACE_LEVEL_MAX )
+   {
+      pr_err("%s: Invalid trace level %d passed in!\n", __func__, level);
+      return;
+   }
+
+   // Make sure the caller is passing in a valid module.
+   if ( module < 0 || module >= VOS_MODULE_ID_MAX )
+   {
+      pr_err("%s: Invalid module id %d passed in!\n", __func__, module);
+      return;
+   }
+
+   // Treat 'none' differently.  NONE means we have to turn off all
+   // the bits in the bit mask so none of the traces appear.
+   if ( VOS_TRACE_LEVEL_NONE == level )
+   {
+      gVosTraceInfo[ module ].moduleTraceLevel = VOS_TRACE_LEVEL_NONE;
+   }
+   // Treat 'All' differently.  All means we have to turn on all
+   // the bits in the bit mask so all of the traces appear.
+   else if ( VOS_TRACE_LEVEL_ALL == level )
+   {
+      gVosTraceInfo[ module ].moduleTraceLevel = 0xFFFF;
+   } else {
+      gVosTraceInfo[ module ].moduleTraceLevel = VOS_TRACE_LEVEL_TO_MODULE_BITMASK( level +1) -1;
+   }
+}
+//IKJBXLINE-5577
 
 v_BOOL_t vos_trace_getLevel( VOS_MODULE_ID module, VOS_TRACE_LEVEL level )
 {
@@ -268,8 +300,7 @@ void vos_trace_msg( VOS_MODULE_ID module, VOS_TRACE_LEVEL level, char *strFormat
       va_start(val, strFormat);
 
       // print the prefix string into the string buffer...
-      n = snprintf(strBuffer, VOS_TRACE_BUFFER_SIZE, "wlan: [%d:%2s:%3s] ",
-                   in_interrupt() ? 0 : current->pid,
+      n = snprintf(strBuffer, VOS_TRACE_BUFFER_SIZE, "wlan: [%2s:%3s] ",
                    (char *) TRACE_LEVEL_STR[ level ],
                    (char *) gVosTraceInfo[ module ].moduleNameStr );
 
@@ -590,7 +621,7 @@ void vosTraceDumpAll(void *pMac, v_U8_t code, v_U8_t session,
         return;
     }
 
-    VOS_TRACE( VOS_MODULE_ID_SYS, VOS_TRACE_LEVEL_ERROR,
+    VOS_TRACE( VOS_MODULE_ID_SYS, VOS_TRACE_LEVEL_INFO,
                "Total Records: %d, Head: %d, Tail: %d",
                gvosTraceData.num, gvosTraceData.head, gvosTraceData.tail);
 

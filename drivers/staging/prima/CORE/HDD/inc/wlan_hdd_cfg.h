@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2015 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2016 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -263,10 +263,24 @@
 #define CFG_ENABLE_AUTO_BMPS_TIMER_MIN         ( 0 )
 #define CFG_ENABLE_AUTO_BMPS_TIMER_MAX         ( 1 )
 #define CFG_ENABLE_AUTO_BMPS_TIMER_DEFAULT     ( 1 )
-
+/*
+ * gEnableDynamicRAstartRate usage:
+ *
+ * 11B and 11A/G rates can be specified in multiples of 0.5
+ * So for 5.5 mbps, gEnableDynamicRAstartRate=11
+ * and for 12 mbps, gEnableDynamicRAstartRate=24 etc.
+ *
+ * for MCS 0 - 7 rates, Bit 7 should set to 1 and Bit 0-6
+ * represent the MCS index.
+ * So for MCS0, gEnableDynamicRAstartRate=128
+ * and for MCS2, gEnableDynamicRAstartRate=130 etc.
+ *
+ * Any invalid non-zero value will set the start rate
+ * to 6 mbps (value 1 will also set it to 6 mbps)
+ */
 #define CFG_ENABLE_DYNAMIC_RA_START_RATE_NAME    "gEnableDynamicRAstartRate"
 #define CFG_ENABLE_DYNAMIC_RA_START_RATE_MIN     ( 0 )
-#define CFG_ENABLE_DYNAMIC_RA_START_RATE_MAX     ( 1 )
+#define CFG_ENABLE_DYNAMIC_RA_START_RATE_MAX     ( 300 )
 #define CFG_ENABLE_DYNAMIC_RA_START_RATE_DEFAULT ( 0 )
 
 /* Bit mask value to enable RTS/CTS for different modes
@@ -1542,6 +1556,16 @@ typedef enum
 #define CFG_DEFAULT_RATE_INDEX_24GH_MAX           ( 7 )
 #define CFG_DEFAULT_RATE_INDEX_24GH_DEFAULT       ( 1 )
 
+
+/*
+ * This INI item is used to control subsystem restart(SSR) test framework
+ * Set its value to 1 to enable APPS trigerred SSR testing
+ */
+#define CFG_ENABLE_CRASH_INJECT "gEnableForceTargetAssert"
+#define CFG_ENABLE_CRASH_INJECT_MIN (0)
+#define CFG_ENABLE_CRASH_INJECT_MAX (1)
+#define CFG_ENABLE_CRASH_INJECT_DEFAULT (0)
+
 static __inline tANI_U32 defHddRateToDefCfgRate( tANI_U32 defRateIndex )
 {
     switch(defRateIndex){
@@ -2339,10 +2363,22 @@ This feature requires the dependent cfg.ini "gRoamPrefer5GHz" set to 1 */
 #define CFG_ENABLE_DEAUTH_BEFORE_CONNECTION_MAX              (1)
 #define CFG_ENABLE_DEAUTH_BEFORE_CONNECTION_DEFAULT          (0)
 
+/* gEnableMacAddrSpoof = 0 => disable mac spoofing
+                       = 1 => enable mac spoofing in both HOST and FW
+                       = 2 => enable mac spoofing in FW and
+                              disable mac spoofing in HOST
+ */
 #define CFG_ENABLE_MAC_ADDR_SPOOFING                         "gEnableMacAddrSpoof"
 #define CFG_ENABLE_MAC_ADDR_SPOOFING_MIN                     (0)
-#define CFG_ENABLE_MAC_ADDR_SPOOFING_MAX                     (1)
+#define CFG_ENABLE_MAC_ADDR_SPOOFING_MAX                     (2)
 #define CFG_ENABLE_MAC_ADDR_SPOOFING_DEFAULT                 (0)
+
+/* Disable Mac Spoof for p2p Scan */
+#define CFG_DISABLE_P2P_MAC_ADDR_SPOOFING              "gDisableP2PMacAddrSpoof"
+#define CFG_DISABLE_P2P_MAC_ADDR_SPOOFING_MIN          (0)
+#define CFG_DISABLE_P2P_MAC_ADDR_SPOOFING_MAX          (1)
+#define CFG_DISABLE_P2P_MAC_ADDR_SPOOFING_DEFAULT      (0)
+
 
 #define CFG_ENABLE_MGMT_LOGGING                         "gEnableMgmtLogging"
 #define CFG_ENABLE_MGMT_LOGGING_MIN                     (0)
@@ -2497,7 +2533,7 @@ This feature requires the dependent cfg.ini "gRoamPrefer5GHz" set to 1 */
 
 #define CFG_TOGGLE_ARP_BDRATES_NAME       "gToggleArpBDRates"
 #define CFG_TOGGLE_ARP_BDRATES_MIN         0
-#define CFG_TOGGLE_ARP_BDRATES_MAX         1
+#define CFG_TOGGLE_ARP_BDRATES_MAX         2
 #define CFG_TOGGLE_ARP_BDRATES_DEFAULT     0
 
 /*
@@ -2515,6 +2551,21 @@ This feature requires the dependent cfg.ini "gRoamPrefer5GHz" set to 1 */
 #define CFG_LINK_FAIL_TX_CNT_MIN     ( 50 )
 #define CFG_LINK_FAIL_TX_CNT_MAX     ( 1000 )
 #define CFG_LINK_FAIL_TX_CNT_DEF     ( 200 )
+
+#define CFG_OPTIMIZE_CA_EVENT_NAME       "gOptimizeCAevent"
+#define CFG_OPTIMIZE_CA_EVENT_DISABLE    ( 0 )
+#define CFG_OPTIMIZE_CA_EVENT_ENABLE     ( 1 )
+#define CFG_OPTIMIZE_CA_EVENT_DEFAULT    ( 0 )
+
+
+/*
+ * BOffsetCorrectionEnable : This ini will control enabling/disabling
+ * of rate dependent power offsets in firmware
+ */
+#define CFG_SAR_BOFFSET_SET_CORRECTION_NAME      "gBOffsetCorrectionEnable"
+#define CFG_SAR_BOFFSET_SET_CORRECTION_MIN       (0)
+#define CFG_SAR_BOFFSET_SET_CORRECTION_MAX       (1)
+#define CFG_SAR_BOFFSET_SET_CORRECTION_DEFAULT   (0)
 
 /*--------------------------------------------------------------------------- 
   Type declarations
@@ -2989,7 +3040,8 @@ typedef struct
 #endif
    v_U32_t                     deferImpsTime;
    v_BOOL_t                    sendDeauthBeforeCon;
-   v_BOOL_t                    enableMacSpoofing;
+   v_U8_t                      enableMacSpoofing;
+   v_BOOL_t                    disableP2PMacSpoofing;
    v_BOOL_t                    enableMgmtLogging;
    v_BOOL_t                    enableBMUHWtracing;
    v_BOOL_t                    enableFWLogging;
@@ -3027,7 +3079,11 @@ typedef struct
    v_U32_t                     linkFailTimeout;
    v_U32_t                     linkFailTxCnt;
    v_BOOL_t                    ignorePeerHTopMode;
+   v_U8_t                      gOptimizeCAevent;
+   v_BOOL_t                    crash_inject_enabled;
+   v_U8_t                      boffset_correction_enable;
 } hdd_config_t;
+
 /*--------------------------------------------------------------------------- 
   Function declarations and documenation
   -------------------------------------------------------------------------*/ 

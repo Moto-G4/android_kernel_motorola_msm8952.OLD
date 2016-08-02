@@ -799,6 +799,7 @@ int sps_bam_pipe_connect(struct sps_pipe *bam_pipe,
 	void *desc_buf = NULL;
 	u32 pipe_index;
 	int result;
+	unsigned long flags = 0;
 
 	/* Clear the client pipe state and hw init struct */
 	pipe_clear(bam_pipe);
@@ -1029,11 +1030,12 @@ int sps_bam_pipe_connect(struct sps_pipe *bam_pipe,
 	}
 
 	/* Indicate initialization is complete */
+	spin_lock_irqsave(&dev->isr_lock, flags);
 	dev->pipes[pipe_index] = bam_pipe;
 	dev->pipe_active_mask |= 1UL << pipe_index;
 	list_add_tail(&bam_pipe->list, &dev->pipes_q);
-
 	bam_pipe->state |= BAM_STATE_INIT;
+	spin_unlock_irqrestore(&dev->isr_lock, flags);
 	result = 0;
 exit_err:
 	if (result) {
@@ -1071,8 +1073,11 @@ int sps_bam_pipe_disconnect(struct sps_bam *dev, u32 pipe_index)
 	pipe = dev->pipes[pipe_index];
 	if (BAM_PIPE_IS_ASSIGNED(pipe)) {
 		if ((dev->pipe_active_mask & (1UL << pipe_index))) {
+			unsigned long flags = 0;
+			spin_lock_irqsave(&dev->isr_lock, flags);
 			list_del(&pipe->list);
 			dev->pipe_active_mask &= ~(1UL << pipe_index);
+			spin_unlock_irqrestore(&dev->isr_lock, flags);
 		}
 		dev->pipe_remote_mask &= ~(1UL << pipe_index);
 		if (pipe->connect.options & SPS_O_NO_DISABLE)
@@ -1148,9 +1153,13 @@ static void pipe_set_irq(struct sps_bam *dev, u32 pipe_index,
 				"sps:BAM %pa pipe %d forced to use polling\n",
 				 BAM_ID(dev), pipe_index);
 	}
-	if ((pipe->state & BAM_STATE_MTI) == 0)
+	if ((pipe->state & BAM_STATE_MTI) == 0) {
+		bam_pipe_get_and_clear_irq_status(&dev->base,
+						   pipe_index);
+
 		bam_pipe_set_irq(&dev->base, pipe_index, irq_enable,
 					 pipe->irq_mask, dev->props.ee);
+	}
 	else
 		bam_pipe_set_mti(&dev->base, pipe_index, irq_enable,
 					 pipe->irq_mask, pipe->irq_gen_addr);
@@ -1497,10 +1506,11 @@ int sps_bam_pipe_transfer_one(struct sps_bam *dev,
 					       next_write);
 	}
 
-	SPS_DBG(dev,
-		"sps:%s: BAM phy addr:%pa; pipe %d; write pointer to tell HW: 0x%x; write pointer read from HW: 0x%x\n",
-		__func__, BAM_ID(dev), pipe_index, next_write,
-		bam_pipe_get_desc_write_offset(&dev->base, pipe_index));
+	if (dev->ipc_loglevel == 0)
+		SPS_DBG(dev,
+			"sps:%s: BAM phy addr:%pa; pipe %d; write pointer to tell HW: 0x%x; write pointer read from HW: 0x%x\n",
+			__func__, BAM_ID(dev), pipe_index, next_write,
+			bam_pipe_get_desc_write_offset(&dev->base, pipe_index));
 
 	return 0;
 }
@@ -1789,11 +1799,12 @@ static void pipe_handler_eot(struct sps_bam *dev, struct sps_pipe *pipe)
 	/* Get offset of last descriptor completed by the pipe */
 	end_offset = bam_pipe_get_desc_read_offset(&dev->base, pipe_index);
 
-	SPS_DBG(dev,
-		"sps:%s; pipe index:%d; read pointer:0x%x; write pointer:0x%x; sys.acked_offset:0x%x.\n",
-		__func__, pipe->pipe_index, end_offset,
-		bam_pipe_get_desc_write_offset(&dev->base, pipe_index),
-		pipe->sys.acked_offset);
+	if (dev->ipc_loglevel == 0)
+		SPS_DBG(dev,
+			"sps:%s; pipe index:%d; read pointer:0x%x; write pointer:0x%x; sys.acked_offset:0x%x.\n",
+			__func__, pipe->pipe_index, end_offset,
+			bam_pipe_get_desc_write_offset(&dev->base, pipe_index),
+			pipe->sys.acked_offset);
 
 	if (producer && pipe->late_eot) {
 		struct sps_iovec *desc_end;
@@ -2197,10 +2208,37 @@ int sps_bam_pipe_is_empty(struct sps_bam *dev, u32 pipe_index,
 
 
 	/* Determine descriptor FIFO state */
-	if (end_offset == acked_offset)
+	if (end_offset == acked_offset) {
 		*empty = true;
-	else
-		*empty = false;
+	} else {
+		if ((pipe->state & BAM_STATE_BAM2BAM) == 0) {
+			*empty = false;
+			return 0;
+		}
+		if (bam_pipe_check_zlt(&dev->base, pipe_index)) {
+			bool p_idc;
+			u32 next_write;
+
+			p_idc = bam_pipe_check_pipe_empty(&dev->base,
+								pipe_index);
+
+			next_write = acked_offset + sizeof(struct sps_iovec);
+			if (next_write >= pipe->desc_size)
+				next_write = 0;
+
+			if (next_write == end_offset) {
+				*empty = true;
+				if (!p_idc)
+					SPS_DBG3(dev,
+						"sps:BAM %pa pipe %d pipe empty checking for ZLT.\n",
+						BAM_ID(dev), pipe_index);
+			} else {
+				*empty = false;
+			}
+		} else {
+			*empty = false;
+		}
+	}
 
 	return 0;
 }
@@ -2248,6 +2286,7 @@ int sps_bam_get_free_count(struct sps_bam *dev, u32 pipe_index,
 int sps_bam_set_satellite(struct sps_bam *dev, u32 pipe_index)
 {
 	struct sps_pipe *pipe = dev->pipes[pipe_index];
+	unsigned long flags = 0;
 
 	/*
 	 * Switch to satellite control is only supported on processor
@@ -2289,10 +2328,12 @@ int sps_bam_set_satellite(struct sps_bam *dev, u32 pipe_index)
 	}
 
 	/* Indicate satellite control */
+	spin_lock_irqsave(&dev->isr_lock, flags);
 	list_del(&pipe->list);
 	dev->pipe_active_mask &= ~(1UL << pipe_index);
 	dev->pipe_remote_mask |= pipe->pipe_index_mask;
 	pipe->state |= BAM_STATE_REMOTE;
+	spin_unlock_irqrestore(&dev->isr_lock, flags);
 
 	return 0;
 }

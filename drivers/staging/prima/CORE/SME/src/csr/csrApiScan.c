@@ -114,6 +114,7 @@ tCsrIgnoreChannels countryIgnoreList[MAX_COUNTRY_IGNORE] = {
 tCsrIgnoreChannels countryIgnoreList[MAX_COUNTRY_IGNORE] = { };
 #endif //CONFIG_ENABLE_LINUX_REG
 
+#define CSR_IS_SOCIAL_CHANNEL(channel) (((channel) == 1) || ((channel) == 6) || ((channel) == 11) )
 //*** This is temporary work around. It need to call CCM api to get to CFG later
 /// Get string parameter value
 extern tSirRetStatus wlan_cfgGetStr(tpAniSirGlobal, tANI_U16, tANI_U8*, tANI_U32*);
@@ -3587,7 +3588,6 @@ void csrUpdateFCCChannelList(tpAniSirGlobal pMac)
     tCsrChannel ChannelList;
     tANI_U8 chnlIndx = 0;
     int i;
-    chnlIndx = pMac->scan.base20MHzChannels.numChannels;
 
     for ( i = 0; i < pMac->scan.base20MHzChannels.numChannels; i++ )
     {
@@ -3600,10 +3600,12 @@ void csrUpdateFCCChannelList(tpAniSirGlobal pMac)
                           pMac->scan.base20MHzChannels.channelList[i]);
             continue;
         }
-        ChannelList.channelList[i] = pMac->scan.base20MHzChannels.channelList[i];
+        ChannelList.channelList[chnlIndx] =
+                    pMac->scan.base20MHzChannels.channelList[i];
         chnlIndx++;
     }
     csrSetCfgValidChannelList(pMac, ChannelList.channelList, chnlIndx);
+    csrScanFilterResults(pMac);
 
 }
 
@@ -4610,6 +4612,12 @@ tANI_BOOLEAN csrScanComplete( tpAniSirGlobal pMac, tSirSmeScanRsp *pScanRsp )
             }
             csrSaveScanResults(pMac, pCommand->u.scanCmd.reason);
 
+            /* filter scan result based on valid channel list number */
+            if (pMac->scan.fcc_constraint)
+            {
+                smsLog(pMac, LOG1, FL("Clear BSS from invalid channels"));
+                csrScanFilterResults(pMac);
+            }
 #ifdef FEATURE_WLAN_DIAG_SUPPORT_CSR
             {
                 vos_log_scan_pkt_type *pScanLog = NULL;
@@ -6321,7 +6329,9 @@ eHalStatus csrScanCopyRequest(tpAniSirGlobal pMac, tCsrScanRequest *pDstReq, tCs
 
                             /* Allow scan on valid channels only.
                              */
-                            if ( ( csrRoamIsValidChannel(pMac, pSrcReq->ChannelInfo.ChannelList[index]) ) )
+                            if((csrRoamIsValidChannel(pMac, pSrcReq->ChannelInfo.ChannelList[index])) ||
+                                ((eCSR_SCAN_P2P_DISCOVERY == pSrcReq->requestType) &&
+                                CSR_IS_SOCIAL_CHANNEL(pSrcReq->ChannelInfo.ChannelList[index])))
                             {
                                 if( ((pSrcReq->skipDfsChnlInP2pSearch ||
                                      (pMac->scan.fEnableDFSChnlScan ==
@@ -8597,6 +8607,12 @@ eHalStatus csrScanSavePreferredNetworkFound(tpAniSirGlobal pMac,
       vos_mem_free(pParsedFrame);
       return eHAL_STATUS_RESOURCES;
    }
+
+    if ((macHeader->fc.type == SIR_MAC_MGMT_FRAME) &&
+        (macHeader->fc.subType == SIR_MAC_MGMT_PROBE_RSP))
+    {
+        pScanResult->Result.BssDescriptor.fProbeRsp = 1;
+    }
    //Add to scan cache
    csrScanAddResult(pMac, pScanResult, pIesLocal);
    pEntry = csrLLPeekHead( &pMac->scan.scanResultList, LL_ACCESS_LOCK );

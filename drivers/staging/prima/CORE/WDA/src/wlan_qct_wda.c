@@ -183,6 +183,9 @@ static VOS_STATUS WDA_ProcessReceiveFilterSetFilterReq (
                                    tWDA_CbContext *pWDA,
                                    tSirRcvPktFilterCfgType *pRcvPktFilterCfg
                                                        );
+// IKJB42MAIN-1244, Motorola, a19091 - BEGIN
+void WDA_ProcessReceiveFilterSetFilterMcReq(tSirInvokeV6Filter *invokeV6FilterConfig);
+// IKJB42MAIN-1244, Motorola, a19091 - END
 static VOS_STATUS WDA_ProcessPacketFilterMatchCountReq (
                                    tWDA_CbContext *pWDA,
                                    tpSirRcvFltPktMatchRsp pRcvFltPktMatchRsp
@@ -262,6 +265,11 @@ WDA_ProcessSetRtsCtsHTVhtInd(tWDA_CbContext *pWDA,
 
 VOS_STATUS WDA_ProcessMonStartReq( tWDA_CbContext *pWDA, void* wdaRequest);
 VOS_STATUS WDA_ProcessMonStopReq( tWDA_CbContext *pWDA, void* wdaRequest);
+VOS_STATUS WDA_ProcessEnableDisableCAEventInd(tWDA_CbContext *pWDA, tANI_U8 val);
+
+v_VOID_t WDA_ProcessAntennaDiversitySelectionReq(tWDA_CbContext *pWDA,
+                                   tSirAntennaDiversitySelectionReq *pData);
+
 /*
  * FUNCTION: WDA_ProcessNanRequest
  * Process NAN request
@@ -565,8 +573,31 @@ VOS_STATUS WDA_start(v_PVOID_t pVosContext)
       return VOS_STATUS_E_FAILURE;
    }
    /* wait for WDI start to invoke our callback */
-   status = vos_wait_single_event( &wdaContext->wdaWdiEvent,
-                                   WDA_WDI_START_TIMEOUT );
+   // IKHSS7-38339 - Motorola, a19091, -- START
+   /*status = vos_wait_single_event( &wdaContext->wdaWdiEvent,
+                                   WDA_WDI_START_TIMEOUT ); */
+   if(in_interrupt()) {
+       VOS_TRACE( VOS_MODULE_ID_WDA, VOS_TRACE_LEVEL_FATAL,
+               "%s cannot be called from interrupt context!!!", __FUNCTION__);
+       VOS_ASSERT(0);
+       status = VOS_STATUS_E_FAULT;
+   } else if(NULL == &wdaContext->wdaWdiEvent) {
+       VOS_TRACE( VOS_MODULE_ID_WDA, VOS_TRACE_LEVEL_FATAL,
+               "Null event used at %s!!!", __FUNCTION__);
+       VOS_ASSERT(0);
+       status = VOS_STATUS_E_FAULT;
+   } else if ( LINUX_EVENT_COOKIE != wdaContext->wdaWdiEvent.cookie ) {
+       VOS_TRACE( VOS_MODULE_ID_WDA, VOS_TRACE_LEVEL_FATAL,
+           "Uninitialized event used at %s", __FUNCTION__);
+       VOS_ASSERT(0);
+       status = VOS_STATUS_E_INVAL;
+   } else {
+       long ret;
+       ret = wait_for_completion_timeout(&(wdaContext->wdaWdiEvent.complete),
+               msecs_to_jiffies(WDA_WDI_START_TIMEOUT));
+       status = ( 0 >= ret ) ? VOS_STATUS_E_TIMEOUT : VOS_STATUS_SUCCESS;
+   }
+   // IKHSS7-38339 - Motorola, a19091, -- END
    if ( !VOS_IS_STATUS_SUCCESS(status) )
    {
       if ( VOS_STATUS_E_TIMEOUT == status )
@@ -2234,6 +2265,50 @@ VOS_STATUS WDA_prepareConfigTLV(v_PVOID_t pVosContext,
    {
       VOS_TRACE( VOS_MODULE_ID_WDA, VOS_TRACE_LEVEL_ERROR,
                "Failed to get value for WNI_CFG_LINK_FAIL_TX_CNT");
+      goto handle_failure;
+   }
+   tlvStruct = (tHalCfg *)( (tANI_U8 *) tlvStruct
+                           + sizeof(tHalCfg) + tlvStruct->length) ;
+
+   /* QWLAN_HAL_CFG_OPTIMIZE_CA_EVENT */
+   tlvStruct->type = QWLAN_HAL_CFG_OPTIMIZE_CA_EVENT ;
+   tlvStruct->length = sizeof(tANI_U32);
+   configDataValue = (tANI_U32 *)(tlvStruct + 1);
+   if (wlan_cfgGetInt(pMac, WNI_CFG_OPTIMIZE_CA_EVENT,
+                                            configDataValue ) != eSIR_SUCCESS)
+   {
+      VOS_TRACE( VOS_MODULE_ID_WDA, VOS_TRACE_LEVEL_ERROR,
+               "Failed to get value for WNI_CFG_OPTIMIZE_CA_EVENT");
+      goto handle_failure;
+   }
+   tlvStruct = (tHalCfg *)( (tANI_U8 *) tlvStruct
+                           + sizeof(tHalCfg) + tlvStruct->length) ;
+
+   /* QWLAN_HAL_CFG_TOGGLE_ARP_BDRATES */
+   tlvStruct->type = QWLAN_HAL_CFG_TOGGLE_ARP_BDRATES;
+   tlvStruct->length = sizeof(tANI_U32);
+   configDataValue = (tANI_U32 *)(tlvStruct + 1);
+
+   if (wlan_cfgGetInt(pMac, WNI_CFG_TOGGLE_ARP_BDRATES,
+                                            configDataValue ) != eSIR_SUCCESS)
+   {
+      VOS_TRACE( VOS_MODULE_ID_WDA, VOS_TRACE_LEVEL_ERROR,
+               "Failed to get value for WNI_CFG_TOGGLE_ARP_BDRATES");
+      goto handle_failure;
+   }
+   tlvStruct = (tHalCfg *)( (tANI_U8 *) tlvStruct
+                           + sizeof(tHalCfg) + tlvStruct->length) ;
+
+   /* QWLAN_HAL_CFG_SAR_BOFFSET_CORRECTION_ENABLE */
+   tlvStruct->type = QWLAN_HAL_CFG_SAR_BOFFSET_CORRECTION_ENABLE;
+   tlvStruct->length = sizeof(tANI_U32);
+   configDataValue = (tANI_U32 *)(tlvStruct + 1);
+
+   if (wlan_cfgGetInt(pMac, WNI_CFG_SAR_BOFFSET_SET_CORRECTION,
+                         configDataValue ) != eSIR_SUCCESS)
+   {
+      VOS_TRACE( VOS_MODULE_ID_WDA, VOS_TRACE_LEVEL_ERROR,
+               "Failed to get value for WNI_CFG_SAR_BOFFSET_SET_CORRECTION");
       goto handle_failure;
    }
    tlvStruct = (tHalCfg *)( (tANI_U8 *) tlvStruct
@@ -14065,6 +14140,11 @@ VOS_STATUS WDA_McProcessMsg( v_CONTEXT_t pVosContext, vos_msg_t *pMsg )
                                         (tAniGetFrameLogReq *)pMsg->bodyptr);
          break;
       }
+      case WDA_SEND_LOG_DONE_IND:
+      {
+         WDA_FWLoggingDXEdoneInd();
+         break;
+      }
       case WDA_FATAL_EVENT_LOGS_REQ:
       {
          WDA_ProcessFatalEventLogsReq(pWDA,
@@ -14349,6 +14429,13 @@ VOS_STATUS WDA_McProcessMsg( v_CONTEXT_t pVosContext, vos_msg_t *pMsg )
          WDA_ProcessReceiveFilterSetFilterReq(pWDA, (tSirRcvPktFilterCfgType *)pMsg->bodyptr);
          break;
       }
+      // IKJB42MAIN-1244, Motorola, a19091 - BEGIN
+      case WDA_RECEIVE_FILTER_SET_FILTER_MC_REQ:
+      {
+          WDA_ProcessReceiveFilterSetFilterMcReq((tSirInvokeV6Filter *)pMsg->bodyptr);
+          break;
+      }
+      // IKJB42MAIN-1244, Motorola, a19091 - END
       case WDA_PACKET_COALESCING_FILTER_MATCH_COUNT_REQ:
       {
          WDA_ProcessPacketFilterMatchCountReq(pWDA, (tpSirRcvFltPktMatchRsp)pMsg->bodyptr);
@@ -14535,10 +14622,20 @@ VOS_STATUS WDA_McProcessMsg( v_CONTEXT_t pVosContext, vos_msg_t *pMsg )
       }
       case WDA_MON_STOP_REQ:
       {
-         WDA_ProcessMonStopReq(pWDA,NULL);
+         WDA_ProcessMonStopReq(pWDA, (v_PVOID_t)pMsg->bodyptr);
          break;
       }
-
+      case WDA_SEND_FREQ_RANGE_CONTROL_IND:
+      {
+         WDA_ProcessEnableDisableCAEventInd(pWDA, pMsg->bodyval);
+         break;
+      }
+      case WDA_ANTENNA_DIVERSITY_SELECTION_REQ:
+      {
+         WDA_ProcessAntennaDiversitySelectionReq(pWDA,
+                             (tSirAntennaDiversitySelectionReq *)pMsg->bodyptr);
+         break;
+      }
       default:
       {
          VOS_TRACE( VOS_MODULE_ID_WDA, VOS_TRACE_LEVEL_INFO,
@@ -15436,7 +15533,43 @@ void WDA_lowLevelIndCallback(WDI_LowLevelIndType *wdiLowLevelInd,
          }
          break;
       }
+      case WDI_LOST_LINK_PARAMS_IND:
+      {
+          tpSirSmeLostLinkParamsInd pLostLinkParamInd =
+            (tpSirSmeLostLinkParamsInd)vos_mem_malloc(sizeof(tSirSmeLostLinkParamsInd));
 
+          if (NULL == pLostLinkParamInd)
+          {
+              VOS_TRACE( VOS_MODULE_ID_WDA, VOS_TRACE_LEVEL_ERROR,
+                                  "%s: VOS MEM Alloc Failure", __func__);
+              break;
+          }
+          VOS_TRACE( VOS_MODULE_ID_WDA, VOS_TRACE_LEVEL_INFO,
+                     "Received WDI_LOST_LINK_PARAMS_IND from WDI ");
+
+          pLostLinkParamInd->messageType = eWNI_SME_LOST_LINK_PARAMS_IND;
+          pLostLinkParamInd->length = sizeof(tSirSmeMicFailureInd);
+          pLostLinkParamInd->info.bssIdx =
+            wdiLowLevelInd->wdiIndicationData.wdiLostLinkParamsInd.bssIdx;
+          pLostLinkParamInd->info.rssi =
+           wdiLowLevelInd->wdiIndicationData.wdiLostLinkParamsInd.rssi;
+          vos_mem_copy(pLostLinkParamInd->info.selfMacAddr,
+                    wdiLowLevelInd->wdiIndicationData.wdiLostLinkParamsInd.selfMacAddr,
+                    sizeof(tSirMacAddr));
+          pLostLinkParamInd->info.linkFlCnt =
+           wdiLowLevelInd->wdiIndicationData.wdiLostLinkParamsInd.linkFlCnt;
+          pLostLinkParamInd->info.linkFlTx =
+            wdiLowLevelInd->wdiIndicationData.wdiLostLinkParamsInd.linkFlTx;
+          pLostLinkParamInd->info.lastDataRate =
+            wdiLowLevelInd->wdiIndicationData.wdiLostLinkParamsInd.lastDataRate;
+          pLostLinkParamInd->info.rsvd1 =
+            wdiLowLevelInd->wdiIndicationData.wdiLostLinkParamsInd.rsvd1;
+          pLostLinkParamInd->info.rsvd2 =
+            wdiLowLevelInd->wdiIndicationData.wdiLostLinkParamsInd.rsvd2;
+          WDA_SendMsg(pWDA, SIR_HAL_LOST_LINK_PARAMS_IND,
+                                       (void *)pLostLinkParamInd , 0) ;
+          break;
+      }
       default:
       {
          /* TODO error */
@@ -17112,6 +17245,22 @@ VOS_STATUS WDA_ProcessReceiveFilterSetFilterReq (tWDA_CbContext *pWDA,
    }
    return CONVERT_WDI2VOS_STATUS(status) ;
 }
+
+// IKJB42MAIN-1244, Motorola, a19091 - BEGIN
+/*
+ * FUNCTION WDA_ProcessReceiveFilterSetFilterMcReq
+ */
+void WDA_ProcessReceiveFilterSetFilterMcReq(tSirInvokeV6Filter *invokeV6FilterConfig)
+{
+    if(invokeV6FilterConfig != NULL)
+    {
+        invokeV6FilterConfig->configureFilterFn(invokeV6FilterConfig->pHddAdapter,
+                invokeV6FilterConfig->set, FALSE);
+        kfree(invokeV6FilterConfig);
+    }
+}
+// IKJB42MAIN-1244, Motorola, a19091 - END
+
 /*
  * FUNCTION: WDA_FilterMatchCountRespCallback
  * 
@@ -17292,9 +17441,9 @@ void WDA_ReceiveFilterClearFilterRespCallback(
       VOS_ASSERT(0) ;
       return ;
    }
-   
-   vos_mem_free(pWdaParams->wdaMsgParam) ;
+
    vos_mem_free(pWdaParams->wdaWdiApiMsgParam);
+   vos_mem_free(pWdaParams->wdaMsgParam);
    vos_mem_free(pWdaParams) ;
    //print a msg, nothing else to do
    VOS_TRACE( VOS_MODULE_ID_WDA, VOS_TRACE_LEVEL_INFO,
@@ -19451,9 +19600,11 @@ WDA_ProcessSetRtsCtsHTVhtInd(tWDA_CbContext *pWDA,
     }
     return CONVERT_WDI2VOS_STATUS(status) ;
 }
-void WDA_MonStartRspCallback(void *pEventData, void* pUserData)
+
+void WDA_MonModeRspCallback(void *pEventData, void* pUserData)
 {
    tWDA_ReqParams *pWdaParams = (tWDA_ReqParams *)pUserData;
+   tSirMonModeReq *pData;
 
    VOS_TRACE( VOS_MODULE_ID_WDA, VOS_TRACE_LEVEL_INFO,
                                           "<------ %s " ,__func__);
@@ -19464,18 +19615,22 @@ void WDA_MonStartRspCallback(void *pEventData, void* pUserData)
       VOS_ASSERT(0) ;
       return ;
    }
-
+   pData = (tSirMonModeReq *)pWdaParams->wdaMsgParam;
+   if (pData != NULL) {
+        pData->callback(pData->magic, pData->cmpVar);
+        vos_mem_free(pWdaParams->wdaMsgParam);
+   }
    vos_mem_free(pWdaParams) ;
 
    return;
 }
 
-
-VOS_STATUS WDA_ProcessMonStartReq( tWDA_CbContext *pWDA, void* wdaRequest)
+VOS_STATUS WDA_ProcessMonStartReq( tWDA_CbContext *pWDA, void *wdaRequest)
 {
 
     WDI_Status status = WDI_STATUS_SUCCESS;
     tWDA_ReqParams *pWdaParams;
+    tSirMonModeReq *pMonModeData = (tSirMonModeReq *)wdaRequest;
 
     VOS_TRACE( VOS_MODULE_ID_WDA, VOS_TRACE_LEVEL_INFO,
             FL("%s: "), __func__);
@@ -19491,8 +19646,8 @@ VOS_STATUS WDA_ProcessMonStartReq( tWDA_CbContext *pWDA, void* wdaRequest)
     pWdaParams->wdaMsgParam = wdaRequest;
     pWdaParams->wdaWdiApiMsgParam = NULL;
 
-    status = WDI_MonStartReq((void *)wdaRequest,
-                               (WDI_MonStartRspCb)WDA_MonStartRspCallback,
+    status = WDI_MonStartReq(pMonModeData->data,
+                               (WDI_MonModeRspCb)WDA_MonModeRspCallback,
                                (void *)pWdaParams);
     if (IS_WDI_STATUS_FAILURE(status))
     {
@@ -19502,25 +19657,6 @@ VOS_STATUS WDA_ProcessMonStartReq( tWDA_CbContext *pWDA, void* wdaRequest)
         vos_mem_free(pWdaParams);
     }
     return CONVERT_WDI2VOS_STATUS(status);
-}
-
-void WDA_MonStopRspCallback(void* pUserData)
-{
-   tWDA_ReqParams *pWdaParams = (tWDA_ReqParams *)pUserData;
-
-   VOS_TRACE( VOS_MODULE_ID_WDA, VOS_TRACE_LEVEL_ERROR,
-                                          "%s: Mon stop request cb " ,__func__);
-   if (NULL == pWdaParams)
-   {
-      VOS_TRACE( VOS_MODULE_ID_WDA, VOS_TRACE_LEVEL_ERROR,
-              "%s: pWdaParams received NULL", __func__);
-      VOS_ASSERT(0) ;
-      return ;
-   }
-
-   vos_mem_free(pWdaParams) ;
-
-   return;
 }
 
 VOS_STATUS WDA_ProcessMonStopReq( tWDA_CbContext *pWDA, void* wdaRequest)
@@ -19545,7 +19681,7 @@ VOS_STATUS WDA_ProcessMonStopReq( tWDA_CbContext *pWDA, void* wdaRequest)
 
     VOS_TRACE( VOS_MODULE_ID_WDA, VOS_TRACE_LEVEL_ERROR,
             "%s: Processing Mon stop request", __func__);
-    status = WDI_MonStopReq((WDI_MonStopRspCb)WDA_MonStopRspCallback,
+    status = WDI_MonStopReq((WDI_MonModeRspCb)WDA_MonModeRspCallback,
                              (void *)pWdaParams);
 
     if (IS_WDI_STATUS_FAILURE(status))
@@ -19556,4 +19692,112 @@ VOS_STATUS WDA_ProcessMonStopReq( tWDA_CbContext *pWDA, void* wdaRequest)
         vos_mem_free(pWdaParams);
     }
     return CONVERT_WDI2VOS_STATUS(status);
+}
+
+VOS_STATUS WDA_ProcessEnableDisableCAEventInd(tWDA_CbContext *pWDA, tANI_U8 val)
+{
+    WDI_Status status;
+    VOS_TRACE( VOS_MODULE_ID_WDA, VOS_TRACE_LEVEL_INFO,
+                 FL("---> %s"), __func__);
+    status = WDI_EnableDisableCAEventInd(val);
+    if (WDI_STATUS_PENDING == status)
+    {
+        VOS_TRACE( VOS_MODULE_ID_WDA, VOS_TRACE_LEVEL_INFO,
+                 FL("pending status received "));
+    }
+    else if (WDI_STATUS_SUCCESS_SYNC != status)
+    {
+       VOS_TRACE( VOS_MODULE_ID_WDA, VOS_TRACE_LEVEL_ERROR,
+               FL("Failure status %d"), status);
+    }
+    return CONVERT_WDI2VOS_STATUS(status) ;
+}
+
+void WDA_GetCurrentAntennaIndexCallback(WDI_Status status, void *params,
+                                        void *pUserData)
+{
+   tSirAntennaDiversitySelectionInfo *pAntennaDivSelInfo =
+                           (tSirAntennaDiversitySelectionInfo *)pUserData;
+
+   tSirAntennaDivSelRsp *resParams = (tSirAntennaDivSelRsp *)params;
+   VOS_TRACE( VOS_MODULE_ID_WDA, VOS_TRACE_LEVEL_INFO,
+                                 "<------ %s " ,__func__);
+   if (NULL == pAntennaDivSelInfo)
+   {
+      VOS_TRACE( VOS_MODULE_ID_WDA, VOS_TRACE_LEVEL_ERROR,
+                "%s: pWdaParams received NULL", __func__);
+      VOS_ASSERT(0) ;
+      return ;
+   }
+   if (NULL == resParams)
+   {
+      VOS_TRACE( VOS_MODULE_ID_WDA, VOS_TRACE_LEVEL_ERROR,
+                "%s: resParams received NULL", __func__);
+      VOS_ASSERT(0) ;
+      return ;
+   }
+
+   if (pAntennaDivSelInfo->callback)
+   {
+       if (WDI_STATUS_SUCCESS == status)
+       {
+           pAntennaDivSelInfo->callback(resParams->selectedAntennaId,
+                                        pAntennaDivSelInfo->data);
+       }
+       else
+       {
+           pAntennaDivSelInfo->callback(-1,
+                                        pAntennaDivSelInfo->data);
+       }
+   }
+
+   vos_mem_free(pUserData);
+   return;
+}
+
+/*
+ * FUNCTION: WDA_ProcessAntennaDiversitySelectionReq
+ * Request to WDI.
+ */
+v_VOID_t WDA_ProcessAntennaDiversitySelectionReq(tWDA_CbContext *pWDA,
+                                  tSirAntennaDiversitySelectionReq *pData)
+{
+   WDI_Status wdiStatus;
+   tSirAntennaDiversitySelectionInfo *pAntennaDivSelInfo;
+
+   VOS_TRACE(VOS_MODULE_ID_WDA, VOS_TRACE_LEVEL_INFO,
+             "------> %s " , __func__);
+
+   pAntennaDivSelInfo = (tSirAntennaDiversitySelectionInfo *)
+             vos_mem_malloc(sizeof(tSirAntennaDiversitySelectionInfo));
+   if (NULL == pAntennaDivSelInfo)
+   {
+      VOS_TRACE(VOS_MODULE_ID_WDA, VOS_TRACE_LEVEL_ERROR,
+                "%s: VOS MEM Alloc Failure", __func__);
+      VOS_ASSERT(0);
+      vos_mem_free(pData);
+      return;
+   }
+
+   pAntennaDivSelInfo->callback = (tAntennaDivSelCB)(pData->callback);
+   pAntennaDivSelInfo->data = pData->data;
+
+   wdiStatus = WDI_GetCurrentAntennaIndex(pAntennaDivSelInfo,
+               WDA_GetCurrentAntennaIndexCallback, pData->reserved);
+
+   if (WDI_STATUS_PENDING == wdiStatus)
+   {
+      VOS_TRACE(VOS_MODULE_ID_WDA, VOS_TRACE_LEVEL_INFO,
+              "Pending received for %s:%d ", __func__, __LINE__);
+   }
+   else if (WDI_STATUS_SUCCESS != wdiStatus)
+   {
+       if (pAntennaDivSelInfo->callback)
+       {
+           pAntennaDivSelInfo->callback(-1, pAntennaDivSelInfo->data);
+       }
+   }
+
+   vos_mem_free(pData);
+   return;
 }

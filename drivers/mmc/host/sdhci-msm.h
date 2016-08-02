@@ -74,7 +74,6 @@ struct sdhci_msm_pin_data {
 struct sdhci_pinctrl_data {
 	struct pinctrl          *pctrl;
 	struct pinctrl_state    *pins_active;
-	struct pinctrl_state    *pins_active_sdr104;
 	struct pinctrl_state    *pins_sleep;
 };
 
@@ -108,13 +107,13 @@ struct sdhci_msm_pltfm_data {
 	unsigned char sup_clk_cnt;
 	int mpm_sdiowakeup_int;
 	int sdiowakeup_irq;
-	int slot_type;
 	enum pm_qos_req_type cpu_affinity_type;
 	cpumask_t cpu_affinity_mask;
 	u32 *sup_ice_clk_table;
 	unsigned char sup_ice_clk_cnt;
 	u32 ice_clk_max;
 	u32 ice_clk_min;
+	bool core_3_0v_support;
 };
 
 struct sdhci_msm_bus_vote {
@@ -129,7 +128,6 @@ struct sdhci_msm_bus_vote {
 
 struct sdhci_msm_ice_data {
 	struct qcom_ice_variant_ops *vops;
-	struct completion async_done;
 	struct platform_device *pdev;
 	int state;
 };
@@ -156,8 +154,6 @@ struct sdhci_msm_host {
 	u32 clk_rate; /* Keeps track of current clock rate that is set */
 	bool tuning_done;
 	bool calibration_done;
-	struct proc_dir_entry   *speed_class;
-	struct proc_dir_entry   *sd_tray_state;
 	u8 saved_tuning_phase;
 	bool en_auto_cmd21;
 	struct device_attribute auto_cmd21_attr;
@@ -169,5 +165,7 @@ struct sdhci_msm_host {
 	enum dev_state mmc_dev_state;
 	struct sdhci_msm_ice_data ice;
 	u32 ice_clk_rate;
+	bool enhanced_strobe;
+	bool tuning_in_progress;
 };
 #endif /* __SDHCI_MSM_H__ */

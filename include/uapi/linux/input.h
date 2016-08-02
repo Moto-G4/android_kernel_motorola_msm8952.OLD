@@ -200,6 +200,8 @@ struct input_keymap_entry {
 #define SYN_DROPPED		3
 #define SYN_TIME_SEC		4
 #define SYN_TIME_NSEC		5
+#define SYN_MAX			0xf
+#define SYN_CNT			(SYN_MAX+1)
 
 /*
  * Keys and buttons
@@ -475,9 +477,6 @@ struct input_keymap_entry {
 #define KEY_RFKILL		247	/* Key that controls all radios */
 
 #define KEY_MICMUTE		248	/* Mute / unmute the microphone */
-#define KEY_APP_SWITCH		249	
-#define HALL_N_POLE             251     
-#define HALL_S_POLE             252     
 
 /* Code 255 is reserved for special needs of AT keyboard driver */
 
@@ -856,7 +855,6 @@ struct input_keymap_entry {
 #define ABS_MT_DISTANCE		0x3b	/* Contact hover distance */
 #define ABS_MT_TOOL_X		0x3c	/* Center X tool position */
 #define ABS_MT_TOOL_Y		0x3d	/* Center Y tool position */
-#define ABS_MT_GLOVE		0x3e	
 
 
 #define ABS_MAX			0x3f

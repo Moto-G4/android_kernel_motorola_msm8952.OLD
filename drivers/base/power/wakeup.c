@@ -54,6 +54,8 @@ static LIST_HEAD(wakeup_sources);
 
 static DECLARE_WAIT_QUEUE_HEAD(wakeup_count_wait_queue);
 
+static ktime_t last_read_time;
+
 /**
  * wakeup_source_prepare - Prepare a new wakeup source for initialization.
  * @ws: Wakeup source to prepare.
@@ -372,6 +374,20 @@ int device_set_wakeup_enable(struct device *dev, bool enable)
 }
 EXPORT_SYMBOL_GPL(device_set_wakeup_enable);
 
+/**
+ * wakeup_source_not_registered - validate the given wakeup source.
+ * @ws: Wakeup source to be validated.
+ */
+static bool wakeup_source_not_registered(struct wakeup_source *ws)
+{
+	/*
+	 * Use timer struct to check if the given source is initialized
+	 * by wakeup_source_add.
+	 */
+	return ws->timer.function != pm_wakeup_timer_fn ||
+		   ws->timer.data != (unsigned long)ws;
+}
+
 /*
  * The functions below use the observation that each wakeup event starts a
  * period in which the system should not be suspended.  The moment this period
@@ -411,6 +427,10 @@ EXPORT_SYMBOL_GPL(device_set_wakeup_enable);
 static void wakeup_source_activate(struct wakeup_source *ws)
 {
 	unsigned int cec;
+
+	if (WARN(wakeup_source_not_registered(ws),
+			"unregistered wakeup source\n"))
+		return;
 
 	/*
 	 * active wakeup source should bring the system
@@ -789,9 +809,14 @@ bool pm_wakeup_pending(void)
 bool pm_get_wakeup_count(unsigned int *count, bool block)
 {
 	unsigned int cnt, inpr;
+	unsigned long flags;
 
 	if (block) {
 		DEFINE_WAIT(wait);
+
+		spin_lock_irqsave(&events_lock, flags);
+		last_read_time = ktime_get();
+		spin_unlock_irqrestore(&events_lock, flags);
 
 		for (;;) {
 			prepare_to_wait(&wakeup_count_wait_queue, &wait,
@@ -824,6 +849,7 @@ bool pm_save_wakeup_count(unsigned int count)
 {
 	unsigned int cnt, inpr;
 	unsigned long flags;
+	struct wakeup_source *ws;
 
 	events_check_enabled = false;
 	spin_lock_irqsave(&events_lock, flags);
@@ -831,6 +857,15 @@ bool pm_save_wakeup_count(unsigned int count)
 	if (cnt == count && inpr == 0) {
 		saved_count = count;
 		events_check_enabled = true;
+	} else {
+		rcu_read_lock();
+		list_for_each_entry_rcu(ws, &wakeup_sources, entry) {
+			if (ws->active ||
+			    ktime_compare(ws->last_time, last_read_time) > 0) {
+				ws->wakeup_count++;
+			}
+		}
+		rcu_read_unlock();
 	}
 	spin_unlock_irqrestore(&events_lock, flags);
 	return events_check_enabled;
@@ -916,33 +951,6 @@ static int print_wakeup_source_stats(struct seq_file *m,
 	return ret;
 }
 
-#ifdef CONFIG_HTC_POWER_DEBUG
-void htc_print_wakeup_source(struct wakeup_source *ws)
-{
-        if (ws->active) {
-                if (ws->timer_expires) {
-                        long timeout = ws->timer_expires - jiffies;
-                        if (timeout > 0)
-                                printk(" '%s', time left %ld ticks; ", ws->name, timeout);
-                } else
-                        printk(" '%s' ", ws->name);
-        }
-}
-
-void htc_print_active_wakeup_sources(void)
-{
-        struct wakeup_source *ws;
-        unsigned long flags;
-
-        printk("wakeup sources: ");
-        spin_lock_irqsave(&events_lock, flags);
-        list_for_each_entry_rcu(ws, &wakeup_sources, entry)
-                htc_print_wakeup_source(ws);
-        spin_unlock_irqrestore(&events_lock, flags);
-        printk("\n");
-}
-#endif
-
 /**
  * wakeup_sources_stats_show - Print wakeup sources statistics information.
  * @m: seq_file to print the statistics into.
@@ -961,6 +969,33 @@ static int wakeup_sources_stats_show(struct seq_file *m, void *unused)
 	rcu_read_unlock();
 
 	return 0;
+}
+
+int wakelock_dump_active_info(char *buf, int size)
+{
+	struct wakeup_source *ws;
+	unsigned long flags;
+	char *p = buf;
+
+	rcu_read_lock();
+	list_for_each_entry_rcu(ws, &wakeup_sources, entry) {
+		spin_lock_irqsave(&ws->lock, flags);
+		if (ws->active) {
+			if (time_after(ws->timer_expires, jiffies)) {
+				long timeout = ws->timer_expires - jiffies;
+
+				p += snprintf(p, size - (p - buf),
+				"   (active)[%s], time left %d (msecs)\n",
+				ws->name, jiffies_to_msecs(timeout));
+			} else /* active */
+				p += snprintf(p, size - (p - buf),
+				"   (active)[%s]\n", ws->name);
+		}
+		spin_unlock_irqrestore(&ws->lock, flags);
+	}
+	rcu_read_unlock();
+
+	return p - buf;
 }
 
 static int wakeup_sources_stats_open(struct inode *inode, struct file *file)

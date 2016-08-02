@@ -47,7 +47,6 @@
 #include <linux/utsname.h>
 
 #include <asm/uaccess.h>
-#include <linux/htc_debug_tools.h>
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/printk.h>
@@ -112,7 +111,7 @@ static struct console *exclusive_console;
  */
 struct console_cmdline
 {
-	char	name[8];			/* Name of the driver	    */
+	char	name[16];			/* Name of the driver	    */
 	int	index;				/* Minor dev. to use	    */
 	char	*options;			/* Options for the driver   */
 #ifdef CONFIG_A11Y_BRAILLE_CONSOLE
@@ -216,8 +215,7 @@ struct log {
 #if defined(CONFIG_LOG_BUF_MAGIC)
 	u32 magic;		/* handle for ramdump analysis tools */
 #endif
-	u8 logbuf_cpu_id;	
-	u32 logbuf_pid;		
+	u8 cpu;			/* which cpu that print the message*/
 };
 
 /*
@@ -245,7 +243,6 @@ static u32 log_next_idx;
 /* the next printk record to write to the console */
 static u64 console_seq;
 static u32 console_idx;
-static u32 log_last_valid_idx;
 static enum log_flags console_prev;
 
 /* the next printk record to read after the last 'clear' command */
@@ -414,7 +411,7 @@ static void log_oops_store(struct log *msg)
 static void log_store(int facility, int level,
 		      enum log_flags flags, u64 ts_nsec,
 		      const char *dict, u16 dict_len,
-		      const char *text, u16 text_len)
+		      const char *text, u16 text_len, u32 cpu)
 {
 	struct log *msg;
 	u32 size, pad_len;
@@ -470,9 +467,9 @@ static void log_store(int facility, int level,
 		msg->ts_nsec = local_clock();
 	memset(log_dict(msg) + dict_len, 0, pad_len);
 	msg->len = sizeof(struct log) + text_len + dict_len + pad_len;
+	msg->cpu = (u8)cpu;
 
 	/* insert message */
-	log_last_valid_idx = log_next_idx;
 	log_next_idx += msg->len;
 	log_next_seq++;
 }
@@ -1026,34 +1023,7 @@ static bool printk_time;
 #endif
 module_param_named(time, printk_time, bool, S_IRUGO | S_IWUSR);
 
-#if defined(CONFIG_PRINTK_CPU_ID)
-static int printk_cpu_id = 1;
-#else
-static int printk_cpu_id = 0;
-#endif
-module_param_named(cpu, printk_cpu_id, int, S_IRUGO | S_IWUSR);
-
-#if defined(CONFIG_PRINTK_PID)
-static int printk_pid = 1;
-#else
-static int printk_pid = 0;
-#endif
-module_param_named(pid, printk_pid, int, S_IRUGO | S_IWUSR);
-
-static void log_store_other(u8 cpu_id, u32 pid) {
-	if (printk_cpu_id) {
-		struct log *this_log;
-		this_log = (struct log *)(log_buf + log_last_valid_idx);
-		this_log->logbuf_cpu_id = cpu_id;
-	}
-	if (printk_pid) {
-		struct log *this_log;
-		this_log = (struct log *)(log_buf + log_last_valid_idx);
-		this_log->logbuf_pid = pid;
-	}
-}
-
-static size_t print_time(u64 ts, char *buf)
+static size_t print_time(u64 ts, char *buf, u8 cpu)
 {
 	unsigned long rem_nsec;
 
@@ -1063,32 +1033,11 @@ static size_t print_time(u64 ts, char *buf)
 	rem_nsec = do_div(ts, 1000000000);
 
 	if (!buf)
-		return snprintf(NULL, 0, "[%5lu.000000] ", (unsigned long)ts);
+		return snprintf(NULL, 0, "[%5lu.000000,%u] ",
+			(unsigned long)ts, cpu);
 
-	return sprintf(buf, "[%5lu.%06lu] ",
-		       (unsigned long)ts, rem_nsec / 1000);
-}
-
-static size_t print_cpu_id(u8 cpu_id, char *buf)
-{
-	if (!printk_cpu_id)
-		return 0;
-
-	if (!buf)
-		return snprintf(NULL, 0, "c%u ", cpu_id);
-
-	return sprintf(buf, "c%u ", cpu_id);
-}
-
-static size_t print_pid(u32 pid, char *buf)
-{
-	if (!printk_pid)
-		return 0;
-
-	if (!buf)
-		return snprintf(NULL, 0, "%6u ", pid);
-
-	return sprintf(buf, "%6u ", pid);
+	return sprintf(buf, "[%5lu.%06lu,%u] ",
+		       (unsigned long)ts, rem_nsec / 1000, cpu);
 }
 
 static size_t print_prefix(const struct log *msg, bool syslog, char *buf)
@@ -1110,9 +1059,8 @@ static size_t print_prefix(const struct log *msg, bool syslog, char *buf)
 		}
 	}
 
-	len += print_time(msg->ts_nsec, buf ? buf + len : NULL);
-	len += print_cpu_id(msg->logbuf_cpu_id, buf ? buf + len : NULL);
-	len += print_pid(msg->logbuf_pid, buf ? buf + len : NULL);
+	len += print_time(msg->ts_nsec, buf ? buf + len : NULL,
+				msg->cpu);
 	return len;
 }
 
@@ -1466,30 +1414,11 @@ static int syslog_print_all(char __user *buf, int size, bool clear)
 	return len;
 }
 
-#if defined(CONFIG_HTC_DEBUG_BOOTLOADER_LOG)
-static inline int insert_to_buf_ln(char __user *buf, int buf_len, char* str)
-{
-	int len = 0;
-	len = strlen(str)+1;
-	if (buf_len >= len) {
-		memcpy(buf, str, len);
-		buf[len-1] = '\n';
-		return len;
-	}
-	return 0;
-}
-#endif
-
 int do_syslog(int type, char __user *buf, int len, bool from_file)
 {
 	bool clear = false;
 	static int saved_console_loglevel = -1;
 	int error;
-#if defined(CONFIG_HTC_DEBUG_BOOTLOADER_LOG)
-	ssize_t lk_len = 0, lk_len_total = 0;
-#define HB_LAST_TITLE "[HB LAST]"
-#define HB_LOG_TITLE "[HB LOG]"
-#endif
 
 	error = check_syslog_permissions(type, from_file);
 	if (error)
@@ -1539,45 +1468,7 @@ int do_syslog(int type, char __user *buf, int len, bool from_file)
 		}
 		error = syslog_print_all(buf, len, clear);
 		break;
-#if defined(CONFIG_HTC_DEBUG_BOOTLOADER_LOG)
 	/* Clear ring buffer */
-	case SYSLOG_ACTION_READ_ALL_APPEND_LK:
-		error = -EINVAL;
-		if (!buf || len < 0)
-			goto out;
-		error = 0;
-		if (!len)
-			goto out;
-		if (!access_ok(VERIFY_WRITE, buf, len)) {
-			error = -EFAULT;
-			goto out;
-		}
-
-		lk_len = insert_to_buf_ln(buf, len, HB_LAST_TITLE);
-		len -= lk_len;
-		buf += lk_len;
-		lk_len_total += lk_len;
-
-		lk_len = bldr_last_log_read_once(buf, len);
-		len -= lk_len;
-		buf += lk_len;
-		lk_len_total += lk_len;
-
-		lk_len = insert_to_buf_ln(buf, len, HB_LOG_TITLE);
-		len -= lk_len;
-		buf += lk_len;
-		lk_len_total += lk_len;
-
-		lk_len = bldr_log_read_once(buf, len);
-		len -= lk_len;
-		buf += lk_len;
-		lk_len_total += lk_len;
-
-		error = syslog_print_all(buf, len, clear);
-		error += lk_len_total;
-		break;
-#endif
-	
 	case SYSLOG_ACTION_CLEAR:
 		syslog_print_all(NULL, 0, true);
 		break;
@@ -1806,17 +1697,20 @@ static struct cont {
 	u8 facility;			/* log level of first message */
 	enum log_flags flags;		/* prefix, newline flags */
 	bool flushed:1;			/* buffer sealed and committed */
-	u8 cont_cpu_id;			
-	u32 cont_pid;			
+	u8 cpu;				/* which cpu is using the cont*/
 } cont;
 
 static void cont_flush(enum log_flags flags)
 {
+	u32 this_cpu;
+
 	if (cont.flushed)
 		return;
 	if (cont.len == 0)
 		return;
 
+	this_cpu = smp_processor_id();
+	cont.cpu = (u8)this_cpu;
 	if (cont.cons) {
 		/*
 		 * If a fragment of this line was directly flushed to the
@@ -1824,8 +1718,8 @@ static void cont_flush(enum log_flags flags)
 		 * line. LOG_NOCONS suppresses a duplicated output.
 		 */
 		log_store(cont.facility, cont.level, flags | LOG_NOCONS,
-			  cont.ts_nsec, NULL, 0, cont.buf, cont.len);
-		log_store_other(cont.cont_cpu_id, cont.cont_pid);
+			  cont.ts_nsec, NULL, 0, cont.buf, cont.len,
+			  this_cpu);
 		cont.flags = flags;
 		cont.flushed = true;
 	} else {
@@ -1834,8 +1728,7 @@ static void cont_flush(enum log_flags flags)
 		 * just submit it to the store and free the buffer.
 		 */
 		log_store(cont.facility, cont.level, flags, 0,
-			  NULL, 0, cont.buf, cont.len);
-		log_store_other(cont.cont_cpu_id, cont.cont_pid);
+			  NULL, 0, cont.buf, cont.len, this_cpu);
 		cont.len = 0;
 	}
 }
@@ -1859,8 +1752,6 @@ static bool cont_add(int facility, int level, const char *text, size_t len)
 		cont.flags = 0;
 		cont.cons = 0;
 		cont.flushed = false;
-		cont.cont_cpu_id = smp_processor_id();
-		cont.cont_pid = current->pid;
 	}
 
 	memcpy(cont.buf + cont.len, text, len);
@@ -1878,7 +1769,7 @@ static size_t cont_print_text(char *text, size_t size)
 	size_t len;
 
 	if (cont.cons == 0 && (console_prev & LOG_NEWLINE)) {
-		textlen += print_time(cont.ts_nsec, text);
+		textlen += print_time(cont.ts_nsec, text, cont.cpu);
 		size -= textlen;
 	}
 
@@ -1950,7 +1841,7 @@ asmlinkage int vprintk_emit(int facility, int level,
 		printed_len += strlen(recursion_msg);
 		/* emit KERN_CRIT message */
 		log_store(0, 2, LOG_PREFIX|LOG_NEWLINE, 0,
-			  NULL, 0, recursion_msg, printed_len);
+			  NULL, 0, recursion_msg, printed_len, this_cpu);
 	}
 
 	/*
@@ -2004,11 +1895,9 @@ asmlinkage int vprintk_emit(int facility, int level,
 			cont_flush(LOG_NEWLINE);
 
 		/* buffer line if possible, otherwise store it right away */
-		if (!cont_add(facility, level, text, text_len)) {
+		if (!cont_add(facility, level, text, text_len))
 			log_store(facility, level, lflags | LOG_CONT, 0,
-				  dict, dictlen, text, text_len);
-			log_store_other(logbuf_cpu, current->pid);
-		}
+				  dict, dictlen, text, text_len, this_cpu);
 	} else {
 		bool stored = false;
 
@@ -2024,11 +1913,9 @@ asmlinkage int vprintk_emit(int facility, int level,
 			cont_flush(LOG_NEWLINE);
 		}
 
-		if (!stored) {
+		if (!stored)
 			log_store(facility, level, lflags, 0,
-				  dict, dictlen, text, text_len);
-			log_store_other(logbuf_cpu, current->pid);
-		}
+				  dict, dictlen, text, text_len, this_cpu);
 	}
 	printed_len += text_len;
 
@@ -2301,11 +2188,6 @@ module_param_named(console_suspend, console_suspend_enabled,
 MODULE_PARM_DESC(console_suspend, "suspend console during suspend"
 	" and hibernate operations");
 
-int suspend_console_deferred;
-module_param_named(
-		suspend_console_deferred, suspend_console_deferred, int, S_IRUGO | S_IWUSR | S_IWGRP
-);
-
 /**
  * suspend_console - suspend the console subsystem
  *
@@ -2385,7 +2267,8 @@ static int __cpuinit console_cpu_notify(struct notifier_block *self,
  */
 void console_lock(void)
 {
-	BUG_ON(in_interrupt());
+	might_sleep();
+
 	down(&console_sem);
 	if (console_suspended)
 		return;
@@ -2729,6 +2612,8 @@ void register_console(struct console *newcon)
 	 */
 	for (i = 0; i < MAX_CMDLINECONSOLES && console_cmdline[i].name[0];
 			i++) {
+		BUILD_BUG_ON(sizeof(console_cmdline[i].name) !=
+			     sizeof(newcon->name));
 		if (strcmp(console_cmdline[i].name, newcon->name) != 0)
 			continue;
 		if (newcon->index >= 0 &&

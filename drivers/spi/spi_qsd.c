@@ -44,7 +44,6 @@
 #include <linux/msm-bus.h>
 #include <linux/msm-bus-board.h>
 #include "spi_qsd.h"
-#include <linux/spi/spi_htc.h>
 
 static int msm_spi_pm_resume_runtime(struct device *device);
 static int msm_spi_pm_suspend_runtime(struct device *device);
@@ -89,35 +88,7 @@ static inline void msm_spi_register_init(struct msm_spi *dd)
 	if (dd->qup_ver)
 		writel_relaxed(0x00000000, dd->base + QUP_OPERATIONAL_MASK);
 }
-struct msm_spi *dd_tmp;
-int msm_spi_pinctrl_set(int active)
-{
-	int result;
-	printk("[fp][SPI]msm_spi_pinctrl_set -> %s\n",active?"active":"sleep");
 
-	if(active)
-	{
-		result = pinctrl_select_state(dd_tmp->pinctrl, dd_tmp->pins_active);
-		if (result) {
-			dev_err(dd_tmp->dev, "%s: Can not set %s pins\n",
-			__func__, SPI_PINCTRL_STATE_DEFAULT);
-			result = 0;
-		}
-		result = 1;
-	}
-	else
-	{
-		result = pinctrl_select_state(dd_tmp->pinctrl, dd_tmp->pins_sleep);
-		if (result) {
-			dev_err(dd_tmp->dev, "%s: Can not set %s pins\n",
-			__func__, SPI_PINCTRL_STATE_SLEEP);
-			result = 0;
-		}
-		result = 1;
-	}
-
-	return result;
-}
 static int msm_spi_pinctrl_init(struct msm_spi *dd)
 {
 	dd->pinctrl = devm_pinctrl_get(dd->dev);
@@ -817,7 +788,15 @@ static void msm_spi_set_mx_counts(struct msm_spi *dd, u32 n_words)
 static int msm_spi_bam_pipe_disconnect(struct msm_spi *dd,
 						struct msm_spi_bam_pipe  *pipe)
 {
-	int ret = sps_disconnect(pipe->handle);
+	int ret = 0;
+	struct sps_connect config = pipe->config;
+	config.options |= SPS_O_POLL;
+	ret = sps_set_config(pipe->handle, &config);
+	if (ret) {
+		pr_err("sps_set_config() failed ret %d\n", ret);
+		return ret;
+	}
+	ret = sps_disconnect(pipe->handle);
 	if (ret) {
 		dev_dbg(dd->dev, "%s disconnect bam %s pipe failed\n",
 							__func__, pipe->name);
@@ -1470,6 +1449,11 @@ static u32 msm_spi_set_spi_io_control(struct msm_spi *dd)
 	if (spi_ioc != spi_ioc_orig)
 		writel_relaxed(spi_ioc, dd->base + SPI_IO_CONTROL);
 
+	/*
+	 * Ensure that the IO control mode register gets written
+	 * before proceeding with the transfer.
+	 */
+	mb();
 	return spi_ioc;
 }
 
@@ -1686,6 +1670,7 @@ static void msm_spi_process_message(struct msm_spi *dd)
 {
 	int xfrs_grped = 0;
 	int rc;
+	u32 spi_ioc;
 
 	dd->num_xfrs_grped = 0;
 	dd->bam.curr_rx_bytes_recvd = dd->bam.curr_tx_bytes_sent = 0;
@@ -1699,9 +1684,10 @@ static void msm_spi_process_message(struct msm_spi *dd)
 						transfer_list);
 
 	get_transfer_length(dd);
+	spi_ioc = msm_spi_set_spi_io_control(dd);
 	if (dd->qup_ver || (dd->multi_xfr && !dd->read_len && !dd->write_len)) {
 
-		if (dd->qup_ver)
+		if (dd->pdata->force_cs && dd->qup_ver)
 			write_force_cs(dd, 0);
 
 		/*
@@ -1720,15 +1706,16 @@ static void msm_spi_process_message(struct msm_spi *dd)
 				dd->read_len = dd->write_len = 0;
 				xfrs_grped = combine_transfers(dd);
 				dd->num_xfrs_grped = xfrs_grped;
-				if (dd->qup_ver)
+				if (dd->pdata->force_cs && dd->qup_ver)
 					write_force_cs(dd, 1);
 			}
 
 			dd->cur_tx_transfer = dd->cur_transfer;
 			dd->cur_rx_transfer = dd->cur_transfer;
 			msm_spi_process_transfer(dd);
-			if (dd->qup_ver && dd->cur_transfer->cs_change)
-				write_force_cs(dd, 0);
+			if (dd->pdata->force_cs && dd->qup_ver
+				&& dd->cur_transfer->cs_change)
+					write_force_cs(dd, 0);
 			xfrs_grped--;
 		}
 	} else {
@@ -1751,7 +1738,7 @@ static void msm_spi_process_message(struct msm_spi *dd)
 		dd->num_xfrs_grped = 1;
 		msm_spi_process_transfer(dd);
 	}
-	if (dd->qup_ver)
+	if (dd->pdata->force_cs && dd->qup_ver)
 		write_force_cs(dd, 0);
 	return;
 error:
@@ -1760,6 +1747,7 @@ error:
 
 static void reset_core(struct msm_spi *dd)
 {
+	u32 spi_ioc;
 	msm_spi_register_init(dd);
 	/*
 	 * The SPI core generates a bogus input overrun error on some targets,
@@ -1769,7 +1757,13 @@ static void reset_core(struct msm_spi *dd)
 	 */
 	msm_spi_enable_error_flags(dd);
 
-	writel_relaxed(SPI_IO_C_NO_TRI_STATE, dd->base + SPI_IO_CONTROL);
+	spi_ioc = readl_relaxed(dd->base + SPI_IO_CONTROL);
+	spi_ioc |= SPI_IO_C_NO_TRI_STATE;
+	writel_relaxed(spi_ioc , dd->base + SPI_IO_CONTROL);
+	/*
+	 * Ensure that the IO control is written to before returning.
+	 */
+	mb();
 	msm_spi_set_state(dd, SPI_OP_STATE_RESET);
 }
 
@@ -2466,6 +2460,8 @@ struct msm_spi_platform_data *msm_spi_dt_to_pdata(
 			&pdata->rt_priority,		 DT_OPT,  DT_BOOL,  0},
 		{"qcom,shared",
 			&pdata->is_shared,		 DT_OPT,  DT_BOOL,  0},
+		{"qcom,force-cs",
+			&pdata->force_cs,		 DT_OPT,  DT_BOOL,  0},
 		{NULL,  NULL,                            0,       0,        0},
 		};
 
@@ -2545,7 +2541,6 @@ static int init_resources(struct platform_device *pdev)
 	int               pclk_enabled = 0;
 
 	dd = spi_master_get_devdata(master);
-	dd_tmp = dd;
 
 	if (dd->pdata && dd->pdata->use_pinctrl) {
 		rc = msm_spi_pinctrl_init(dd);

@@ -173,11 +173,6 @@ config INPUT_APMPOWER
 
 	  To compile this driver as a module, choose M here: the
 	  module will be called apm-power.
-config POWER_KEY_CLR_RESET
-	tristate "Power key clear reset"
-	depends on INPUT_KEYCOMBO
-	help
-	  Say Y here if you do not want to reset when power key is pressed.
 
 config INPUT_KEYRESET
 	tristate "Reset key"
@@ -204,6 +199,11 @@ config SENSORS_HALL
 	---help---
 	 Say y here if you want to use this hall sensor driver, it
 	 is like a switch. For example, lid.
+
+config HOMEBUTTON
+	tristate "Home button driver"
+	help
+	  Say Y here if you want home button to be visible to apps
 
 comment "Input Device Drivers"
 

@@ -156,6 +156,7 @@ struct fastrpc_chan_ctx {
 	struct kref kref;
 	struct notifier_block nb;
 	int ssrcount;
+	int prevssrcount;
 };
 
 struct fastrpc_apps {
@@ -366,6 +367,11 @@ static int fastrpc_buf_alloc(struct fastrpc_file *fl, ssize_t size,
 	struct fastrpc_buf *buf = 0, *fr = 0;
 	struct hlist_node *n;
 	size_t len = 0;
+
+	VERIFY(err, size > 0);
+	if (err)
+		goto bail;
+
 	/* find the smallest buffer that fits in the cache */
 	spin_lock(&fl->hlock);
 	hlist_for_each_entry_safe(buf, n, &fl->bufs, hn) {
@@ -771,10 +777,16 @@ static int get_args(uint32_t kernel, struct smq_invoke_ctx *ctx)
 		if (!len)
 			continue;
 		if (map) {
-			uintptr_t offset = buf_page_start(buf)
-				- buf_page_start(map->va);
+			struct vm_area_struct *vma;
+			uintptr_t offset;
 			int num = buf_num_pages(buf, len);
 			int idx = list[i].pgidx;
+
+			VERIFY(err, NULL != (vma = find_vma(current->mm,
+								map->va)));
+			if (err)
+				goto bail;
+			offset = buf_page_start(buf) - vma->vm_start;
 			pages[idx].addr = map->phys + offset;
 			if (msm_audio_ion_is_smmu_available())
 				pages[idx].addr |= STREAM_ID;
@@ -1435,6 +1447,8 @@ static int fastrpc_mmap_create(struct fastrpc_file *fl, int fd, uintptr_t va,
 		map->apps = me;
 		map->fl = 0;
 		VERIFY(err, !dma_alloc_memory(&region_start, len));
+		if (err)
+			goto bail;
 		map->phys = (uintptr_t)region_start;
 		map->size = len;
 	} else {
@@ -1578,8 +1592,13 @@ static int fastrpc_device_open(struct inode *inode, struct file *filp)
 		kref_init(&me->channel[cid].kref);
 		pr_info("'opened /dev/%s c %d %d'\n", gcinfo[cid].name,
 						MAJOR(me->dev_no), cid);
-		if (fastrpc_mmap_remove_ssr(fl))
-			pr_err("ADSPRPC: SSR: Failed to unmap remote heap\n");
+		if (me->channel[cid].ssrcount !=
+				 me->channel[cid].prevssrcount) {
+			if (fastrpc_mmap_remove_ssr(fl))
+				pr_err("ADSPRPC: SSR: Failed to unmap remote heap\n");
+			me->channel[cid].prevssrcount =
+						me->channel[cid].ssrcount;
+		}
 	}
 	spin_lock(&me->hlock);
 	hlist_add_head(&fl->hn, &me->drivers);
@@ -1766,6 +1785,7 @@ static int __init fastrpc_device_init(void)
 		if (err)
 			goto device_create_bail;
 		me->channel[i].ssrcount = 0;
+		me->channel[i].prevssrcount = 0;
 		me->channel[i].nb.notifier_call = fastrpc_restart_notifier_cb,
 		(void)subsys_notif_register_notifier(gcinfo[i].subsys,
 							&me->channel[i].nb);

@@ -649,6 +649,8 @@ static void ipa_sps_irq_tx_notify(struct sps_event_notify *notify)
 
 	switch (notify->event_id) {
 	case SPS_EVENT_EOT:
+		if (IPA_CLIENT_IS_APPS_CONS(sys->ep->client))
+			atomic_set(&ipa_ctx->sps_pm.eot_activity, 1);
 		if (!atomic_read(&sys->curr_polling_state)) {
 			ret = sps_get_config(sys->ep->ep_hdl,
 					&sys->ep->connect);
@@ -691,6 +693,8 @@ static void ipa_sps_irq_tx_no_aggr_notify(struct sps_event_notify *notify)
 	switch (notify->event_id) {
 	case SPS_EVENT_EOT:
 		tx_pkt = notify->data.transfer.user;
+		if (IPA_CLIENT_IS_APPS_CONS(tx_pkt->sys->ep->client))
+			atomic_set(&ipa_ctx->sps_pm.eot_activity, 1);
 		queue_work(tx_pkt->sys->wq, &tx_pkt->work);
 		break;
 	default:
@@ -777,12 +781,92 @@ static void ipa_rx_switch_to_intr_mode(struct ipa_sys_context *sys)
 	}
 	atomic_set(&sys->curr_polling_state, 0);
 	ipa_handle_rx_core(sys, true, false);
+	if (sys->ep->client == IPA_CLIENT_APPS_LAN_CONS)
+		ipa_dec_release_wakelock(IPA_WAKELOCK_REF_CLIENT_LAN_RX);
+	else if (sys->ep->client == IPA_CLIENT_APPS_WAN_CONS)
+		ipa_dec_release_wakelock(IPA_WAKELOCK_REF_CLIENT_WAN_RX);
+	else
+		IPAERR("ipa_dec_release_wakelock failed, client enum %d\n",
+			sys->ep->client);
 	return;
 
 fail:
 	queue_delayed_work(sys->wq, &sys->switch_to_intr_work,
 			msecs_to_jiffies(1));
 }
+
+
+/**
+ * ipa_sps_irq_control() - Function to enable or disable BAM IRQ.
+ */
+static void ipa_sps_irq_control(struct ipa_sys_context *sys, bool enable)
+{
+	int ret;
+
+	if (enable) {
+		ret = sps_get_config(sys->ep->ep_hdl, &sys->ep->connect);
+		if (ret) {
+			IPAERR("sps_get_config() failed %d\n", ret);
+			return;
+		}
+		sys->event.options = SPS_O_EOT;
+		ret = sps_register_event(sys->ep->ep_hdl, &sys->event);
+		if (ret) {
+			IPAERR("sps_register_event() failed %d\n", ret);
+			return;
+		}
+		sys->ep->connect.options =
+			SPS_O_AUTO_ENABLE | SPS_O_ACK_TRANSFERS | SPS_O_EOT;
+		ret = sps_set_config(sys->ep->ep_hdl, &sys->ep->connect);
+		if (ret) {
+			IPAERR("sps_set_config() failed %d\n", ret);
+			return;
+		}
+	} else {
+		ret = sps_get_config(sys->ep->ep_hdl,
+				&sys->ep->connect);
+		if (ret) {
+			IPAERR("sps_get_config() failed %d\n", ret);
+			return;
+		}
+		sys->ep->connect.options = SPS_O_AUTO_ENABLE |
+			SPS_O_ACK_TRANSFERS | SPS_O_POLL;
+		ret = sps_set_config(sys->ep->ep_hdl,
+				&sys->ep->connect);
+		if (ret) {
+			IPAERR("sps_set_config() failed %d\n", ret);
+			return;
+		}
+	}
+}
+
+void ipa_sps_irq_control_all(bool enable)
+{
+	struct ipa_ep_context *ep;
+	int ipa_ep_idx, client_num;
+
+	IPADBG("\n");
+
+	for (client_num = IPA_CLIENT_CONS;
+		client_num < IPA_CLIENT_MAX; client_num++) {
+		if (!IPA_CLIENT_IS_APPS_CONS(client_num))
+			continue;
+
+		ipa_ep_idx = ipa_get_ep_mapping(client_num);
+		if (ipa_ep_idx == -1) {
+			IPAERR("Invalid client.\n");
+			continue;
+		}
+		ep = &ipa_ctx->ep[ipa_ep_idx];
+		if (!ep->valid) {
+			IPAERR("EP (%d) not allocated.\n", ipa_ep_idx);
+			continue;
+		}
+		ipa_sps_irq_control(ep->sys, enable);
+	}
+}
+
+
 
 /**
  * ipa_rx_notify() - Callback function which is called by the SPS driver when a
@@ -806,6 +890,8 @@ static void ipa_sps_irq_rx_notify(struct sps_event_notify *notify)
 
 	switch (notify->event_id) {
 	case SPS_EVENT_EOT:
+		if (IPA_CLIENT_IS_APPS_CONS(sys->ep->client))
+			atomic_set(&ipa_ctx->sps_pm.eot_activity, 1);
 		if (!atomic_read(&sys->curr_polling_state)) {
 			ret = sps_get_config(sys->ep->ep_hdl,
 					&sys->ep->connect);
@@ -821,6 +907,15 @@ static void ipa_sps_irq_rx_notify(struct sps_event_notify *notify)
 				IPAERR("sps_set_config() failed %d\n", ret);
 				break;
 			}
+			if (sys->ep->client == IPA_CLIENT_APPS_LAN_CONS)
+				ipa_inc_acquire_wakelock(
+				IPA_WAKELOCK_REF_CLIENT_LAN_RX);
+			else if (sys->ep->client == IPA_CLIENT_APPS_WAN_CONS)
+				ipa_inc_acquire_wakelock(
+				IPA_WAKELOCK_REF_CLIENT_WAN_RX);
+			else
+				IPAERR("acquire_wakelock failed, client(%d)\n",
+					sys->ep->client);
 			atomic_set(&sys->curr_polling_state, 1);
 			queue_work(sys->wq, &sys->work);
 		}
@@ -875,6 +970,36 @@ static void switch_to_intr_rx_work_func(struct work_struct *work)
 	dwork = container_of(work, struct delayed_work, work);
 	sys = container_of(dwork, struct ipa_sys_context, switch_to_intr_work);
 	ipa_handle_rx(sys);
+}
+
+/**
+ * ipa_update_repl_threshold()- Update the repl_threshold for the client.
+ *
+ * Return value: None.
+ */
+void ipa_update_repl_threshold(enum ipa_client_type ipa_client)
+{
+	int ep_idx;
+	struct ipa_ep_context *ep;
+
+	/* Check if ep is valid. */
+	ep_idx = ipa_get_ep_mapping(ipa_client);
+	if (ep_idx == -1) {
+		IPADBG("Invalid IPA client\n");
+		return;
+	}
+
+	ep = &ipa_ctx->ep[ep_idx];
+	if (!ep->valid) {
+		IPADBG("EP not valid/Not applicable for client.\n");
+		return;
+	}
+	/*
+	 * Determine how many buffers/descriptors remaining will
+	 * cause to drop below the yellow WM bar.
+	 */
+	ep->rx_replenish_threshold = ipa_get_sys_yellow_wm()
+					/ ep->sys->rx_buff_sz;
 }
 
 /**
@@ -1059,6 +1184,12 @@ int ipa_setup_sys_pipe(struct ipa_sys_connect_params *sys_in, u32 *clnt_hdl)
 		 */
 		ep->rx_replenish_threshold = ipa_get_sys_yellow_wm()
 						/ ep->sys->rx_buff_sz;
+		/* Only when the WAN pipes are setup, actual threshold will
+		 * be read from the register. So update LAN_CONS ep again with
+		 * right value.
+		 */
+		if (sys_in->client == IPA_CLIENT_APPS_WAN_CONS)
+			ipa_update_repl_threshold(IPA_CLIENT_APPS_LAN_CONS);
 	} else {
 		ep->connect.mode = SPS_MODE_DEST;
 		ep->connect.source = SPS_DEV_HANDLE_MEM;
@@ -1233,11 +1364,13 @@ int ipa_teardown_sys_pipe(u32 clnt_hdl)
 	if (IPA_CLIENT_IS_CONS(ep->client))
 		ipa_cleanup_rx(ep->sys);
 
-	if (ipa_ctx->modem_cfg_emb_pipe_flt &&
-		ep->client == IPA_CLIENT_APPS_LAN_WAN_PROD)
-		IPADBG("modem cfg emb pipe flt\n");
-	else
-		ipa_delete_dflt_flt_rules(clnt_hdl);
+	if (!ep->skip_ep_cfg && IPA_CLIENT_IS_PROD(ep->client)) {
+		if (ipa_ctx->modem_cfg_emb_pipe_flt &&
+			ep->client == IPA_CLIENT_APPS_LAN_WAN_PROD)
+			IPADBG("modem cfg emb pipe flt\n");
+		else
+			ipa_delete_dflt_flt_rules(clnt_hdl);
+	}
 
 	if (IPA_CLIENT_IS_WLAN_CONS(ep->client))
 		atomic_dec(&ipa_ctx->wc_memb.active_clnt_cnt);
@@ -1770,13 +1903,15 @@ static void ipa_fast_replenish_rx_cache(struct ipa_sys_context *sys)
 			break;
 		}
 		rx_len_cached = ++sys->len;
+		sys->repl_trig_cnt++;
 		curr = (curr + 1) % sys->repl.capacity;
 		/* ensure write is done before setting head index */
 		mb();
 		atomic_set(&sys->repl.head_idx, curr);
 	}
 
-	queue_work(sys->repl_wq, &sys->repl_work);
+	if (sys->repl_trig_cnt % sys->repl_trig_thresh == 0)
+		queue_work(sys->repl_wq, &sys->repl_work);
 
 	if (rx_len_cached <= sys->ep->rx_replenish_threshold) {
 		if (rx_len_cached == 0) {
@@ -1787,6 +1922,7 @@ static void ipa_fast_replenish_rx_cache(struct ipa_sys_context *sys)
 			else
 				WARN_ON(1);
 		}
+		sys->repl_trig_cnt = 0;
 		queue_delayed_work(sys->wq, &sys->replenish_rx_work,
 			msecs_to_jiffies(1));
 	}
@@ -2316,13 +2452,13 @@ static int ipa_rx_pyld_hdlr(struct sk_buff *rx_skb, struct ipa_sys_context *sys)
 		src_pipe = WLAN_PROD_TX_EP;
 
 	ep = &ipa_ctx->ep[src_pipe];
-	spin_lock(&ipa_ctx->lan_rx_clnt_notify_lock);
+	spin_lock(&ipa_ctx->disconnect_lock);
 	if (unlikely(src_pipe >= ipa_ctx->ipa_num_pipes ||
 		!ep->valid || !ep->client_notify)) {
 		IPAERR("drop pipe=%d ep_valid=%d client_notify=%p\n",
 		  src_pipe, ep->valid, ep->client_notify);
 		dev_kfree_skb_any(rx_skb);
-		spin_unlock(&ipa_ctx->lan_rx_clnt_notify_lock);
+		spin_unlock(&ipa_ctx->disconnect_lock);
 		return 0;
 	}
 
@@ -2341,7 +2477,7 @@ static int ipa_rx_pyld_hdlr(struct sk_buff *rx_skb, struct ipa_sys_context *sys)
 	skb_pull(rx_skb, pull_len);
 	ep->client_notify(ep->priv, IPA_RECEIVE,
 			(unsigned long)(rx_skb));
-	spin_unlock(&ipa_ctx->lan_rx_clnt_notify_lock);
+	spin_unlock(&ipa_ctx->disconnect_lock);
 	return 0;
 }
 
@@ -2504,6 +2640,8 @@ void ipa_sps_irq_rx_no_aggr_notify(struct sps_event_notify *notify)
 	switch (notify->event_id) {
 	case SPS_EVENT_EOT:
 		rx_pkt = notify->data.transfer.user;
+		if (IPA_CLIENT_IS_APPS_CONS(rx_pkt->sys->ep->client))
+			atomic_set(&ipa_ctx->sps_pm.eot_activity, 1);
 		rx_pkt->len = notify->data.transfer.iovec.size;
 		IPADBG("event %d notified sys=%p len=%u\n", notify->event_id,
 				notify->user, rx_pkt->len);
@@ -2628,6 +2766,8 @@ static int ipa_assign_policy(struct ipa_sys_connect_params *in,
 					sys->pyld_hdlr = ipa_wan_rx_pyld_hdlr;
 					sys->rx_pool_sz =
 						ipa_ctx->wan_rx_ring_size;
+					in->ipa_ep_cfg.aggr.aggr_sw_eof_active
+						= true;
 					if (ipa_ctx->
 					ipa_client_apps_wan_cons_agg_gro) {
 						IPAERR("get close-by %u\n",
@@ -2671,6 +2811,18 @@ static int ipa_assign_policy(struct ipa_sys_connect_params *in,
 						IPA_GENERIC_AGGR_PKT_LIMIT;
 					}
 				}
+				/*
+				 * When HOLB mitigation is enabled, there is
+				 * a need to replenish the buffers quickly.
+				 * Otherwise we may run into issues with Q6
+				 * ZIP requests.
+				 */
+				if (ipa_ctx->ipa_hw_type == IPA_HW_v2_6L)
+					sys->repl_trig_thresh =
+						 sys->rx_pool_sz / 16;
+				else
+					sys->repl_trig_thresh =
+						 sys->rx_pool_sz / 8;
 				if (nr_cpu_ids > 1)
 					sys->repl_hdlr =
 						ipa_fast_replenish_rx_cache;

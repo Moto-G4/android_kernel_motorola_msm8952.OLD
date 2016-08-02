@@ -373,6 +373,7 @@ VOS_STATUS hdd_enter_deep_sleep(hdd_context_t *pHddCtx, hdd_adapter_t *pAdapter)
        hddLog(VOS_TRACE_LEVEL_ERROR, "%s: vos_stop return failed %d",
                 __func__, vosStatus);
        VOS_ASSERT(0);
+       VOS_BUG(0);
    }
 
    pHddCtx->hdd_ps_state = eHDD_SUSPEND_DEEP_SLEEP;
@@ -412,6 +413,7 @@ VOS_STATUS hdd_exit_deep_sleep(hdd_context_t *pHddCtx, hdd_adapter_t *pAdapter)
    {
       VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_ERROR,
          "%s: Failed in vos_start",__func__);
+      VOS_BUG(0);
       goto err_deep_sleep;
    }
 
@@ -1095,7 +1097,7 @@ VOS_STATUS hdd_conf_arp_offload(hdd_adapter_t *pAdapter, int fenable)
    tSirHostOffloadReq  offLoadRequest;
    hdd_context_t *pHddCtx = WLAN_HDD_GET_CTX(pAdapter);
 
-   hddLog(VOS_TRACE_LEVEL_INFO, FL(" fenable = %d \n"), fenable);
+   hddLog(VOS_TRACE_LEVEL_INFO, FL(" fenable = %d "), fenable);
 
    if(fenable)
    {
@@ -1311,7 +1313,7 @@ static void hdd_conf_suspend_ind(hdd_context_t* pHddCtx,
          * function takes care of checking necessary conditions before
          * configuring.
          */
-        wlan_hdd_set_mc_addr_list(pAdapter, TRUE);
+        //wlan_hdd_set_mc_addr_list(pAdapter, TRUE);
 #endif
 
         if( (pHddCtx->cfg_ini->fEnableMCAddrList) && WDA_IS_MCAST_FLT_ENABLE_IN_FW)
@@ -1386,7 +1388,7 @@ static void hdd_conf_resume_ind(hdd_adapter_t *pAdapter)
     /* Filer was applied during suspend inditication
      * clear it when we resume.
      */
-    wlan_hdd_set_mc_addr_list(pAdapter, FALSE);
+    //wlan_hdd_set_mc_addr_list(pAdapter, FALSE);
 #endif
 }
 
@@ -1506,7 +1508,8 @@ static void hdd_PowerStateChangedCB
    /* if the driver was not in BMPS during early suspend,
     * the dynamic DTIM is now updated at Riva */
    if ((newState == BMPS) && pHddCtx->hdd_wlan_suspended
-           && pHddCtx->cfg_ini->enableDynamicDTIM
+           && (pHddCtx->cfg_ini->enableDynamicDTIM ||
+               pHddCtx->cfg_ini->enableModulatedDTIM)
            && (pHddCtx->hdd_ignore_dtim_enabled == FALSE))
    {
        pHddCtx->hdd_ignore_dtim_enabled = TRUE;
@@ -2186,6 +2189,7 @@ VOS_STATUS hdd_wlan_re_init(void)
    if ( !VOS_IS_STATUS_SUCCESS( vosStatus ) )
    {
       hddLog(VOS_TRACE_LEVEL_FATAL,"%s: vos_start failed",__func__);
+      VOS_BUG(0);
       goto err_vosclose;
    }
 
@@ -2326,6 +2330,7 @@ err_vosclose:
        pHddCtx->cfg_ini= NULL;
 
        wiphy_unregister(pHddCtx->wiphy);
+       hdd_wlan_free_wiphy_channels(pHddCtx->wiphy);
        wiphy_free(pHddCtx->wiphy);
    }
    vos_preClose(&pVosContext);

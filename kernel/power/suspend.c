@@ -30,6 +30,12 @@
 #include <linux/wakeup_reason.h>
 
 #include "power.h"
+#ifdef CONFIG_MSM_RPM_STATS_LOG
+#include "../../drivers/soc/qcom/rpm_stats.h"
+#endif
+#ifdef CONFIG_SUSPEND_DEBUG
+#include "user_sysfs_private.h"
+#endif
 
 struct pm_sleep_state pm_states[PM_SUSPEND_MAX] = {
 	[PM_SUSPEND_FREEZE] = { .label = "freeze", .state = PM_SUSPEND_FREEZE },
@@ -209,6 +215,12 @@ static int suspend_enter(suspend_state_t state, bool *wakeup)
 		goto Platform_wake;
 	}
 
+#ifdef CONFIG_SUSPEND_DEBUG
+	vreg_before_sleep_save_configs();
+	tlmm_before_sleep_set_configs();
+	tlmm_before_sleep_save_configs();
+#endif
+
 	error = disable_nonboot_cpus();
 	if (error || suspend_test(TEST_CPUS)) {
 		log_suspend_abort_reason("Disabling non-boot cpus failed");
@@ -224,10 +236,11 @@ static int suspend_enter(suspend_state_t state, bool *wakeup)
 		if (!(suspend_test(TEST_CORE) || *wakeup)) {
 			error = suspend_ops->enter(state);
 			events_check_enabled = false;
-		} else {
+		} else if (*wakeup) {
 			pm_get_active_wakeup_sources(suspend_abort,
 				MAX_SUSPEND_ABORT_LEN);
 			log_suspend_abort_reason(suspend_abort);
+			error = -EBUSY;
 		}
 		syscore_resume();
 	}
@@ -269,8 +282,7 @@ int suspend_devices_and_enter(suspend_state_t state)
 		if (error)
 			goto Close;
 	}
-	if (!suspend_console_deferred)
-		suspend_console();
+	suspend_console();
 	ftrace_stop();
 	suspend_test_start();
 	error = dpm_suspend_start(PMSG_SUSPEND);
@@ -293,8 +305,7 @@ int suspend_devices_and_enter(suspend_state_t state)
 	dpm_resume_end(PMSG_RESUME);
 	suspend_test_finish("resume devices");
 	ftrace_start();
-	if (!suspend_console_deferred)
-		resume_console();
+	resume_console();
  Close:
 	if (need_suspend_ops(state) && suspend_ops->end)
 		suspend_ops->end();
@@ -349,7 +360,12 @@ static int enter_state(suspend_state_t state)
 	if (state == PM_SUSPEND_FREEZE)
 		freeze_begin();
 
-	suspend_sys_sync_queue();
+#ifdef CONFIG_PM_SYNC_BEFORE_SUSPEND
+	printk(KERN_INFO "PM: Syncing filesystems ... ");
+	sys_sync();
+	printk("done.\n");
+#endif
+
 	pr_debug("PM: Preparing system for %s sleep\n", pm_states[state].label);
 	error = suspend_prepare(state);
 	if (error)
@@ -398,6 +414,9 @@ int pm_suspend(suspend_state_t state)
 		return -EINVAL;
 
 	pm_suspend_marker("entry");
+#ifdef CONFIG_MSM_RPM_STATS_LOG
+	msm_rpmstats_log_suspend_enter();
+#endif
 	error = enter_state(state);
 	if (error) {
 		suspend_stats.fail++;
@@ -405,6 +424,9 @@ int pm_suspend(suspend_state_t state)
 	} else {
 		suspend_stats.success++;
 	}
+#ifdef CONFIG_MSM_RPM_STATS_LOG
+	msm_rpmstats_log_suspend_exit(error);
+#endif
 	pm_suspend_marker("exit");
 	return error;
 }

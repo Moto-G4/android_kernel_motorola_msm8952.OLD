@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014-2015, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2014-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -28,6 +28,24 @@
 				interrupt-controller;
 				#interrupt-cells = <2>;
 				num_irqs = <145>;
+			};
+		};
+
+		cdc-reset-line {
+			qcom,pins = <&gp 133>;
+			qcom,num-grp-pins = <1>;
+			qcom,pin-func = <0>;
+			label = "cdc-reset-line";
+			cdc_reset_line_act: cdc_reset_line_on {
+				drive-strength = <16>;
+				bias-disable;
+				output-high;
+			};
+
+			cdc_reset_line_sus: cdc_reset_line_off {
+				drive-strength = <16>;
+				bias-disable;
+				output-low;
 			};
 		};
 
@@ -136,6 +154,7 @@
 			/*
 			 * 0-3 for sdc1
 			 * 4-6 for sdc2
+			 * 39-44 for sdc3
 			 */
 			qcom,num-pins = <7>;
 			/*
@@ -241,6 +260,69 @@
 				bias-pull-up; /* pull up */
 				drive-strength = <2>; /* 2 MA */
 			};
+		};
+
+		pmx_sdc3_clk {
+			qcom,pins = <&gp 44>;
+			qcom,num-grp-pins = <1>;
+			qcom,pin-func = <2>;
+			label = "sdc3_clk";
+			sdc3_clk_on: clk_on {
+				bias-disable;
+				drive-strength = <16>;
+			};
+			sdc3_clk_off: clk_off {
+				bias-disable;
+				drive-strength = <2>;
+			};
+		};
+
+		pmx_sdc3_cmd {
+			qcom,pins = <&gp 43>;
+			qcom,num-grp-pins = <1>;
+			qcom,pin-func = <2>;
+			label = "sdc3_cmd";
+			sdc3_cmd_on: cmd_on {
+				bias-pull-up;
+				drive-strength = <10>;
+			};
+			sdc3_cmd_off: cmd_off {
+				bias-pull-up;
+				drive-strength = <2>;
+			};
+		};
+
+		pmx_sdc3_dat {
+			qcom,pins = <&gp 39>, <&gp 40>, <&gp 41>, <&gp 42>;
+			qcom,num-grp-pins = <4>;
+			qcom,pin-func = <2>;
+			label = "sdc3_dat";
+			sdc3_dat_on: dat_on {
+				bias-pull-up;
+				drive-strength = <10>;
+			};
+			sdc3_dat_off: dat_off {
+				bias-pull-up;
+				drive-strength = <2>;
+			};
+		};
+
+		sdc3_wlan_gpio {
+			qcom,pins = <&gp 34>;
+			qcom,num-grp-pins = <1>;
+			qcom,pin-func = <0>;
+			label = "wlan_en_gpio";
+			sdc3_wlan_gpio_active: sdc3_wlan_gpio_active {
+				output-high;
+				drive-strength = <8>;
+				bias-pull-up;
+			};
+			sdc3_wlan_gpio_sleep: sdc3_wlan_gpio_sleep {
+				output-low;
+				drive-strength = <2>;
+				bias-disable;
+			};
+
 		};
 
 		pmx_mdss: pmx_mdss {
@@ -571,6 +653,31 @@
 			};
 		};
 
+		cam_sensor_front_vdig {
+			/* VDIG */
+			qcom,pins = <&gp 105>;
+			qcom,num-grp-pins = <1>;
+			label = "cam_sensor_front_vdig";
+			/* active state */
+			cam_sensor_front_vdig: cam_sensor_front_vdig {
+				drive-strength = <2>; /* 2 MA */
+				bias-disable; /* No PULL */
+			};
+		};
+
+		cam_sensor_front_vdig_sleep {
+			/* VDIG */
+			qcom,pins = <&gp 105>;
+			qcom,num-grp-pins = <1>;
+			label = "cam_sensor_front_vdig_sleep";
+			/*suspended state */
+			cam_sensor_front_vdig_sleep:
+				cam_sensor_front_vdig_sleep {
+				drive-strength = <2>; /* 2 MA */
+				bias-disable; /* No PULL */
+			};
+		};
+
 		cam_sensor_mclk2_default {
 			/* MCLK2 */
 			qcom,pins = <&gp 28>;
@@ -680,7 +787,7 @@
 			};
 		};
 
-		tlmm_gpio_key {
+		tlmm_gpio_key: tlmm_gpio_key {
 			qcom,pins = <&gp 113>, <&gp 114>, <&gp 115>;
 			qcom,pin-func = <0>;
 			qcom,num-grp-pins = <3>;
@@ -1309,7 +1416,7 @@
 			};
 		};
 
-		wsa-spkr-sd {
+		wsa_spkr_sd: wsa-spkr-sd {
 			qcom,pins = <&gp 132>;
 			qcom,num-grp-pins = <1>;
 			qcom,pin-func = <0>;
@@ -1363,8 +1470,8 @@
 		};
 
 		pri-tlmm-lines {
-			qcom,pins = <&gp 123>, <&gp 124>, <&gp 125>;
-			qcom,num-grp-pins = <3>;
+			qcom,pins = <&gp 123>, <&gp 124>, <&gp 125>, <&gp 127>;
+			qcom,num-grp-pins = <4>;
 			qcom,pin-func = <1>;
 			label = "pri-tlmm-lines";
 			pri_tlmm_lines_act: pri_tlmm_lines_act {

@@ -2450,6 +2450,16 @@ eHalStatus sme_8023MulticastList(tHalHandle hHal, tANI_U8 sessionId, tpSirRcvFlt
 eHalStatus sme_ReceiveFilterSetFilter(tHalHandle hHal, tpSirRcvPktFilterCfgType pRcvPktFilterCfg,
                                            tANI_U8 sessionId);
 
+// IKJB42MAIN-1244, Motorola, a19091 -- BEGIN
+/* ---------------------------------------------------------------------------
+    \fn sme_ReceiveSetMcFilter
+    \brief  API to set Receive Packet Filter from ISR context
+    \param  tSirInvokeV6Filter - Receive Packet Filter callback param
+    \return eHalStatus
+  ---------------------------------------------------------------------------*/
+eHalStatus sme_ReceiveSetMcFilter(tSirInvokeV6Filter *filterConfig);
+// IKJB42MAIN-1244, Motorola, a19091 -- END
+
 /* ---------------------------------------------------------------------------
     \fn sme_GetFilterMatchCount
     \brief  API to get D0 PC Filter Match Count
@@ -3576,6 +3586,7 @@ eHalStatus sme_AddChAvoidCallback
 );
 #endif /* FEATURE_WLAN_CH_AVOID */
 eHalStatus sme_UpdateConnectDebug(tHalHandle hHal, tANI_U32 set_value);
+
 /* ---------------------------------------------------------------------------
     \fn sme_requestTypetoString
     \brief API to convert requestType enum values
@@ -3709,5 +3720,12 @@ tANI_BOOLEAN sme_handleSetFccChannel(tHalHandle hHal,
 eHalStatus sme_DeleteAllTDLSPeers(tHalHandle hHal, uint8_t sessionId);
 eHalStatus sme_fatal_event_logs_req(tHalHandle hHal, tANI_U32 is_fatal,
                                tANI_U32 indicator, tANI_U32 reason_code);
+
+eHalStatus sme_enableDisableChanAvoidIndEvent(tHalHandle hHal,
+                                              tANI_U8 set_value);
+
+eHalStatus sme_GetCurrentAntennaIndex(tHalHandle hHal,
+                                      tCsrAntennaIndexCallback callback,
+                                      void *pContext, tANI_U8 sessionId);
 
 #endif //#if !defined( __SME_API_H )

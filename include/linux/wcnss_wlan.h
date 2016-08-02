@@ -15,6 +15,7 @@
 #define _WCNSS_WLAN_H_
 
 #include <linux/device.h>
+#include <linux/sched.h>
 
 #define IRIS_REGULATORS		4
 #define PRONTO_REGULATORS	3
@@ -43,6 +44,7 @@ struct wcnss_wlan_config {
 	void __iomem	*msm_wcnss_base;
 	int	iris_id;
 	int	vbatt;
+	int	pc_disable_latency;
 	struct vregs_level pronto_vlevel[PRONTO_REGULATORS];
 	struct vregs_level iris_vlevel[IRIS_REGULATORS];
 };
@@ -88,6 +90,7 @@ enum {
 #define WLAN_RF_DATA2_SHIFT		2
 #define PRONTO_PMU_OFFSET       0x1004
 #define WCNSS_PMU_CFG_GC_BUS_MUX_SEL_TOP   BIT(5)
+#define WLAN_NV_NAME_SIZE  50
 
 struct device *wcnss_wlan_get_device(void);
 void wcnss_get_monotonic_boottime(struct timespec *ts);
@@ -113,6 +116,7 @@ int wcnss_req_power_on_lock(char *driver_name);
 int wcnss_free_power_on_lock(char *driver_name);
 unsigned int wcnss_get_serial_number(void);
 int wcnss_get_wlan_mac_address(char mac_addr[WLAN_MAC_ADDR_SIZE]);
+int wcnss_get_wlan_nv_name(char nv_name[WLAN_NV_NAME_SIZE]);
 void wcnss_allow_suspend(void);
 void wcnss_prevent_suspend(void);
 int wcnss_hardware_type(void);
@@ -137,6 +141,7 @@ void wcnss_init_work(struct work_struct *work , void *callbackptr);
 void wcnss_init_delayed_work(struct delayed_work *dwork , void *callbackptr);
 int wcnss_get_iris_name(char *iris_version);
 void wcnss_en_wlan_led_trigger(void);
+void wcnss_dump_stack(struct task_struct *task);
 
 #ifdef CONFIG_WCNSS_REGISTER_DUMP_ON_BITE
 void wcnss_log_debug_regs_on_bite(void);

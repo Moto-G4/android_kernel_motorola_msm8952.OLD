@@ -974,7 +974,6 @@ int mdss_mdp_overlay_pipe_setup(struct msm_fb_data_type *mfd,
 	pipe->src_fmt = fmt;
 	__mdss_mdp_overlay_set_chroma_sample(pipe);
 
-	pipe->mixer_stage = req->z_order;
 	pipe->is_fg = req->is_fg;
 	pipe->alpha = req->alpha;
 	pipe->transp = req->transp_mask;
@@ -1105,6 +1104,7 @@ int mdss_mdp_overlay_pipe_setup(struct msm_fb_data_type *mfd,
 	mdss_mdp_mixer_pipe_unstage(pipe, pipe->mixer_left);
 	mdss_mdp_mixer_pipe_unstage(pipe, pipe->mixer_right);
 
+	pipe->mixer_stage = req->z_order;
 	req->id = pipe->ndx;
 
 cursor_done:
@@ -2799,6 +2799,165 @@ static struct attribute *dynamic_fps_fs_attrs[] = {
 static struct attribute_group dynamic_fps_fs_attrs_group = {
 	.attrs = dynamic_fps_fs_attrs,
 };
+
+static ssize_t frame_counter_show(struct device *dev,
+				struct device_attribute *attr, char *buf)
+{
+	struct fb_info *fbi = dev_get_drvdata(dev);
+	struct msm_fb_data_type *mfd = (struct msm_fb_data_type *)fbi->par;
+	struct mdss_mdp_ctl *ctl = mfd_to_ctl(mfd);
+	struct mdss_mdp_mixer *mixer;
+	u32 reg;
+
+	if (!ctl) {
+		pr_warn("there is no ctl attached to fb\n");
+		return -ENODEV;
+	}
+
+	mixer = mdss_mdp_mixer_get(ctl, MDSS_MDP_MIXER_MUX_LEFT);
+	if (!mixer) {
+		pr_warn("there is no mixer\n");
+		return -ENODEV;
+	}
+
+	mdss_mdp_clk_ctrl(MDP_BLOCK_POWER_ON);
+	reg = mdss_mdp_pingpong_read(mixer->pingpong_base,
+				MDSS_MDP_REG_PP_INT_COUNT_VAL) >> 16;
+	mdss_mdp_clk_ctrl(MDP_BLOCK_POWER_OFF);
+	return snprintf(buf, PAGE_SIZE, "%d\n", reg);
+}
+
+static DEVICE_ATTR(frame_counter, S_IRUSR | S_IRGRP, frame_counter_show, NULL);
+
+static int te_status = -1;
+static ssize_t te_enable_show(struct device *dev,
+				struct device_attribute *attr, char *buf)
+{
+	struct fb_info *fbi = dev_get_drvdata(dev);
+	struct msm_fb_data_type *mfd = (struct msm_fb_data_type *)fbi->par;
+	struct mdss_mdp_ctl *ctl = mfd_to_ctl(mfd);
+	struct mdss_mdp_pp_tear_check *te;
+
+	if (!ctl || !ctl->panel_data) {
+		pr_warn("there is no ctl or panel_data\n");
+		return -ENODEV;
+	}
+
+	te = &ctl->panel_data->panel_info.te;
+	if (!te) {
+		pr_warn("there is no te information\n");
+		return -ENODEV;
+	}
+
+	if (te_status < 0)
+		te_status = te->tear_check_en;
+
+	return snprintf(buf, PAGE_SIZE, "%d\n", te_status);
+}
+
+static ssize_t te_enable_store(struct device *dev,
+			struct device_attribute *attr,
+			const char *buf, size_t count)
+{
+	struct fb_info *fbi = dev_get_drvdata(dev);
+	struct msm_fb_data_type *mfd = (struct msm_fb_data_type *)fbi->par;
+	struct mdss_mdp_ctl *ctl = mfd_to_ctl(mfd);
+	struct mdss_overlay_private *mdp5_data = mfd_to_mdp5_data(mfd);
+	struct mdss_mdp_mixer *mixer;
+	static int prev_height;
+
+	int enable;
+	int r = 0;
+	int i, mux;
+
+	if (!ctl || !mdp5_data) {
+		pr_warn("there is no ctl or mdp5_data attached to fb\n");
+		r = -ENODEV;
+		goto end;
+	}
+
+	if (mdss_fb_is_power_off(mfd)) {
+		pr_warn("panel is not powered\n");
+		r = -EPERM;
+		goto end;
+	}
+
+	r = kstrtoint(buf, 0, &enable);
+	if ((r) || ((enable != 0) && (enable != 1))) {
+		pr_err("invalid TE enable value = %d\n",
+			enable);
+		r = -EINVAL;
+		goto end;
+	}
+
+	mutex_lock(&mdp5_data->ov_lock);
+	mdss_mdp_clk_ctrl(MDP_BLOCK_POWER_ON);
+
+	if (te_status == enable) {
+		pr_info("te_status is not changed. Do nothing\n");
+		goto locked_end;
+	}
+
+	for (i = 0; i < 2; i++) {
+		if (i == 0)
+			mux = MDSS_MDP_MIXER_MUX_LEFT;
+		else if (i == 1)
+			mux = MDSS_MDP_MIXER_MUX_RIGHT;
+
+		mixer = mdss_mdp_mixer_get(ctl, mux);
+		if (!mixer) {
+			pr_warn("There is no mixer for mux = %d\n", i);
+			continue;
+		}
+
+		/* The TE max height in MDP is being set to a max value of
+		 * 0xFFF0. Since this is such a large number, when TE is
+		 * disabled from the panel, we'll start to get constant timeout
+		 * errors and get 1 FPS.  To prevent this from happening, set
+		 * the height to display height * 2.  This will just cause our
+		 * FPS to drop to 30 FPS, and prevent timeout errors. */
+		if (!enable) {
+			prev_height =
+				mdss_mdp_pingpong_read(mixer->pingpong_base,
+				MDSS_MDP_REG_PP_SYNC_CONFIG_HEIGHT) & 0xFFFF;
+			mdss_mdp_pingpong_write(mixer->pingpong_base,
+				MDSS_MDP_REG_PP_SYNC_CONFIG_HEIGHT,
+				mfd->fbi->var.yres * 2);
+		} else if (enable && prev_height) {
+			mdss_mdp_pingpong_write(mixer->pingpong_base,
+				MDSS_MDP_REG_PP_SYNC_CONFIG_HEIGHT,
+				prev_height);
+		}
+
+		r = mdss_mdp_ctl_intf_event(ctl, MDSS_EVENT_ENABLE_TE,
+					(void *) (long int) enable);
+		if (r) {
+			pr_err("Failed sending TE command, r=%d\n", r);
+			r = -EFAULT;
+			goto locked_end;
+		} else
+			te_status = enable;
+	}
+locked_end:
+	mdss_mdp_clk_ctrl(MDP_BLOCK_POWER_OFF);
+	mutex_unlock(&mdp5_data->ov_lock);
+
+end:
+	return r ? r : count;
+}
+
+static DEVICE_ATTR(te_enable, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP,
+					te_enable_show, te_enable_store);
+
+static struct attribute *factory_te_attrs[] = {
+	&dev_attr_frame_counter.attr,
+	&dev_attr_te_enable.attr,
+	NULL,
+};
+static struct attribute_group factory_te_attrs_group = {
+	.attrs = factory_te_attrs,
+};
+
 
 static ssize_t mdss_mdp_vsync_show_event(struct device *dev,
 		struct device_attribute *attr, char *buf)
@@ -4510,6 +4669,19 @@ static int mdss_mdp_overlay_ioctl_handler(struct msm_fb_data_type *mfd,
 	default:
 		if (mfd->panel.type == WRITEBACK_PANEL)
 			ret = mdss_mdp_wb_ioctl_handler(mfd, cmd, argp);
+
+		if (mfd->panel.type == MIPI_VIDEO_PANEL ||
+			mfd->panel.type == MIPI_CMD_PANEL) {
+			struct mdss_panel_data *pdata;
+			struct mdss_overlay_private *mdp5_data =
+				mfd_to_mdp5_data(mfd);
+			pdata = dev_get_platdata(&mfd->pdev->dev);
+			if (!pdata || !mdp5_data)
+				return -EFAULT;
+			mutex_lock(&mdp5_data->ov_lock);
+			ret = mdss_dsi_ioctl_handler(pdata, cmd, argp);
+			mutex_unlock(&mdp5_data->ov_lock);
+		}
 		break;
 	}
 
@@ -4767,19 +4939,6 @@ ctl_stop:
 		pr_err("unable to suspend w/pm_runtime_put (%d)\n", rc);
 
 	return rc;
-}
-
-void mdss_panel_display_on(struct msm_fb_data_type *mfd)
-{
-	struct mdss_panel_data *pdata;
-	struct mdss_overlay_private *mdp5_data = mfd_to_mdp5_data(mfd);
-
-	pdata = dev_get_platdata(&mfd->pdev->dev);
-	if ((pdata) && (pdata->display_on)) {
-		mutex_lock(&mdp5_data->list_lock);
-		pdata->display_on(pdata);
-		mutex_unlock(&mdp5_data->list_lock);
-	}
 }
 
 static int __mdss_mdp_ctl_handoff(struct mdss_mdp_ctl *ctl,
@@ -5139,7 +5298,6 @@ int mdss_mdp_overlay_init(struct msm_fb_data_type *mfd)
 	mdp5_interface->pre_commit_fnc = mdss_mdp_overlay_precommit;
 	mdp5_interface->get_sync_fnc = mdss_mdp_rotator_sync_pt_get;
 	mdp5_interface->splash_init_fnc = mdss_mdp_splash_init;
-	mdp5_interface->display_on = mdss_panel_display_on;
 	mdp5_interface->configure_panel = mdss_mdp_update_panel_info;
 	mdp5_interface->input_event_handler = mdss_mdp_input_event_handler;
 
@@ -5233,6 +5391,16 @@ int mdss_mdp_overlay_init(struct msm_fb_data_type *mfd)
 			goto init_fail;
 		}
 	}
+
+	if (mfd->panel_info->type == MIPI_CMD_PANEL) {
+		rc = sysfs_create_group(&dev->kobj,
+					&factory_te_attrs_group);
+		if (rc) {
+			pr_err("Error factory te sysfs creation ret=%d\n", rc);
+			goto init_fail;
+		}
+	}
+
 	mfd->mdp_sync_pt_data.async_wait_fences = true;
 
 	pm_runtime_set_suspended(&mfd->pdev->dev);

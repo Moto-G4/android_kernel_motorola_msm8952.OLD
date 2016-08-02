@@ -1755,6 +1755,15 @@ typedef struct sSirSmeMicFailureInd
     tSirMicFailureInfo     info;
 } tSirSmeMicFailureInd, *tpSirSmeMicFailureInd;
 
+typedef struct sSirSmeLostLinkParamsInd
+{
+    tANI_U16  messageType;
+    tANI_U16  length;
+    tANI_U8 sessionId;
+    tSirLostLinkParamsInfo info;
+} tSirSmeLostLinkParamsInd, *tpSirSmeLostLinkParamsInd;
+
+
 typedef struct sSirSmeMissedBeaconInd
 {
     tANI_U16                    messageType; // eWNI_SME_MISSED_BEACON_IND
@@ -4020,6 +4029,14 @@ typedef struct sSirRcvPktFilterCfg
   tSirRcvPktFilterFieldParams     paramsData[SIR_MAX_NUM_TESTS_PER_FILTER];
 }tSirRcvPktFilterCfgType, *tpSirRcvPktFilterCfgType;
 
+// IKJB42MAIN-1244, Motorola, a19091 - BEGIN
+typedef struct sSirInvokeV6Filter
+{
+    int (*configureFilterFn)(void *pAdapter, v_U8_t set, v_U8_t userSet);
+    void *pHddAdapter;
+    v_U8_t set;
+}tSirInvokeV6Filter;
+// IKJB42MAIN-1244, Motorola, a19091 - END
 //
 // Filter Packet Match Count Parameters
 //
@@ -4692,6 +4709,9 @@ typedef void (*pGetBcnMissRateCB)( tANI_S32 bcnMissRate,
                                    VOS_STATUS status, void *data);
 typedef void (*tSirFWStatsCallback)(VOS_STATUS status,
                     tSirFwStatsResult *fwStatsRsp, void *pContext);
+
+typedef void (*tAntennaDivSelCB)(int antennaId, void *pContext);
+
 typedef PACKED_PRE struct PACKED_POST
 {
    tANI_U32   msgLen;
@@ -4743,6 +4763,26 @@ typedef PACKED_PRE struct PACKED_POST
   tSirFWStatsCallback callback;
   void *data;
 }tSirFWStatsInfo;
+
+typedef PACKED_PRE struct PACKED_POST
+{
+  tANI_U16 status;
+  tANI_U32 selectedAntennaId;
+  tANI_U32 reserved;
+} tSirAntennaDivSelRsp, *tpSirntennaDivSelRsp;
+
+typedef PACKED_PRE struct PACKED_POST
+{
+   tAntennaDivSelCB callback;
+   void *data;
+   tANI_U32 reserved;
+}tSirAntennaDiversitySelectionReq;
+
+typedef PACKED_PRE struct PACKED_POST
+{
+   tAntennaDivSelCB callback;
+   void *data;
+}tSirAntennaDiversitySelectionInfo;
 
 /*---------------------------------------------------------------------------
   WLAN_HAL_LL_NOTIFY_STATS
@@ -5085,6 +5125,8 @@ typedef PACKED_PRE struct PACKED_POST
 }  tSirLLStatsResults, *tpSirLLStatsResults;
 
 #endif /* WLAN_FEATURE_LINK_LAYER_STATS */
+
+
 
 #ifdef WLAN_FEATURE_EXTSCAN
 
@@ -5588,4 +5630,13 @@ typedef struct
     tANI_U16   mesgLen;
     tSirMacAddr bssid;
 }tSirDelAllTdlsPeers, *ptSirDelAllTdlsPeers;
+
+typedef void (*tSirMonModeCb)(tANI_U32 *magic, struct completion *cmpVar);
+typedef struct
+{
+    tANI_U32 *magic;
+    struct completion *cmpVar;
+    void *data;
+    tSirMonModeCb callback;
+}tSirMonModeReq, *ptSirMonModeReq;
 #endif /* __SIR_API_H */

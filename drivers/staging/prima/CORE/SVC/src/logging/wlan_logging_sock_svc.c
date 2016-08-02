@@ -42,6 +42,7 @@
 #include "vos_memory.h"
 #include <linux/ratelimit.h>
 #include <asm/arch_timer.h>
+#include <vos_utils.h>
 
 #define LOGGING_TRACE(level, args...) \
 		VOS_TRACE(VOS_MODULE_ID_SVC, level, ## args)
@@ -227,7 +228,7 @@ static int wlan_send_sock_msg_to_app(tAniHdr *wmsg, int radio,
 		return -EINVAL;
 	}
 
-	payload_len = wmsg_length + sizeof(wnl->radio);
+	payload_len = wmsg_length + sizeof(wnl->radio) + sizeof(tAniHdr);
 	tot_msg_len = NLMSG_SPACE(payload_len);
 	skb = dev_alloc_skb(tot_msg_len);
 	if (skb == NULL) {
@@ -255,16 +256,19 @@ static int wlan_send_sock_msg_to_app(tAniHdr *wmsg, int radio,
 
 static void set_default_logtoapp_log_level(void)
 {
-	vos_trace_setValue(VOS_MODULE_ID_WDI, VOS_TRACE_LEVEL_ALL, VOS_TRUE);
+#ifdef ENABLE_DRIVER_VERBOSE
+
+//	vos_trace_setValue(VOS_MODULE_ID_WDI, VOS_TRACE_LEVEL_ALL, VOS_TRUE);
 	vos_trace_setValue(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_ALL, VOS_TRUE);
 	vos_trace_setValue(VOS_MODULE_ID_SME, VOS_TRACE_LEVEL_ALL, VOS_TRUE);
 	vos_trace_setValue(VOS_MODULE_ID_PE,  VOS_TRACE_LEVEL_ALL, VOS_TRUE);
-	vos_trace_setValue(VOS_MODULE_ID_WDA, VOS_TRACE_LEVEL_ALL, VOS_TRUE);
+//	vos_trace_setValue(VOS_MODULE_ID_WDA, VOS_TRACE_LEVEL_ALL, VOS_TRUE);
 	vos_trace_setValue(VOS_MODULE_ID_HDD_SOFTAP, VOS_TRACE_LEVEL_ALL,
 			VOS_TRUE);
 	vos_trace_setValue(VOS_MODULE_ID_SAP, VOS_TRACE_LEVEL_ALL, VOS_TRUE);
 	vos_trace_setValue(VOS_MODULE_ID_PMC, VOS_TRACE_LEVEL_ALL, VOS_TRUE);
 	vos_trace_setValue(VOS_MODULE_ID_SVC, VOS_TRACE_LEVEL_ALL, VOS_TRUE);
+#endif
 }
 
 static void clear_default_logtoapp_log_level(void)
@@ -368,7 +372,7 @@ int wlan_log_to_user(VOS_TRACE_LEVEL log_level, char *to_be_sent, int length)
         qtimer_ticks =  arch_counter_get_cntpct();
 
         tlen = snprintf(tbuf, sizeof(tbuf), "[%02d:%02d:%02d.%06lu] [%016llX]"
-                        " [%s] ", tm.tm_hour, tm.tm_min, tm.tm_sec, tv.tv_usec,
+                        " [%.5s] ", tm.tm_hour, tm.tm_min, tm.tm_sec, tv.tv_usec,
                         qtimer_ticks, current->comm);
 	/* 1+1 indicate '\n'+'\0' */
 	total_log_len = length + tlen + 1 + 1;
@@ -384,8 +388,8 @@ int wlan_log_to_user(VOS_TRACE_LEVEL log_level, char *to_be_sent, int length)
 	pfilled_length = &gwlan_logging.pcur_node->filled_length;
 
 	 /* Check if we can accomodate more log into current node/buffer */
-	if ((MAX_LOGMSG_LENGTH - (*pfilled_length + sizeof(tAniNlHdr))) <
-			total_log_len) {
+	if (MAX_LOGMSG_LENGTH < (*pfilled_length + sizeof(tAniNlHdr) +
+			total_log_len)) {
 		wake_up_thread = true;
 		wlan_queue_logmsg_for_app();
 		pfilled_length = &gwlan_logging.pcur_node->filled_length;
@@ -428,7 +432,7 @@ int wlan_log_to_user(VOS_TRACE_LEVEL log_level, char *to_be_sent, int length)
 	if (gwlan_logging.log_fe_to_console
 		&& ((VOS_TRACE_LEVEL_FATAL == log_level)
 		|| (VOS_TRACE_LEVEL_ERROR == log_level))) {
-		pr_err("%s\n", to_be_sent);
+		pr_err("%s %s\n",tbuf, to_be_sent);
 	}
 	}
 
@@ -492,10 +496,10 @@ static int send_fw_log_pkt_to_user(void)
 		vos_pkt_return_packet(current_pkt);
 
 		extra_header_len = sizeof(msg_header.radio) + sizeof(tAniHdr);
-		nl_payload_len = NLMSG_ALIGN(extra_header_len + skb->len);
+		nl_payload_len = extra_header_len + skb->len;
 
 		msg_header.nlh.nlmsg_type = ANI_NL_MSG_LOG;
-		msg_header.nlh.nlmsg_len = nl_payload_len;
+		msg_header.nlh.nlmsg_len = nlmsg_msg_size(nl_payload_len);
 		msg_header.nlh.nlmsg_flags = NLM_F_REQUEST;
 		msg_header.nlh.nlmsg_pid = gapp_pid;
 		msg_header.nlh.nlmsg_seq = nlmsg_seq++;
@@ -586,10 +590,10 @@ static int send_data_mgmt_log_pkt_to_user(void)
 
 		extra_header_len = sizeof(msg_header.radio) + sizeof(tAniHdr) +
 						sizeof(msg_header.frameSize);
-		nl_payload_len = NLMSG_ALIGN(extra_header_len + skb->len);
+		nl_payload_len = extra_header_len + skb->len;
 
 		msg_header.nlh.nlmsg_type = ANI_NL_MSG_LOG;
-		msg_header.nlh.nlmsg_len = nl_payload_len;
+		msg_header.nlh.nlmsg_len = nlmsg_msg_size(nl_payload_len);
 		msg_header.nlh.nlmsg_flags = NLM_F_REQUEST;
 		msg_header.nlh.nlmsg_pid = 0;
 		msg_header.nlh.nlmsg_seq = nlmsg_seq++;
@@ -729,15 +733,17 @@ static int wlan_logging_thread(void *Arg)
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(3, 8, 0))
 	daemonize("wlan_logging_thread");
 #endif
-
 	while (!gwlan_logging.exit) {
 		ret_wait_status = wait_event_interruptible(
 		  gwlan_logging.wait_queue,
 		  (test_bit(HOST_LOG_POST_MASK, &gwlan_logging.event_flag) ||
 		   gwlan_logging.exit ||
-		   test_bit(LOGGER_MGMT_DATA_PKT_POST_MASK,&gwlan_logging.event_flag) ||
-		   test_bit(LOGGER_FW_LOG_PKT_POST_MASK, &gwlan_logging.event_flag) ||
-		   test_bit(LOGGER_FATAL_EVENT_POST_MASK, &gwlan_logging.event_flag)));
+		   test_bit(LOGGER_MGMT_DATA_PKT_POST_MASK,
+						&gwlan_logging.event_flag) ||
+		   test_bit(LOGGER_FW_LOG_PKT_POST_MASK,
+						&gwlan_logging.event_flag) ||
+		   test_bit(LOGGER_FATAL_EVENT_POST_MASK,
+						&gwlan_logging.event_flag)));
 
 		if (ret_wait_status == -ERESTARTSYS) {
 			pr_err("%s: wait_event return -ERESTARTSYS", __func__);
@@ -1206,7 +1212,6 @@ int wlan_queue_logpkt_for_app(vos_pkt_t *pPacket, uint32 pkt_type)
 	return status;
 }
 
-
 void wlan_process_done_indication(uint8 type, uint32 reason_code)
 {
     if ((type == WLAN_QXDM_LOGGING) && (wlan_is_log_report_in_progress() == TRUE))
@@ -1217,4 +1222,20 @@ void wlan_process_done_indication(uint8 type, uint32 reason_code)
     }
 }
 
+/**
+ * wlan_is_logger_thread()- Check if threadid is
+ * of logger thread
+ *
+ * @threadId: passed threadid
+ *
+ * This function is called to check if threadid is
+ * of logger thread.
+ *
+ * Return: true if threadid is of logger thread.
+ */
+bool wlan_is_logger_thread(int threadId)
+{
+	return ((gwlan_logging.thread) &&
+		(threadId == gwlan_logging.thread->pid));
+}
 #endif /* WLAN_LOGGING_SOCK_SVC_ENABLE */

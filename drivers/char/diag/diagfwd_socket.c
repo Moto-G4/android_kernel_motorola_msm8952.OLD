@@ -201,7 +201,7 @@ static void diag_state_close_socket(void *ctxt)
 	atomic_set(&info->diag_state, 0);
 	DIAG_LOG(DIAG_DEBUG_PERIPHERALS,
 		 "%s setting diag state to 0", info->name);
-	wake_up(&info->read_wait_q);
+	wake_up_interruptible(&info->read_wait_q);
 	flush_workqueue(info->wq);
 }
 
@@ -226,11 +226,15 @@ static void socket_data_ready(struct sock *sk_ptr, int bytes)
 	spin_unlock_irqrestore(&info->lock, flags);
 	diag_ws_on_notify();
 
+	/*
+	 * Initialize read buffers for the servers. The servers must read data
+	 * first to get the address of its clients.
+	 */
 	if (!atomic_read(&info->opened) && info->port_type == PORT_TYPE_SERVER)
 		diagfwd_buffers_init(info->fwd_ctxt);
 
 	queue_work(info->wq, &(info->read_work));
-	wake_up(&info->read_wait_q);
+	wake_up_interruptible(&info->read_wait_q);
 	return;
 }
 
@@ -243,7 +247,7 @@ static void cntl_socket_data_ready(struct sock *sk_ptr, int bytes)
 	}
 
 	atomic_inc(&cntl_socket->data_ready);
-	wake_up(&cntl_socket->read_wait_q);
+	wake_up_interruptible(&cntl_socket->read_wait_q);
 	queue_work(cntl_socket->wq, &(cntl_socket->read_work));
 }
 
@@ -262,7 +266,7 @@ static void socket_flow_cntl(struct sock *sk_ptr)
 
 	atomic_inc(&info->flow_cnt);
 	DIAG_LOG(DIAG_DEBUG_PERIPHERALS, "%s flow controlled\n", info->name);
-	DIAGFWD_DBUG("diag: In %s, channel %s flow controlled\n",
+	pr_debug("diag: In %s, channel %s flow controlled\n",
 		 __func__, info->name);
 }
 
@@ -317,13 +321,13 @@ static void __socket_open_channel(struct diag_socket_info *info)
 		return;
 
 	if (!info->inited) {
-		DIAGFWD_DBUG("diag: In %s, socket %s is not initialized\n",
+		pr_debug("diag: In %s, socket %s is not initialized\n",
 			 __func__, info->name);
 		return;
 	}
 
 	if (atomic_read(&info->opened)) {
-		DIAGFWD_DBUG("diag: In %s, socket %s already opened\n",
+		pr_debug("diag: In %s, socket %s already opened\n",
 			 __func__, info->name);
 		return;
 	}
@@ -407,7 +411,7 @@ static void socket_init_work_fn(struct work_struct *work)
 		return;
 
 	if (!info->inited) {
-		DIAGFWD_DBUG("diag: In %s, socket %s is not initialized\n",
+		pr_debug("diag: In %s, socket %s is not initialized\n",
 			 __func__, info->name);
 		return;
 	}
@@ -434,18 +438,12 @@ static void __socket_close_channel(struct diag_socket_info *info)
 	if (!atomic_read(&info->opened))
 		return;
 
-	if (!cntl_socket)
-		return;
-
-	wake_up(&cntl_socket->read_wait_q);
-	wake_up(&info->read_wait_q);
-
 	memset(&info->remote_addr, 0, sizeof(struct sockaddr_msm_ipc));
 	diagfwd_channel_close(info->fwd_ctxt);
 
 	atomic_set(&info->opened, 0);
 
-	
+	/* Don't close the server. Server should always remain open */
 	if (info->port_type != PORT_TYPE_SERVER) {
 		write_lock_bh(&info->hdl->sk->sk_callback_lock);
 		info->hdl->sk->sk_user_data = NULL;
@@ -453,7 +451,7 @@ static void __socket_close_channel(struct diag_socket_info *info)
 		write_unlock_bh(&info->hdl->sk->sk_callback_lock);
 		sock_release(info->hdl);
 		info->hdl = NULL;
-		wake_up(&info->read_wait_q);
+		wake_up_interruptible(&info->read_wait_q);
 	}
 	DIAG_LOG(DIAG_DEBUG_PERIPHERALS, "%s exiting\n", info->name);
 
@@ -477,7 +475,7 @@ static int cntl_socket_process_msg_server(uint32_t cmd, uint32_t svc_id,
 	uint8_t found = 0;
 	struct diag_socket_info *info = NULL;
 
-	for (peripheral = 0; peripheral <= NUM_PERIPHERALS; peripheral++) {
+	for (peripheral = 0; peripheral < NUM_PERIPHERALS; peripheral++) {
 		info = &socket_cmd[peripheral];
 		if ((svc_id == info->svc_id) &&
 		    (ins_id == info->ins_id)) {
@@ -525,7 +523,7 @@ static int cntl_socket_process_msg_client(uint32_t cmd, uint32_t node_id,
 	struct diag_socket_info *info = NULL;
 	struct msm_ipc_port_addr remote_port = {0};
 
-	for (peripheral = 0; peripheral <= NUM_PERIPHERALS; peripheral++) {
+	for (peripheral = 0; peripheral < NUM_PERIPHERALS; peripheral++) {
 		info = &socket_data[peripheral];
 		remote_port = info->remote_addr.address.addr.port_addr;
 		if ((remote_port.node_id == node_id) &&
@@ -578,8 +576,10 @@ static void cntl_socket_read_work_fn(struct work_struct *work)
 	if (!cntl_socket)
 		return;
 
-	wait_event(cntl_socket->read_wait_q,
-		   (atomic_read(&cntl_socket->data_ready) > 0));
+	ret = wait_event_interruptible(cntl_socket->read_wait_q,
+				(atomic_read(&cntl_socket->data_ready) > 0));
+	if (ret)
+		return;
 
 	do {
 		iov.iov_base = &msg;
@@ -589,7 +589,7 @@ static void cntl_socket_read_work_fn(struct work_struct *work)
 		ret = kernel_recvmsg(cntl_socket->hdl, &read_msg, &iov, 1,
 				     sizeof(msg), MSG_DONTWAIT);
 		if (ret < 0) {
-			DIAGFWD_DBUG("diag: In %s, Error recving data %d\n",
+			pr_debug("diag: In %s, Error recving data %d\n",
 				 __func__, ret);
 			break;
 		}
@@ -645,6 +645,17 @@ void diag_socket_invalidate(void *ctxt, struct diagfwd_info *fwd_ctxt)
 
 	info = (struct diag_socket_info *)ctxt;
 	info->fwd_ctxt = fwd_ctxt;
+}
+
+int diag_socket_check_state(void *ctxt)
+{
+	struct diag_socket_info *info = NULL;
+
+	if (!ctxt)
+		return 0;
+
+	info = (struct diag_socket_info *)ctxt;
+	return (int)(atomic_read(&info->diag_state));
 }
 
 static void __diag_socket_init(struct diag_socket_info *info)
@@ -869,9 +880,18 @@ static int diag_socket_read(void *ctxt, unsigned char *buf, int buf_len)
 	temp = buf;
 	bytes_remaining = buf_len;
 
-	wait_event(info->read_wait_q, (info->data_ready > 0) || (!info->hdl) ||
-		   (atomic_read(&info->diag_state) == 0));
+	err = wait_event_interruptible(info->read_wait_q,
+				      (info->data_ready > 0) || (!info->hdl) ||
+				      (atomic_read(&info->diag_state) == 0));
+	if (err) {
+		diagfwd_channel_read_done(info->fwd_ctxt, buf, 0);
+		return -ERESTARTSYS;
+	}
 
+	/*
+	 * There is no need to continue reading over peripheral in this case.
+	 * Release the wake source hold earlier.
+	 */
 	if (atomic_read(&info->diag_state) == 0) {
 		DIAG_LOG(DIAG_DEBUG_PERIPHERALS,
 			 "%s closing read thread. diag state is closed\n",
@@ -914,6 +934,11 @@ static int diag_socket_read(void *ctxt, unsigned char *buf, int buf_len)
 
 		if (!atomic_read(&info->opened) &&
 		    info->port_type == PORT_TYPE_SERVER) {
+			/*
+			 * This is the first packet from the client. Copy its
+			 * address to the connection object. Consider this
+			 * channel open for communication.
+			 */
 			memcpy(&info->remote_addr, &src_addr, sizeof(src_addr));
 			if (info->ins_id == INST_ID_DCI)
 				atomic_set(&info->opened, 1);
@@ -979,6 +1004,10 @@ static int diag_socket_write(void *ctxt, unsigned char *buf, int len)
 	write_len = kernel_sendmsg(info->hdl, &write_msg, &iov, 1, len);
 	if (write_len < 0) {
 		err = write_len;
+		/*
+		 * -EAGAIN means that the number of packets in flight is at
+		 * max capactity and the peripheral hasn't read the data.
+		 */
 		if (err != -EAGAIN) {
 			pr_err_ratelimited("diag: In %s, error sending data, err: %d, ch: %s\n",
 					   __func__, err, info->name);

@@ -102,8 +102,10 @@
 #include "sme_Api.h"
 #include "vos_trace.h"
 #include "wlan_hdd_assoc.h"
-
+#include <linux/ratelimit.h>
+#ifdef DEBUG_ROAM_DELAY
 #include "vos_utils.h"
+#endif
 #include "sapInternal.h"
 
 #ifdef CONFIG_HAS_EARLYSUSPEND
@@ -172,6 +174,12 @@ static const hdd_freq_chan_map_t freq_chan_map[] = { {2412, 1}, {2417, 2},
 #endif
 #define  WE_SET_RTS_CTS_HTVHT             21
 #define  WE_SET_MONITOR_STATE             22
+#define  WE_SET_PROXIMITY_ENABLE          23
+
+// BEGIN IKSWM-15907, Motorola, w18918
+#define WE_SET_CHANNEL_RANGE              90
+#define WE_SET_IPV6_FILTER_STATE          91 
+// END IKSWM-15907, Motorola, w18918
 
 /* Private ioctls and their sub-ioctls */
 #define WLAN_PRIV_SET_NONE_GET_INT    (SIOCIWFIRSTPRIV + 1)
@@ -183,7 +191,9 @@ static const hdd_freq_chan_map_t freq_chan_map[] = { {2412, 1}, {2417, 2},
 #define WE_GET_WDI_DBG       7
 #define WE_GET_SAP_AUTO_CHANNEL_SELECTION 8
 #define WE_GET_CONCURRENCY_MODE 9
-#define WE_GET_SCAN_BAND_PREFERENCE     10
+#define WE_GET_MCC_MODE      10 /* Motorola, IKSWM-4204  */
+#define WE_GET_SCAN_BAND_PREFERENCE     11
+#define WE_GET_ANTENA_DIVERSITY_SELECTION 12
 /* Private ioctls and their sub-ioctls */
 #define WLAN_PRIV_SET_INT_GET_INT     (SIOCIWFIRSTPRIV + 2)
 
@@ -203,6 +213,9 @@ static const hdd_freq_chan_map_t freq_chan_map[] = { {2412, 1}, {2417, 2},
 #define WE_SET_WLAN_DBG      1
 #define WE_SET_WDI_DBG       2
 #define WE_SET_SAP_CHANNELS  3
+//Begin Motorola dcw476 4/17/13 IKJBXLINE-5577:changing wlan driver log level dynamically
+#define WE_SET_WLAN_DBG_TILL_LEVEL 4
+//END IKJBXLINE-5577
 
 /* Private ioctls and their sub-ioctls */
 #define WLAN_PRIV_GET_CHAR_SET_NONE   (SIOCIWFIRSTPRIV + 5)
@@ -342,6 +355,8 @@ static const hdd_freq_chan_map_t freq_chan_map[] = { {2412, 1}, {2417, 2},
 #define WLAN_STATS_TX_MC_BYTE_CNT     20
 #define WLAN_STATS_TX_BC_BYTE_CNT     21
 
+#define WLAN_SET_ROAM_TRIGGER        (SIOCIWFIRSTPRIV + 28) //MOT IKCBS-9561
+
 #define FILL_TLV(__p, __type, __size, __val, __tlen) do {           \
         if ((__tlen + __size + 2) < WE_MAX_STR_LEN)                 \
         {                                                           \
@@ -365,6 +380,12 @@ static const hdd_freq_chan_map_t freq_chan_map[] = { {2412, 1}, {2417, 2},
 
 #define WLAN_ADAPTER 0
 #define P2P_ADAPTER  1
+
+#define TX_PWR_MIN  6
+#define TX_PWR_MAX 22
+#define TX_PWR_DEF 50
+
+#define HDD_IOCTL_RATELIMIT_INTERVAL (20*HZ)
 
 /*
  * When supplicant sends SETBAND ioctl it queries for channels from
@@ -771,8 +792,12 @@ static void hdd_GetRssiCB( v_S7_t rssi, tANI_U32 staId, void *pContext )
    /* paranoia: invalidate the magic */
    pStatsContext->magic = 0;
 
-   /* copy over the rssi */
-   pAdapter->rssi = rssi;
+   /* copy over the rssi.FW will return RSSI as -100
+    * if there are no samples to calculate the average
+    * RSSI
+    */
+   if (rssi != -100)
+       pAdapter->rssi = rssi;
    if (pAdapter->rssi > 0)
        pAdapter->rssi = 0;
    /* notify the caller */
@@ -867,8 +892,9 @@ VOS_STATUS wlan_hdd_get_rssi(hdd_adapter_t *pAdapter, v_S7_t *rssi_value)
 
    if (eConnectionState_Associated != pHddStaCtx->conn_info.connState)
    {
-       VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_INFO, "%s:Not associated!",__func__);
-       *rssi_value = 0;
+       VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_INFO, "%s:Not associated, rssi on Disconnect : %d",
+                    __func__, pAdapter->rssi_on_disconnect);
+       *rssi_value = pAdapter->rssi_on_disconnect;
        return VOS_STATUS_SUCCESS;
    }
 
@@ -1064,6 +1090,7 @@ VOS_STATUS wlan_hdd_get_snr(hdd_adapter_t *pAdapter, v_S7_t *snr)
    EXIT();
    return VOS_STATUS_SUCCESS;
 }
+
 #if defined WLAN_FEATURE_VOWIFI_11R || defined FEATURE_WLAN_ESE || defined(FEATURE_WLAN_LFR)
 
 static void hdd_GetRoamRssiCB( v_S7_t rssi, tANI_U32 staId, void *pContext )
@@ -1113,8 +1140,13 @@ static void hdd_GetRoamRssiCB( v_S7_t rssi, tANI_U32 staId, void *pContext )
    /* paranoia: invalidate the magic */
    pStatsContext->magic = 0;
 
-   /* copy over the rssi */
-   pAdapter->rssi = rssi;
+   /* copy over the rssi.FW will return RSSI as -100
+    * if there are no samples to calculate the average
+    * RSSI
+    */
+   if (rssi != -100)
+       pAdapter->rssi = rssi;
+
    if (pAdapter->rssi > 0)
        pAdapter->rssi = 0;
    /* notify the caller */
@@ -2379,8 +2411,8 @@ static int __iw_set_genie(struct net_device *dev,
             case IE_EID_VENDOR:
                 if ((IE_LEN_SIZE+IE_EID_SIZE+IE_VENDOR_OUI_SIZE) > eLen) /* should have at least OUI */
                 {
-                    kfree(base_genie);
-                    return -EINVAL;
+                    ret = -EINVAL;
+                    goto exit;
                 }
 
                 if (0 == memcmp(&genie[0], "\x00\x50\xf2\x04", 4))
@@ -2394,8 +2426,8 @@ static int __iw_set_genie(struct net_device *dev,
                        hddLog(VOS_TRACE_LEVEL_FATAL, "Cannot accommodate genIE. "
                                                       "Need bigger buffer space");
                        VOS_ASSERT(0);
-                       kfree(base_genie);
-                       return -ENOMEM;
+                       ret = -EINVAL;
+                       goto exit;
                     }
                     // save to Additional IE ; it should be accumulated to handle WPS IE + other IE
                     memcpy( pWextState->genIE.addIEdata + curGenIELen, genie - 2, eLen + 2);
@@ -2404,6 +2436,14 @@ static int __iw_set_genie(struct net_device *dev,
                 else if (0 == memcmp(&genie[0], "\x00\x50\xf2", 3))
                 {
                     hddLog (VOS_TRACE_LEVEL_INFO, "%s Set WPA IE (len %d)",__func__, eLen + 2);
+                    if ((eLen + 2) > (sizeof(pWextState->WPARSNIE)))
+                    {
+                       hddLog(VOS_TRACE_LEVEL_FATAL, "Cannot accommodate genIE. "
+                                                      "Need bigger buffer space");
+                       ret = -EINVAL;
+                       VOS_ASSERT(0);
+                       goto exit;
+                    }
                     memset( pWextState->WPARSNIE, 0, MAX_WPA_RSN_IE_LEN );
                     memcpy( pWextState->WPARSNIE, genie - 2, (eLen + 2));
                     pWextState->roamProfile.pWPAReqIE = pWextState->WPARSNIE;
@@ -2420,8 +2460,8 @@ static int __iw_set_genie(struct net_device *dev,
                        hddLog(VOS_TRACE_LEVEL_FATAL, "Cannot accommodate genIE. "
                                                       "Need bigger buffer space");
                        VOS_ASSERT(0);
-                       kfree(base_genie);
-                       return -ENOMEM;
+                       ret = -ENOMEM;
+                       goto exit;
                     }
                     // save to Additional IE ; it should be accumulated to handle WPS IE + other IE
                     memcpy( pWextState->genIE.addIEdata + curGenIELen, genie - 2, eLen + 2);
@@ -2430,6 +2470,14 @@ static int __iw_set_genie(struct net_device *dev,
               break;
          case DOT11F_EID_RSN:
                 hddLog (LOG1, "%s Set RSN IE (len %d)",__func__, eLen+2);
+                if ((eLen + 2) > (sizeof(pWextState->WPARSNIE)))
+                {
+                    hddLog(VOS_TRACE_LEVEL_FATAL, "Cannot accommodate genIE. "
+                                                  "Need bigger buffer space");
+                    ret = -EINVAL;
+                    VOS_ASSERT(0);
+                    goto exit;
+                }
                 memset( pWextState->WPARSNIE, 0, MAX_WPA_RSN_IE_LEN );
                 memcpy( pWextState->WPARSNIE, genie - 2, (eLen + 2));
                 pWextState->roamProfile.pRSNReqIE = pWextState->WPARSNIE;
@@ -2438,16 +2486,16 @@ static int __iw_set_genie(struct net_device *dev,
 
          default:
                 hddLog (LOGE, "%s Set UNKNOWN IE %X",__func__, elementId);
-            kfree(base_genie);
-            return 0;
+                goto exit;
     }
         genie += eLen;
         remLen -= eLen;
     }
 
+exit:
     EXIT();
     kfree(base_genie);
-    return 0;
+    return ret;
 }
 
 static int iw_set_genie(struct net_device *dev,
@@ -3551,6 +3599,89 @@ static int iw_get_linkspeed_priv(struct net_device *dev,
    return ret;
 }
 
+//BEGIN MOT a22977 IKCBS-9561 Add set Roam trigger support
+// A utility function to check whether x is numeric
+static bool isNumericChar(char x)
+{
+    return (x >= '0' && x <= '9')? true: false;
+}
+
+// A simple atoi() function. If the given string contains
+// any invalid character, then this function returns 0
+static int wlanAtoi(char *str)
+{
+    int res = 0;  // Initialize result
+    int sign = 1;  // Initialize sign as positive
+    int i = 0;  // Initialize index of first digit
+
+    if (*str == '\0') {
+       return 0;
+    }
+
+    // If number is negative, then update sign
+    if (str[0] == '-') {
+        sign = -1;
+        i++;  // Also update index of first digit
+    }
+
+    // Iterate through all digits of input string and update result
+    for (; str[i] != '\0'; ++i)
+    {
+        if (isNumericChar(str[i]) == false) {
+            continue; // You may add some lines to write error message
+        }              // to error stream
+        res = res*10 + str[i] - '0';
+    }
+
+    // Return result with sign
+    return sign*res;
+}
+
+static int iw_set_roam_trigger(struct net_device *dev,
+                            struct iw_request_info *info,
+                            union iwreq_data *wrqu, char *extra)
+{
+   hdd_adapter_t *pAdapter = WLAN_HDD_GET_PRIV_PTR(dev);
+   tANI_U8 newLookupRssi = 0;
+   hdd_context_t *pHddCtx = (hdd_context_t*)pAdapter->pHddCtx;
+   static tANI_U8 defaultLookupRssi = 255;
+   char *command = (char*)wrqu->data.pointer;
+   tANI_U8 value = wlanAtoi(command);
+   eHalStatus status = eHAL_STATUS_SUCCESS;
+   newLookupRssi = abs(value);
+
+   VOS_TRACE( VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_FATAL, "def = %d  and  new = %d\n", defaultLookupRssi, newLookupRssi);
+
+   if (newLookupRssi == 0) {
+       newLookupRssi = defaultLookupRssi;
+   }
+
+   if (defaultLookupRssi == 255) {
+       defaultLookupRssi = pHddCtx->cfg_ini->nNeighborLookupRssiThreshold;
+   }
+
+   pHddCtx->cfg_ini->nNeighborLookupRssiThreshold = newLookupRssi;
+
+   status = sme_setNeighborLookupRssiThreshold((tHalHandle)(pHddCtx->hHal), newLookupRssi);
+   if (eHAL_STATUS_SUCCESS != status)
+   {
+       VOS_TRACE( VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_FATAL,
+       "%s: Failed to set roam trigger, try again", __func__);
+   }
+
+   /* Set Reassoc threshold to (lookup rssi threshold + 5 dBm) */
+   status = sme_setNeighborReassocRssiThreshold((tHalHandle)(pHddCtx->hHal), newLookupRssi + 5);
+   if (eHAL_STATUS_SUCCESS != status)
+   {
+       VOS_TRACE( VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_FATAL,
+       "%s: Failed to set roam reassoc, try again", __func__);
+   }
+
+  /* a value is being successfully returned */
+   return 0;
+}
+//END IKCBS-9561
+
 /*
  * Support for the RSSI & RSSI-APPROX private commands
  * Per the WiFi framework the response must be of the form
@@ -3853,6 +3984,7 @@ VOS_STATUS  wlan_hdd_enter_bmps(hdd_adapter_t *pAdapter, int mode)
    struct statsContext context;
    eHalStatus status;
    hdd_context_t *pHddCtx;
+   hdd_station_ctx_t *pHddStaCtx = WLAN_HDD_GET_STATION_CTX_PTR(pAdapter);
 
    if (NULL == pAdapter)
    {
@@ -3899,6 +4031,23 @@ VOS_STATUS  wlan_hdd_enter_bmps(hdd_adapter_t *pAdapter, int mode)
    }
    else if (DRIVER_POWER_MODE_AUTO == mode)
    {
+       /* If this is called by hdd_suspend_wlan or hdd_resume_wlan, driver
+        * was already in BMPS state and thus either STA or P2P-CLI is in
+        * associated state and authenticated, so even if STA connState is
+        * not associated it can be assumed that P2P-CLI is associated and
+        * authenticated. Thus driver can enter BMPS. And even if we try to enter
+        * BMPS with no adaptor in associated state, pmcRequestBmps will check
+        * if all condition are satisfied for entering BMPS.
+        */
+       if ((eConnectionState_Associated  == pHddStaCtx->conn_info.connState) &&
+           (VOS_FALSE == pHddStaCtx->conn_info.uIsAuthenticated))
+       {
+           hddLog(LOGE,
+              FL("Station is associated but, still not Authenticated ignore "
+               "power save mode"));
+           return VOS_STATUS_E_AGAIN;
+       }
+
        if (pHddCtx->cfg_ini->fIsBmpsEnabled)
        {
            hddLog(VOS_TRACE_LEVEL_INFO_HIGH, "%s:Wlan driver Entering Bmps ",
@@ -5309,17 +5458,86 @@ static int iw_set_mlme(struct net_device *dev,
     return ret;
 }
 
+int wlan_hdd_set_proximity(int set_value)
+{
+    sHwCalValues hwCalValues;
+    uint16 hwCalTxPower;
+    uint8 txPwr = TX_PWR_DEF;
+
+    hddLog(LOG1, FL("WE_SET_PROXIMITY_ENABLE: %d"), set_value);
+
+    if (TRUE == set_value) {
+        if(vos_nv_read( VNV_HW_CAL_VALUES, &hwCalValues,
+                        NULL, sizeof(sHwCalValues) )
+                            != VOS_STATUS_SUCCESS) {
+            return -EINVAL;
+        }
+        hwCalTxPower = (uint16)(hwCalValues.calData.hwParam7 >> 16);
+
+        hddLog(LOG1, FL("hwCalTxPower:%x nv_data:%x"),
+                hwCalTxPower, hwCalValues.calData.hwParam7);
+
+        txPwr = (int8)(hwCalTxPower & 0x00FF);
+        txPwr = txPwr/10;
+        if (txPwr < TX_PWR_MIN)
+            txPwr = TX_PWR_MIN;
+        if (txPwr > TX_PWR_MAX)
+            txPwr = TX_PWR_MAX;
+
+        if (sme_SetMaxTxPowerPerBand(eCSR_BAND_24, txPwr) !=
+                                eHAL_STATUS_SUCCESS) {
+            hddLog(VOS_TRACE_LEVEL_ERROR,
+              FL("Setting tx power failed for 2.4GHz band %d"), txPwr);
+            return -EIO;
+        }
+
+        txPwr = (int8)((hwCalTxPower >> 8) & 0x00FF);
+        txPwr /= 10;
+        if (txPwr < TX_PWR_MIN)
+            txPwr = TX_PWR_MIN;
+        if (txPwr > TX_PWR_MAX)
+            txPwr = TX_PWR_MAX;
+
+        if (sme_SetMaxTxPowerPerBand(eCSR_BAND_5G, txPwr) !=
+                                eHAL_STATUS_SUCCESS) {
+            hddLog(VOS_TRACE_LEVEL_ERROR,
+              FL("setting tx power failed for 5GHz band %d"), txPwr);
+            return -EIO;
+        }
+    }
+    else if(FALSE == set_value) {
+        if (sme_SetMaxTxPowerPerBand(eCSR_BAND_24, txPwr) !=
+                                eHAL_STATUS_SUCCESS) {
+            hddLog(VOS_TRACE_LEVEL_ERROR,
+              FL("Setting tx power failed for 2.4GHz band %d"), txPwr);
+            return -EIO;
+        }
+
+        if (sme_SetMaxTxPowerPerBand(eCSR_BAND_5G, txPwr) !=
+                                eHAL_STATUS_SUCCESS) {
+            hddLog(VOS_TRACE_LEVEL_ERROR,
+              FL("setting tx power failed for 5GHz band %d"), txPwr);
+            return -EIO;
+        }
+    }
+    else {
+        return -EINVAL;
+    }
+
+    return eHAL_STATUS_SUCCESS;
+}
 /* set param sub-ioctls */
 static int __iw_setint_getnone(struct net_device *dev,
                                struct iw_request_info *info,
                                union iwreq_data *wrqu, char *extra)
 {
-    hdd_adapter_t *pAdapter;
-    tHalHandle hHal;
-    hdd_wext_state_t  *pWextState;
-    hdd_context_t *pHddCtx;
+    hdd_adapter_t *pAdapter = WLAN_HDD_GET_PRIV_PTR(dev);
+    tHalHandle hHal = WLAN_HDD_GET_HAL_CTX(pAdapter);
+    hdd_wext_state_t  *pWextState =  WLAN_HDD_GET_WEXT_STATE_PTR(pAdapter) ;
+    hdd_context_t *pHddCtx = WLAN_HDD_GET_CTX(pAdapter);
     hdd_mon_ctx_t *pMonCtx = NULL;
-    int *value = (int *)extra;
+    int cmd_len = wrqu->data.length;
+    int *value = (int *) kmalloc(cmd_len+1, GFP_KERNEL);
     int sub_cmd = value[0];
     int set_value = value[1];
     int ret = 0; /* success */
@@ -5342,13 +5560,15 @@ static int __iw_setint_getnone(struct net_device *dev,
     {
         return ret;
     }
+
     if ( VOS_MONITOR_MODE != hdd_get_conparam())
     {
+      /* In monitor mode hHal is NULL */
       hHal = WLAN_HDD_GET_HAL_CTX(pAdapter);
       if (NULL == hHal)
       {
           VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_ERROR,
-                    "%s: Hal Context is NULL",__func__);
+                 "%s: Hal Context is NULL",__func__);
           return -EINVAL;
       }
       pWextState = WLAN_HDD_GET_WEXT_STATE_PTR(pAdapter);
@@ -5358,6 +5578,18 @@ static int __iw_setint_getnone(struct net_device *dev,
                     "%s: pWextState is NULL",__func__);
           return -EINVAL;
       }
+    if(value == NULL)
+       return -ENOMEM;
+
+    if(copy_from_user((char *) value, (char*)(wrqu->data.pointer), cmd_len)) {
+            hddLog(VOS_TRACE_LEVEL_FATAL, "%s -- copy_from_user --data pointer failed! bailing",
+                 __FUNCTION__);
+         kfree(value);
+         return -EFAULT;
+     }
+     sub_cmd = value[0];
+     set_value = value[1];
+     kfree(value);
 
       INIT_COMPLETION(pWextState->completion_var);
     }
@@ -5681,6 +5913,32 @@ static int __iw_setint_getnone(struct net_device *dev,
 
            break;
         }
+        // Motorola, IKJBREL1-4181
+        case WE_SET_CHANNEL_RANGE:
+        {
+            int startChannel, endChannel;
+            if (set_value == 3) {
+                startChannel = 149;
+                endChannel   = 161;
+            } else if (set_value == 2) {
+                startChannel = 100;
+                endChannel   = 144;
+            } else if (set_value == 1) {
+                startChannel = 36;
+                endChannel   = 64;
+            } else {
+                set_value = 0;
+                startChannel = 1;
+                //BEGIN MOT a19110 IKJBXLINE-2149 MHS frequency band support
+                //Motorola jmng34 IKSWM-2195-Restrict mhs 2.4 ghz channels to FCC
+                endChannel   = 11;
+                //END IKJBXLINE-2149
+            }
+
+            ret = iw_softap_set_channel_range( dev, startChannel, endChannel, set_value);
+            break;
+        }
+       // End IKJBREL1-4181
 
         case WE_ENABLE_STRICT_FCC_REG:
         {
@@ -5853,22 +6111,66 @@ static int __iw_setint_getnone(struct net_device *dev,
         }
         case WE_SET_MONITOR_STATE:
         {
+           v_U32_t magic = 0;
+           struct completion cmpVar;
+           long waitRet = 0;
+           tVOS_CON_MODE mode = hdd_get_conparam();
+
+           if( VOS_MONITOR_MODE != mode)
+           {
+               hddLog(LOGE, "invalid mode %d", mode);
+               ret = -EIO;
+           }
 
            pMonCtx =  WLAN_HDD_GET_MONITOR_CTX_PTR(pAdapter);
            if( pMonCtx == NULL )
            {
              hddLog(LOGE, "Monitor Context NULL");
-             break;
+             ret = -EIO;
+           }
+           if (pMonCtx->state == set_value)
+           {
+               VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_INFO,
+                         FL("already in same mode curr_mode:%d req_mode: %d"),
+                             pMonCtx->state, set_value);
+               break;
            }
            pMonCtx->state = set_value;
-           if( set_value )
-               wlan_hdd_mon_poststartmsg(pMonCtx);
-           else
-               wlan_hdd_mon_poststopmsg();
-
-          break;
+           magic = MON_MODE_MSG_MAGIC;
+           init_completion(&cmpVar);
+           if (VOS_STATUS_SUCCESS !=
+                         wlan_hdd_mon_postMsg(&magic, &cmpVar,
+                                               pMonCtx, hdd_monPostMsgCb)) {
+                VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_ERROR,
+                          FL("failed to post MON MODE REQ"));
+                pMonCtx->state = (pMonCtx->state==MON_MODE_START)?
+                                   MON_MODE_STOP : MON_MODE_START;
+                magic = 0;
+                ret = -EIO;
+                break;
+           }
+           waitRet = wait_for_completion_timeout(&cmpVar, MON_MODE_MSG_TIMEOUT);
+           magic = 0;
+           if (waitRet <= 0 ){
+               VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_ERROR,
+                    FL("failed to wait on monitor mode completion %ld"),
+                        waitRet);
+           }
+           break;
         }
-
+        case WE_SET_PROXIMITY_ENABLE:
+        {
+            ret = wlan_hdd_set_proximity(set_value);
+            break;
+        }
+        // IKJB42MAIN-1244, Motorola, a19091  -- BEGIN
+        case WE_SET_IPV6_FILTER_STATE:
+        {
+             hddLog(LOGE, "Revieeved ioctl WE_SET_IPV6_FILTER_STATE");
+            ret = wlan_hdd_set_v6_filter(pAdapter, set_value, TRUE);
+            break;
+        }
+        // IKJB42MAIN-1244, Motorola, a19091  -- END
         default:
         {
             hddLog(LOGE, "Invalid IOCTL setvalue command %d value %d",
@@ -5910,6 +6212,14 @@ static int __iw_setchar_getnone(struct net_device *dev,
     tSirpkt80211 *pkt;
 
     ENTER();
+
+    if (!capable(CAP_NET_ADMIN))
+    {
+        VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_ERROR,
+                  FL("permission check failed"));
+        return -EPERM;
+    }
+
     pAdapter = (netdev_priv(dev));
     if (NULL == pAdapter)
     {
@@ -6012,7 +6322,8 @@ static int __iw_setchar_getnone(struct net_device *dev,
           {
               hddLog(VOS_TRACE_LEVEL_ERROR,
                       "%s: vos_mem_alloc failed", __func__);
-              return -ENOMEM;
+              ret = -ENOMEM;
+              break;
           }
 
           memset(pkt, 0, sizeof(tSirpkt80211));
@@ -6062,6 +6373,113 @@ static int iw_setchar_getnone(struct net_device *dev,
     vos_ssr_unprotect(__func__);
 
     return ret;
+}
+
+static void hdd_GetCurrentAntennaIndex(int antennaId, void *pContext)
+{
+   struct statsContext *context;
+   hdd_adapter_t *pAdapter;
+
+   if (NULL == pContext)
+   {
+      hddLog(VOS_TRACE_LEVEL_ERROR,
+             "%s: Bad param, pContext [%p]",
+             __func__, pContext);
+      return;
+   }
+
+   context = pContext;
+   pAdapter      = context->pAdapter;
+
+   spin_lock(&hdd_context_lock);
+
+   if ((NULL == pAdapter) || (ANTENNA_CONTEXT_MAGIC != context->magic))
+   {
+      /* the caller presumably timed out so there is nothing we can do */
+      spin_unlock(&hdd_context_lock);
+      hddLog(VOS_TRACE_LEVEL_WARN,
+             "%s: Invalid context, pAdapter [%p] magic [%08x]",
+              __func__, pAdapter, context->magic);
+      return;
+   }
+
+   context->magic = 0;
+   pAdapter->antennaIndex = antennaId;
+
+   complete(&context->completion);
+   spin_unlock(&hdd_context_lock);
+}
+
+static VOS_STATUS wlan_hdd_get_current_antenna_index(hdd_adapter_t *pAdapter,
+                                                     int *antennaIndex)
+{
+   hdd_context_t *pHddCtx;
+   eHalStatus halStatus;
+   struct statsContext context;
+   long lrc;
+
+   ENTER();
+   if (NULL == pAdapter)
+   {
+       hddLog(VOS_TRACE_LEVEL_WARN,
+              "%s: Invalid context, pAdapter", __func__);
+       return VOS_STATUS_E_FAULT;
+   }
+   pHddCtx = WLAN_HDD_GET_CTX(pAdapter);
+   if (0 != (wlan_hdd_validate_context(pHddCtx)))
+   {
+       return VOS_STATUS_E_FAULT;
+   }
+   if (TRUE != sme_IsFeatureSupportedByFW(ANTENNA_DIVERSITY_SELECTION))
+   {
+       hddLog(VOS_TRACE_LEVEL_ERROR,
+              "%s: ANTENNA_DIVERSITY_SELECTION is not supported by Firwmare",
+               __func__);
+       return VOS_STATUS_E_NOSUPPORT;
+   }
+   init_completion(&context.completion);
+   context.pAdapter = pAdapter;
+   context.magic = ANTENNA_CONTEXT_MAGIC;
+
+   halStatus = sme_GetCurrentAntennaIndex(pHddCtx->hHal,
+                                         hdd_GetCurrentAntennaIndex,
+                                         &context, pAdapter->sessionId);
+   if (eHAL_STATUS_SUCCESS != halStatus)
+   {
+       spin_lock(&hdd_context_lock);
+       context.magic = 0;
+       spin_unlock(&hdd_context_lock);
+       hddLog(VOS_TRACE_LEVEL_ERROR,"%s: Unable to retrieve Antenna Index",
+              __func__);
+       /* we'll returned a cached value below */
+       *antennaIndex = -1;
+       return VOS_STATUS_E_FAILURE;
+   }
+   else
+   {
+       /* request was sent -- wait for the response */
+       lrc = wait_for_completion_interruptible_timeout(&context.completion,
+                                    msecs_to_jiffies(WLAN_WAIT_TIME_STATS));
+       if (lrc <= 0)
+       {
+           spin_lock(&hdd_context_lock);
+           context.magic = 0;
+           spin_unlock(&hdd_context_lock);
+           hddLog(VOS_TRACE_LEVEL_ERROR, "%s:SME %s while retrieving Antenna"
+                                         " Index",
+                  __func__, (0 == lrc) ? "timeout" : "interrupt");
+           *antennaIndex = -1;
+           return VOS_STATUS_E_FAILURE;
+       }
+   }
+   spin_lock(&hdd_context_lock);
+   context.magic = 0;
+   spin_unlock(&hdd_context_lock);
+
+   *antennaIndex = pAdapter->antennaIndex;
+
+   EXIT();
+   return VOS_STATUS_SUCCESS;
 }
 
 /* get param sub-ioctls */
@@ -6189,6 +6607,13 @@ static int __iw_setnone_getint(struct net_device *dev,
            VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_INFO, ("concurrency mode=%d"),*value);
            break;
         }
+        // BEGIN MOTOROLA IKJB42MAIN-274, dpn473, 01/02/2013, Add flag to disable/enable MCC mode
+        case WE_GET_MCC_MODE:
+        {
+           *value = (int)hdd_get_mcc_mode();
+           break;
+        }
+        // IKJB42MAIN-274
 
         case WE_GET_SCAN_BAND_PREFERENCE:
         {
@@ -6199,7 +6624,11 @@ static int __iw_setnone_getint(struct net_device *dev,
                       "scanBandPreference = %d\n", *value);
             break;
         }
-
+        case WE_GET_ANTENA_DIVERSITY_SELECTION:
+        {
+             wlan_hdd_get_current_antenna_index(pAdapter, value);
+             break;
+        }
         default:
         {
             hddLog(LOGE, "Invalid IOCTL get_value command %d ",value[0]);
@@ -6235,6 +6664,14 @@ int __iw_set_three_ints_getnone(struct net_device *dev,
     int ret = 0;
 
     ENTER();
+
+    if (!capable(CAP_NET_ADMIN))
+    {
+        VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_ERROR,
+                  FL("permission check failed"));
+        return -EPERM;
+    }
+
     pAdapter = WLAN_HDD_GET_PRIV_PTR(dev);
     if (NULL == pAdapter)
     {
@@ -6265,6 +6702,13 @@ int __iw_set_three_ints_getnone(struct net_device *dev,
             ret = iw_softap_set_channel_range( dev, value[1], value[2], value[3]);
             break;
         }
+        //Begin Motorola dcw476 4/17/13 IKJBXLINE-5577:changing wlan driver log level dynamically
+        case WE_SET_WLAN_DBG_TILL_LEVEL:
+        {
+            vos_trace_setValue_till_level(value[1], value[2], value[3]);
+        }
+        break;
+        //END IKJBXLINE-5577
 
         default:
         {
@@ -6994,6 +7438,7 @@ static int __iw_setnone_getnone(struct net_device *dev,
             sme_HT40StopOBSSScan(pMac, pAdapter->sessionId);
         }
         break;
+#ifdef DEBUG_ROAM_DELAY
         case WE_DUMP_ROAM_TIMER_LOG:
         {
             vos_dump_roam_time_log_service();
@@ -7005,6 +7450,7 @@ static int __iw_setnone_getnone(struct net_device *dev,
             vos_reset_roam_timer_log();
             break;
         }
+#endif
         case WE_GET_FW_LOGS:
         {
             vos_fatal_event_logs_req(WLAN_LOG_TYPE_NON_FATAL,
@@ -7049,16 +7495,22 @@ void hdd_wmm_tx_snapshot(hdd_adapter_t *pAdapter)
     ptSapContext pSapCtx = VOS_GET_SAP_CB(pVosContext);
     hdd_station_ctx_t *pHddStaCtx = WLAN_HDD_GET_STATION_CTX_PTR(pAdapter);
     hdd_ibss_peer_info_t *pPeerInfo;
+    v_SIZE_t tx_queue_count[NUM_TX_QUEUES];
 
     for ( i=0; i< NUM_TX_QUEUES; i++)
     {
         spin_lock_bh(&pAdapter->wmm_tx_queue[i].lock);
-
-        hddLog(LOGE, "HDD WMM TxQueue Info For AC: %d Count: %d PrevAdress:%p, NextAddress:%p",
-               i, pAdapter->wmm_tx_queue[i].count,
-               pAdapter->wmm_tx_queue[i].anchor.prev, pAdapter->wmm_tx_queue[i].anchor.next);
+        tx_queue_count[i] = pAdapter->wmm_tx_queue[i].count;
         spin_unlock_bh(&pAdapter->wmm_tx_queue[i].lock);
     }
+
+    for ( i=0; i< NUM_TX_QUEUES; i++) {
+        if (tx_queue_count[i]) {
+            hddLog(LOGE, "HDD WMM TxQueue Info For AC: %d Count: %d",
+               i, tx_queue_count[i]);
+        }
+    }
+
     if(pSapCtx == NULL){
         VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_ERROR,
                   FL("psapCtx is NULL"));
@@ -7076,11 +7528,8 @@ void hdd_wmm_tx_snapshot(hdd_adapter_t *pAdapter)
                 if( pSapCtx->aStaInfo[i].wmm_tx_queue[j].count )
                 {
                    spin_lock_bh(&pSapCtx->aStaInfo[i].wmm_tx_queue[j].lock);
-                   hddLog(LOGE, "HDD TxQueue Info For AC: %d Count: %d"
-                         "PrevAdress:%p, NextAddress:%p",
-                         j, pSapCtx->aStaInfo[i].wmm_tx_queue[j].count,
-                         pSapCtx->aStaInfo[i].wmm_tx_queue[j].anchor.prev,
-                         pSapCtx->aStaInfo[i].wmm_tx_queue[j].anchor.next);
+                   hddLog(LOGE, "HDD TxQueue Info For AC: %d Count: %d",
+                         j, pSapCtx->aStaInfo[i].wmm_tx_queue[j].count);
                   spin_unlock_bh(&pSapCtx->aStaInfo[i].wmm_tx_queue[j].lock);
                 }
              }
@@ -7199,6 +7648,12 @@ static int __iw_set_var_ints_getnone(struct net_device *dev,
     {
         case WE_LOG_DUMP_CMD:
             {
+                if (apps_args[0] == 26) {
+                    if (!pHddCtx->cfg_ini->crash_inject_enabled) {
+                        hddLog(LOGE, "Crash Inject ini disabled, Ignore Crash Inject");
+                        return 0;
+                    }
+                }
                 hddLog(LOG1, "%s: LOG_DUMP %d arg1 %d arg2 %d arg3 %d arg4 %d",
                         __func__, apps_args[0], apps_args[1], apps_args[2],
                         apps_args[3], apps_args[4]);
@@ -7212,6 +7667,13 @@ static int __iw_set_var_ints_getnone(struct net_device *dev,
         case WE_P2P_NOA_CMD:
             {
                 p2p_app_setP2pPs_t p2pNoA;
+
+                if (pAdapter->device_mode != WLAN_HDD_P2P_GO) {
+                    hddLog(LOGE,
+                        FL("Setting NoA is not allowed in Device mode:%d"),
+                        pAdapter->device_mode);
+                    return -EINVAL;
+                }
 
                 p2pNoA.opp_ps = apps_args[0];
                 p2pNoA.ctWindow = apps_args[1];
@@ -7297,6 +7759,10 @@ static int __iw_set_var_ints_getnone(struct net_device *dev,
 #endif
         case WE_CONFIGURE_MONITOR_MODE:
            {
+               v_U32_t magic = 0;
+               struct completion cmpVar;
+               long waitRet = 0;
+
                pMonCtx =  WLAN_HDD_GET_MONITOR_CTX_PTR(pAdapter);
                if( pMonCtx == NULL )
                {
@@ -7323,13 +7789,36 @@ static int __iw_set_var_ints_getnone(struct net_device *dev,
                          " cannot be converted to 802.3 ",__func__);
                   pMonCtx->typeSubtypeBitmap = 0xFFFF00000000;
                }
-               if( pMonCtx->state )
-                    wlan_hdd_mon_poststartmsg(pMonCtx);
+               if (MON_MODE_START == pMonCtx->state) {
+                    magic = MON_MODE_MSG_MAGIC;
+                    init_completion(&cmpVar);
+                    if (VOS_STATUS_SUCCESS !=
+                            wlan_hdd_mon_postMsg(&magic, &cmpVar,
+                                                  pMonCtx, hdd_monPostMsgCb)) {
+                        VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_ERROR,
+                                    FL("failed to post MON MODE REQ"));
+                        magic = 0;
+                        ret = -EIO;
+                        break;
+                    }
+                    waitRet = wait_for_completion_timeout(&cmpVar,
+                                                       MON_MODE_MSG_TIMEOUT);
+                    magic = 0;
+                    if (waitRet <= 0 ) {
+                        VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_ERROR,
+                            FL("failed to wait on monitor mode completion %ld"),
+                                waitRet);
+                    }
+               }
            }
          break;
 
         case WE_SET_MONITOR_MODE_FILTER:
            {
+               v_U32_t magic = 0;
+               struct completion cmpVar;
+               long waitRet = 0;
+
                pMonCtx =  WLAN_HDD_GET_MONITOR_CTX_PTR(pAdapter);
                if( pMonCtx == NULL )
                {
@@ -7350,8 +7839,27 @@ static int __iw_set_var_ints_getnone(struct net_device *dev,
                hddLog(LOG1, "%s: Monitor Filter: %pM A1=%d A2=%d A3=%d ",
                         __func__, pMonCtx->mmFilters[0].macAddr.bytes,
                        apps_args[6], apps_args[7], apps_args[8]);
-               if( pMonCtx->state )
-                    wlan_hdd_mon_poststartmsg(pMonCtx);
+               if (MON_MODE_START == pMonCtx->state) {
+                    magic = MON_MODE_MSG_MAGIC;
+                    init_completion(&cmpVar);
+                    if (VOS_STATUS_SUCCESS !=
+                            wlan_hdd_mon_postMsg(&magic, &cmpVar,
+                                                  pMonCtx, hdd_monPostMsgCb)) {
+                        VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_ERROR,
+                                    FL("failed to post MON MODE REQ"));
+                        magic = 0;
+                        ret = -EIO;
+                        break;
+                    }
+                    waitRet = wait_for_completion_timeout(&cmpVar,
+                                                       MON_MODE_MSG_TIMEOUT);
+                    magic = 0;
+                    if (waitRet <= 0 ) {
+                        VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_ERROR,
+                            FL("failed to wait on monitor mode completion %ld"),
+                                waitRet);
+                    }
+               }
            }
          break;
 
@@ -7374,6 +7882,13 @@ static int iw_hdd_set_var_ints_getnone(struct net_device *dev,
     union iwreq_data u_priv_wrqu;
     int apps_args[MAX_VAR_ARGS] = {0};
     int num_args;
+
+    if (!capable(CAP_NET_ADMIN))
+    {
+        VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_ERROR,
+                  FL("permission check failed"));
+        return -EPERM;
+    }
 
     /* helper function to get iwreq_data with compat handling. */
     if (hdd_priv_get_data(&u_priv_wrqu.data, wrqu))
@@ -7980,6 +8495,13 @@ static int __iw_clear_dynamic_mcbc_filter(struct net_device *dev,
 
     ENTER();
 
+    if (!capable(CAP_NET_ADMIN))
+    {
+        VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_ERROR,
+                  FL("permission check failed"));
+        return -EPERM;
+    }
+
     pAdapter = WLAN_HDD_GET_PRIV_PTR(dev);
     if (NULL == pAdapter)
     {
@@ -8243,13 +8765,16 @@ int wlan_hdd_set_filter(hdd_context_t *pHddCtx, tpPacketFilterCfg pRequest,
 {
     tSirRcvPktFilterCfgType    packetFilterSetReq = {0};
     tSirRcvFltPktClearParam    packetFilterClrReq = {0};
+    //IKHSS7-35965, a19091, Motorola changes -- BEGIN
+    int retVal=0;
+    //IKHSS7-35965, a19091, Motorola changes -- END
     int i=0;
 
     if (pHddCtx->cfg_ini->disablePacketFilter)
     {
         hddLog(VOS_TRACE_LEVEL_FATAL, "%s: Packet Filtering Disabled. Returning ",
                 __func__ );
-        return 0;
+        return retVal;
     }
     /* Debug display of request components. */
     hddLog(VOS_TRACE_LEVEL_ERROR, "%s: Packet Filter Request : FA %d params %d",
@@ -8266,7 +8791,10 @@ int wlan_hdd_set_filter(hdd_context_t *pHddCtx, tpPacketFilterCfg pRequest,
             {
                 hddLog(VOS_TRACE_LEVEL_ERROR, "%s: Number of Params exceed Max limit %d",
                         __func__, pRequest->numParams);
-                return -EINVAL;
+				//IKHSS7-35965, a19091, Motorola changes -- BEGIN
+				retVal = -EINVAL;
+				break;
+				//IKHSS7-35965, a19091, Motorola changes -- END
             }
             packetFilterSetReq.numFieldParams = pRequest->numParams;
             packetFilterSetReq.coalesceTime = 0;
@@ -8285,6 +8813,9 @@ int wlan_hdd_set_filter(hdd_context_t *pHddCtx, tpPacketFilterCfg pRequest,
 
                 hddLog(VOS_TRACE_LEVEL_INFO, "Data Offset %d Data Len %d",
                         pRequest->paramsData[i].dataOffset, pRequest->paramsData[i].dataLength);
+                if ((sizeof(packetFilterSetReq.paramsData[i].compareData)) <
+                    (pRequest->paramsData[i].dataLength))
+                    return -EINVAL;
 
                 memcpy(&packetFilterSetReq.paramsData[i].compareData,
                         pRequest->paramsData[i].compareData, pRequest->paramsData[i].dataLength);
@@ -8306,7 +8837,7 @@ int wlan_hdd_set_filter(hdd_context_t *pHddCtx, tpPacketFilterCfg pRequest,
             {
                 hddLog(VOS_TRACE_LEVEL_ERROR, "%s: Failure to execute Set Filter",
                         __func__);
-                return -EINVAL;
+                retVal = -EINVAL; //IKHSS7-35965, a19091, Motorola
             }
 
             break;
@@ -8320,17 +8851,18 @@ int wlan_hdd_set_filter(hdd_context_t *pHddCtx, tpPacketFilterCfg pRequest,
             {
                 hddLog(VOS_TRACE_LEVEL_ERROR, "%s: Failure to execute Clear Filter",
                         __func__);
-                return -EINVAL;
+                retVal = -EINVAL; //IKHSS7-35965, a19091, Motorola
             }
             break;
 
         default :
             hddLog(VOS_TRACE_LEVEL_INFO_HIGH, "%s: Packet Filter Request: Invalid %d",
                     __func__, pRequest->filterAction);
-            return -EINVAL;
+            retVal = -EINVAL; //IKHSS7-35965, a19091, Motorola
     }
-    return 0;
+    return retVal;
 }
+
 
 int wlan_hdd_setIPv6Filter(hdd_context_t *pHddCtx, tANI_U8 filterType,
                            tANI_U8 sessionId)
@@ -8515,12 +9047,87 @@ int wlan_hdd_setIPv6Filter(hdd_context_t *pHddCtx, tANI_U8 filterType,
     return 0;
 }
 
+// IKJB42MAIN-1244, Motorola, a19091 - BEGIN
+#define SET_FILTER_BMAP(filter_map, set, index) { if(set){(filter_map)|=(1<<(index));}\
+    else {(filter_map)&=(~(1<<(index)));}}
+
+#define IS_FILTER_INDEX_FREE(filter_map, index) (((filter_map)&(1<<(index)))==0)
+
+#define IPV6_CONFIG_ALLOW_ALL 1
+#define IPV6_CONFIG_MANDATORY 0
+
+void wlan_hdd_set_mc_v6(hdd_adapter_t *pAdapter, v_U8_t set) {
+    tPacketFilterCfg request = {0};
+    v_SCHAR_t mcFilterIndex = WLAN_HDD_MAX_FILTER_SLOTS;
+    int ret;
+    hdd_context_t *pHddCtx = WLAN_HDD_GET_CTX(pAdapter);
+
+    if(set) {
+        if(pAdapter->filter_v6_index != -1) {
+            hddLog(VOS_TRACE_LEVEL_INFO, "IPV6 pass through already set, skipping");
+            return;
+        }
+        /* Add v6 pass through rule */
+        if(pAdapter->mc_addr_list.isFilterApplied)
+            wlan_hdd_set_mc_addr_list(pAdapter, FALSE);
+        /* Find a suitable slot and stick in filter */
+        while(--mcFilterIndex >=0 ) {
+            if(IS_FILTER_INDEX_FREE(pAdapter->user_filter_config, mcFilterIndex)) {
+                request.filterAction = HDD_RCV_FILTER_SET;
+                request.filterId = mcFilterIndex;
+                request.numParams = 1;
+                request.paramsData[0].protocolLayer = HDD_FILTER_PROTO_TYPE_MAC;
+                request.paramsData[0].dataOffset = WLAN_HDD_80211_FRM_DA_OFFSET;
+                request.paramsData[0].dataLength = 2;
+                request.paramsData[0].compareData[0]=0x33;
+                request.paramsData[0].compareData[1]=0x33;
+                ret = wlan_hdd_set_filter(pHddCtx, &request, pAdapter->sessionId);
+                if(ret == 0) {
+                    pAdapter->filter_v6_index = mcFilterIndex;
+                    SET_FILTER_BMAP(pAdapter->driver_filter_config, set, request.filterId);
+                    hddLog(VOS_TRACE_LEVEL_INFO, "Programmed IPV6 pass through at index %d",
+                            mcFilterIndex);
+                    break;
+                } else {
+                    hddLog(VOS_TRACE_LEVEL_ERROR,
+                            "Failed programming IPV6 pass through at index %d - TRY NEXT",
+                            mcFilterIndex);
+                }
+            }
+        }
+        if(mcFilterIndex<0)
+            hddLog(VOS_TRACE_LEVEL_ERROR, "IPV6 pass through rule prog failed!!");
+    } else if(pAdapter->filter_v6_index != -1) {
+        /* Remove pass through rule */
+        request.filterAction = HDD_RCV_FILTER_CLEAR;
+        request.filterId = pAdapter->filter_v6_index;
+        request.numParams = 1;
+        ret = wlan_hdd_set_filter(pHddCtx, &request, pAdapter->sessionId);
+        if(ret == 0) {
+            pAdapter->filter_v6_index = -1;
+            SET_FILTER_BMAP(pAdapter->driver_filter_config, set, request.filterId);
+            hddLog(VOS_TRACE_LEVEL_INFO, "Cleared IPV6 pass through at index %d",
+                    request.filterId);
+        } else {
+             hddLog(VOS_TRACE_LEVEL_ERROR, "IPV6 pass through rule CLEAR failed!!");
+        }
+    } else {
+        hddLog(VOS_TRACE_LEVEL_INFO, "Clear IPV6 passthrough when not set - ignore");
+    }
+}
+// IKJB42MAIN-1244, Motorola, a19091 -- END
+
 void wlan_hdd_set_mc_addr_list(hdd_adapter_t *pAdapter, v_U8_t set)
 {
     v_U8_t i;
-    tpSirRcvFltMcAddrList pMulticastAddrs = NULL;
     tHalHandle hHal = NULL;
-    hdd_context_t* pHddCtx = (hdd_context_t*)pAdapter->pHddCtx;
+    v_U8_t filterAction;
+    tPacketFilterCfg request;
+    hdd_context_t *pHddCtx = WLAN_HDD_GET_CTX(pAdapter);
+    // IKJB42MAIN-1244, Motorola, a19091 - BEGIN
+    int ret;
+    v_SCHAR_t mcFilterIndex = WLAN_HDD_MAX_FILTER_SLOTS;
+    // IKJB42MAIN-1244, Motorola, a19091 - END
 
     if (NULL == pHddCtx)
     {
@@ -8536,80 +9143,207 @@ void wlan_hdd_set_mc_addr_list(hdd_adapter_t *pAdapter, v_U8_t set)
         return;
     }
 
-    /* Check if INI is enabled or not, other wise just return
-     */
-    if (pHddCtx->cfg_ini->fEnableMCAddrList)
-    {
-        pMulticastAddrs = vos_mem_malloc(sizeof(tSirRcvFltMcAddrList));
-        if (NULL == pMulticastAddrs)
-        {
-            hddLog(VOS_TRACE_LEVEL_ERROR, FL("Could not allocate Memory"));
-            return;
-        }
+    filterAction = set ? HDD_RCV_FILTER_SET : HDD_RCV_FILTER_CLEAR;
 
-        if (set)
-        {
-            /* Following pre-conditions should be satisfied before wei
-             * configure the MC address list.
-             */
-            if (((pAdapter->device_mode == WLAN_HDD_INFRA_STATION) ||
-               (pAdapter->device_mode == WLAN_HDD_P2P_CLIENT))
-               && pAdapter->mc_addr_list.mc_cnt
-               && (eConnectionState_Associated ==
-               (WLAN_HDD_GET_STATION_CTX_PTR(pAdapter))->conn_info.connState))
-            {
-                pMulticastAddrs->ulMulticastAddrCnt =
-                                 pAdapter->mc_addr_list.mc_cnt;
-                for (i = 0; i < pAdapter->mc_addr_list.mc_cnt; i++)
-                {
-                    memcpy(pMulticastAddrs->multicastAddr[i],
-                            pAdapter->mc_addr_list.addr[i],
-                            sizeof(pAdapter->mc_addr_list.addr[i]));
-                    hddLog(VOS_TRACE_LEVEL_INFO,
-                            "%s: %s multicast filter: addr ="
-                            MAC_ADDRESS_STR,
-                            __func__, set ? "setting" : "clearing",
-                            MAC_ADDR_ARRAY(pMulticastAddrs->multicastAddr[i]));
-                }
-                /* Set multicast filter */
-                sme_8023MulticastList(hHal, pAdapter->sessionId,
-                                      pMulticastAddrs);
-            }
-        }
-        else
-        {
-            /* Need to clear only if it was previously configured
-             */
-            if (pAdapter->mc_addr_list.isFilterApplied)
-            {
-                pMulticastAddrs->ulMulticastAddrCnt = 0;
-                sme_8023MulticastList(hHal, pAdapter->sessionId,
-                                      pMulticastAddrs);
-            }
+    // IKJB42MAIN-1244, Motorola, a19091 - BEGIN
+    hddLog(VOS_TRACE_LEVEL_INFO, "%s: Entered for %s",
+            __func__, set?"SET":"CLEAR");
 
-        }
-        pAdapter->mc_addr_list.isFilterApplied = set ? TRUE : FALSE;
-        vos_mem_free(pMulticastAddrs);
+    if(pAdapter->filter_v6_index != -1) {
+        hddLog(VOS_TRACE_LEVEL_INFO, "%s: First calling CLEAR V6 ALLOW_ALL!",
+                __func__);
+        wlan_hdd_set_mc_v6(pAdapter, FALSE);
     }
-    else
+    // IKJB42MAIN-1244, Motorola, a19091 - END
+
+    /*set mulitcast addr list*/
+    for (i = 0; i < pAdapter->mc_addr_list.mc_cnt; i++)
     {
-        hddLog(VOS_TRACE_LEVEL_INFO,
-                FL("gMCAddrListEnable is not enabled in INI"));
+            memset(&request, 0, sizeof (tPacketFilterCfg));
+            request.filterAction = filterAction;
+            request.filterId = i;
+            if (set)
+            {
+            // IKJB42MAIN-1244, Motorola, a19091 - BEGIN
+            while(--mcFilterIndex >=0 ) {
+                if(IS_FILTER_INDEX_FREE(pAdapter->user_filter_config, mcFilterIndex)) {
+                    /* Non user filter index! */
+                    if(!IS_FILTER_INDEX_FREE(pAdapter->driver_filter_config, mcFilterIndex)) {
+                        hddLog(VOS_TRACE_LEVEL_INFO, "Clearing Filter index %d, before reprog",
+                            mcFilterIndex);
+                        request.filterAction = HDD_RCV_FILTER_CLEAR;
+                        request.filterId = mcFilterIndex;
+                        ret = wlan_hdd_set_filter(pHddCtx, &request, pAdapter->sessionId);
+                        if(ret == 0) {
+                            SET_FILTER_BMAP(pAdapter->driver_filter_config, FALSE, request.filterId);
+                        } else {
+                            hddLog(VOS_TRACE_LEVEL_ERROR,"failed to clear filter index %d",mcFilterIndex);
+                        }
+                    }
+                    if(!IS_FILTER_INDEX_FREE(pAdapter->driver_filter_config, mcFilterIndex)) {
+                        hddLog(VOS_TRACE_LEVEL_ERROR, "Failed to clear filter %d - try next",
+                            mcFilterIndex);
+                        continue;
+                    }
+                    request.filterAction = HDD_RCV_FILTER_SET;
+                    request.filterId = mcFilterIndex;
+                    request.numParams = 1;
+                    request.paramsData[0].protocolLayer = HDD_FILTER_PROTO_TYPE_MAC;
+                    request.paramsData[0].cmpFlag = HDD_FILTER_CMP_TYPE_EQUAL;
+                    request.paramsData[0].dataOffset = WLAN_HDD_80211_FRM_DA_OFFSET;
+                    request.paramsData[0].dataLength = ETH_ALEN;
+                    memcpy(&(request.paramsData[0].compareData[0]),
+                        &(pAdapter->mc_addr_list.addr[i][0]), ETH_ALEN);
+                    /*set mulitcast filters*/
+                    hddLog(VOS_TRACE_LEVEL_INFO,
+                        "%s: %s multicast filter: addr ="
+                        "%02x:%02x:%02x:%02x:%02x:%02x",
+                        __func__, set ? "setting" : "clearing",
+                        request.paramsData[0].compareData[0],
+                        request.paramsData[0].compareData[1],
+                        request.paramsData[0].compareData[2],
+                        request.paramsData[0].compareData[3],
+                        request.paramsData[0].compareData[4],
+                        request.paramsData[0].compareData[5]);
+                    pAdapter->mc_addr_list.filter_index[i] = request.filterId;
+                    break;
+                } else {
+                    /*user filter index - try next*/
+                    hddLog(VOS_TRACE_LEVEL_ERROR,
+                        "Index %d used by user filter - try next", mcFilterIndex);
+                }
+            }
+            if(mcFilterIndex < 0 ) {
+                /*No Free index in driver config available*/
+                hddLog(VOS_TRACE_LEVEL_FATAL,
+                        "No available slots to allow mcast filter - Too many user filters");
+                return;
+            }
+        } else { /* !set */
+            if(pAdapter->mc_addr_list.isFilterApplied == FALSE) {
+                hddLog(VOS_TRACE_LEVEL_INFO, "No previous filter ... skipping");
+                continue;
+            }
+            hddLog(VOS_TRACE_LEVEL_INFO, "Gonna clear index %d",
+                    pAdapter->mc_addr_list.filter_index[i]);
+            request.filterId = pAdapter->mc_addr_list.filter_index[i];
+            request.numParams = 1;
+        }
+        ret = wlan_hdd_set_filter(pHddCtx, &request, pAdapter->sessionId);
+        if(ret == 0) {
+            SET_FILTER_BMAP(pAdapter->driver_filter_config, set, request.filterId);
+        }
+    }
+
+    if(set) {
+        // Clear out any extraneous driver filters
+        request.filterAction = HDD_RCV_FILTER_CLEAR;
+        while(--mcFilterIndex>=0) {
+            request.filterId = mcFilterIndex;
+            if(!IS_FILTER_INDEX_FREE(pAdapter->driver_filter_config, mcFilterIndex) &&
+                    IS_FILTER_INDEX_FREE(pAdapter->user_filter_config, mcFilterIndex)) {
+                hddLog(VOS_TRACE_LEVEL_INFO, "Clearing Filter index %d,", mcFilterIndex);
+                ret = wlan_hdd_set_filter(pHddCtx, &request, pAdapter->sessionId);
+                if(ret == 0) {
+                    SET_FILTER_BMAP(pAdapter->driver_filter_config, FALSE, request.filterId);
+                } else {
+                    hddLog(VOS_TRACE_LEVEL_ERROR,"failed to clear filter index %d",mcFilterIndex);
+                }
+            }
+        }
+        // IKJB42MAIN-1244, Motorola, a19091 - END
     }
     return;
 }
+
+// IKJB42MAIN-1244, Motorola, a19091 - BEGIN
+int wlan_hdd_update_v6_filters(hdd_adapter_t *pAdapter, v_U8_t set){
+    tSirInvokeV6Filter filterConfig;
+    hdd_station_ctx_t *pHddStaCtx = WLAN_HDD_GET_STATION_CTX_PTR(pAdapter);
+
+    if(!hdd_connIsConnected(pHddStaCtx))
+    {
+        hddLog(VOS_TRACE_LEVEL_WARN,
+                "Not associated - ignoring wlan_hdd_update_v6_filters");
+        return 0;
+    }
+    filterConfig.configureFilterFn = wlan_hdd_set_v6_filter;
+    filterConfig.pHddAdapter = pAdapter;
+    filterConfig.set = set;
+
+    if (eHAL_STATUS_SUCCESS != sme_ReceiveSetMcFilter(&filterConfig))
+    {
+        hddLog(VOS_TRACE_LEVEL_ERROR, "%s: Failure to execute Set Filter\n",
+            __func__);
+        return -1;
+    }
+    return 0;
+}
+
+int wlan_hdd_set_v6_filter(void *pAdapter, v_U8_t set, v_U8_t userSet) {
+    hdd_adapter_t* pTAdapter = (hdd_adapter_t*)pAdapter;
+    hdd_station_ctx_t *pHddStaCtx = WLAN_HDD_GET_STATION_CTX_PTR(pTAdapter);
+    int ret = 0;
+
+    if(userSet)
+        pTAdapter->ipv6_user_set_map = (set)?IPV6_CONFIG_ALLOW_ALL:IPV6_CONFIG_MANDATORY;
+    else
+        pTAdapter->ipv6_code_set_map = (set)?IPV6_CONFIG_ALLOW_ALL:IPV6_CONFIG_MANDATORY;
+
+    hddLog(VOS_TRACE_LEVEL_INFO, "wlan_hdd_set_v6_filter - %s - set map is now - code = %s, user = %s",
+        userSet?"USER-SET":"CODE-SET",
+        (pTAdapter->ipv6_code_set_map == IPV6_CONFIG_MANDATORY) ? "MANDATORY":"ALLOW_ALL",
+        (pTAdapter->ipv6_user_set_map == IPV6_CONFIG_MANDATORY) ? "MANDATORY":"ALLOW_ALL");
+
+    if(!hdd_connIsConnected(pHddStaCtx))
+    {
+        hddLog(VOS_TRACE_LEVEL_WARN,
+                 "Not associated - ignoring wlan_hdd_set_v6_filter");
+        return ret;
+    }
+    if(pTAdapter->needs_v6_set == eANI_BOOLEAN_TRUE) {
+        hddLog(VOS_TRACE_LEVEL_WARN, "Delay v6 set .. skip!");
+        return ret;
+    }
+    if(pTAdapter->ipv6_code_set_map == pTAdapter->ipv6_user_set_map  &&
+            pTAdapter->ipv6_code_set_map == IPV6_CONFIG_MANDATORY ) {
+        hddLog(VOS_TRACE_LEVEL_INFO, "Set IPV6 filter to MANDATORY");
+        wlan_hdd_set_mc_v6(pAdapter, FALSE);
+        wlan_hdd_set_mc_addr_list(pTAdapter, TRUE);
+    } else {
+        hddLog(VOS_TRACE_LEVEL_INFO, "Set IPV6 filter to ALLOW_ALL");
+        if(pTAdapter->filter_v6_index == -1) {
+            hddLog(VOS_TRACE_LEVEL_INFO, "Program V6!");
+            wlan_hdd_set_mc_addr_list(pTAdapter, FALSE);
+            wlan_hdd_set_mc_v6(pTAdapter, TRUE);
+        } else {
+            hddLog(VOS_TRACE_LEVEL_INFO, "Skip program V6 - already set!");
+        }
+    }
+    return ret;
+}
+// IKJB42MAIN-1244, Motorola, a19091 - END
 
 static int __iw_set_packet_filter_params(struct net_device *dev,
                                          struct iw_request_info *info,
                                          union iwreq_data *wrqu, char *extra)
 {
-    hdd_adapter_t *pAdapter;
-    hdd_context_t *pHddCtx;
+    hdd_adapter_t *pAdapter = WLAN_HDD_GET_PRIV_PTR(dev);
+    hdd_context_t *pHddCtx = WLAN_HDD_GET_CTX(pAdapter);
     tpPacketFilterCfg pRequest = NULL;
-    int ret = 0;
+    v_U8_t mcFilterReset = FALSE;
+    int retVal = 0;
     struct iw_point s_priv_data;
 
     ENTER();
+
+    if (!capable(CAP_NET_ADMIN))
+    {
+        VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_ERROR,
+                  FL("permission check failed"));
+        return -EPERM;
+    }
+
     pAdapter = WLAN_HDD_GET_PRIV_PTR(dev);
     if (NULL == pAdapter)
     {
@@ -8618,36 +9352,74 @@ static int __iw_set_packet_filter_params(struct net_device *dev,
         return -EINVAL;
     }
     pHddCtx = WLAN_HDD_GET_CTX(pAdapter);
-    ret = wlan_hdd_validate_context(pHddCtx);
-    if (0 != ret)
+    retVal = wlan_hdd_validate_context(pHddCtx);
+    if (0 != retVal)
     {
-        return ret;
+        return retVal;
     }
     if (hdd_priv_get_data(&s_priv_data, wrqu))
     {
        return -EINVAL;
     }
+    pAdapter = WLAN_HDD_GET_PRIV_PTR(dev);
+    // IKJB42MAIN-1244, Motorola, a19091 - BEGIN
+    pHddCtx = WLAN_HDD_GET_CTX(pAdapter);
+    // IKJB42MAIN-1244, Motorola, a19091 - END
 
-    if ((NULL == s_priv_data.pointer) || (0 == s_priv_data.length))
-    {
-       return -EINVAL;
-    }
+    //IKHSS7-35965, a19091, Motorola changes -- BEGIN
+    pRequest = (tpPacketFilterCfg)kmalloc(sizeof(tPacketFilterCfg), GFP_KERNEL);
 
-    /* ODD number is used for set, copy data using copy_from_user */
-    pRequest = mem_alloc_copy_from_user_helper(s_priv_data.pointer,
-                                               s_priv_data.length);
-    if (NULL == pRequest)
-    {
-        VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_ERROR,
-                  "mem_alloc_copy_from_user_helper fail");
+    if(pRequest == NULL) {
+        hddLog(VOS_TRACE_LEVEL_FATAL, "%s: Out of memory - cant alloc %d bytes",
+                __FUNCTION__,(int)sizeof(tPacketFilterCfg));
         return -ENOMEM;
     }
 
-    ret = wlan_hdd_set_filter(WLAN_HDD_GET_CTX(pAdapter), pRequest, pAdapter->sessionId);
-    kfree(pRequest);
+    if(copy_from_user(pRequest, wrqu->data.pointer, sizeof(tPacketFilterCfg))) {
+        hddLog(VOS_TRACE_LEVEL_FATAL, "%s -- copy_from_user -- data pointer failed! bailing",
+                __FUNCTION__);
+        kfree(pRequest);
+        return -EFAULT;
+    }
+    //IKHSS7-35965, a19091, Motorola changes -- END
+
+    // IKJB42MAIN-1244, Motorola, a19091 - BEGIN
+    if(!IS_FILTER_INDEX_FREE(pAdapter->driver_filter_config, pRequest->filterId) &&
+            IS_FILTER_INDEX_FREE(pAdapter->user_filter_config, pRequest->filterId)) {
+        // Need to re-adjust MC filter - disable and re-enable
+        hddLog(VOS_TRACE_LEVEL_INFO, "%s, Filter ID %d already in use - disable and re-enable mc filters!!",
+                __FUNCTION__, pRequest->filterId);
+        wlan_hdd_set_mc_addr_list(pAdapter, FALSE);
+        mcFilterReset = TRUE;
+    }
+    // IKJB42MAIN-1244, Motorola, a19091 - END
+
+    retVal = wlan_hdd_set_filter(pHddCtx, pRequest, pAdapter->sessionId);
+
+    // IKJB42MAIN-1244, Motorola, a19091 - BEGIN
+    if(retVal == 0) {
+        SET_FILTER_BMAP(pAdapter->driver_filter_config, (pRequest->filterAction), pRequest->filterId);
+        SET_FILTER_BMAP(pAdapter->user_filter_config, (pRequest->filterAction), pRequest->filterId);
+    }
+
+    if(mcFilterReset) {
+        hddLog(VOS_TRACE_LEVEL_INFO, "%s, Re -enabling MC filters",
+                __FUNCTION__);
+        wlan_hdd_set_mc_addr_list(pAdapter, TRUE);
+    }
+
+    if(pAdapter->needs_v6_set == eANI_BOOLEAN_TRUE) {
+        hddLog(VOS_TRACE_LEVEL_INFO, "%s, Enabling MC filters after assoc", __FUNCTION__);
+        wlan_hdd_update_v6_filters(pAdapter, (pAdapter->mc_addr_list.mc_cnt==0)?1:0);
+        pAdapter->needs_v6_set = eANI_BOOLEAN_FALSE;
+    }
+
+    if(pRequest!= NULL)
+        kfree(pRequest);
 
     EXIT();
-    return ret;
+    return retVal;
+    // IKJB42MAIN-1244, Motorola, a19091 - END
 }
 
 static int iw_set_packet_filter_params(struct net_device *dev,
@@ -8880,7 +9652,8 @@ void found_pref_network_cb (void *callbackContext,
   hdd_adapter_t* pAdapter = (hdd_adapter_t*)callbackContext;
   union iwreq_data wrqu;
   char buf[MAX_PNO_NOTIFY_LEN+1];
-
+  int bp = 0;
+  
   hddLog(VOS_TRACE_LEVEL_WARN, "A preferred network was found: %s with rssi: -%d",
          pPrefNetworkFoundInd->ssId.ssId, pPrefNetworkFoundInd->rssi);
 
@@ -8888,7 +9661,18 @@ void found_pref_network_cb (void *callbackContext,
   memset(&wrqu, 0, sizeof(wrqu));
   memset(buf, 0, sizeof(buf));
 
-  snprintf(buf, MAX_PNO_NOTIFY_LEN, "QCOM: Found preferred network: %s with RSSI of -%u",
+  // stop PNO
+  bp = strlcpy(buf, "0 ", sizeof(buf));
+  buf[bp++] = '\0';
+  wrqu.data.pointer = buf;
+  wrqu.data.length = strlen(buf);
+  iw_set_pno(pAdapter->dev, NULL, &wrqu, NULL, 0);
+  //printk("PNO Callback: Stopping PNO \n");
+
+  // send event to supplicant
+  memset(&wrqu, 0, sizeof(wrqu));
+  memset(buf, 0, sizeof(buf));
+  snprintf(buf, MAX_PNO_NOTIFY_LEN, "PNOFOUND : Found preferred network: %s with RSSI of -%u",
            pPrefNetworkFoundInd->ssId.ssId,
           (unsigned int)pPrefNetworkFoundInd->rssi);
 
@@ -9237,6 +10021,30 @@ VOS_STATUS iw_set_pno(struct net_device *dev, struct iw_request_info *info,
   vos_mem_zero(pnoRequest.p24GProbeTemplate, SIR_PNO_MAX_PB_REQ_SIZE);
   vos_mem_zero(pnoRequest.p5GProbeTemplate, SIR_PNO_MAX_PB_REQ_SIZE);
 
+  // IKHSS7-5797: set PNO intervals
+  /* A set value represents the amount of time that PNO will wait between
+     two consecutive scan procedures.
+     If the desired is for a uniform timer that fires always at the exact same
+     interval - one single value is to be set
+
+     If there is a desire for a more complex - telescopic like timer multiple
+     values can be set - once PNO reaches the end of the array it will
+     continue scanning at intervals presented by the last value
+
+     uTimerRepeat
+     How many times it should repeat that wait value
+     0 - keep using this timer until PNO is disabled/
+     e.g:   2 3
+            4 0
+    - it will wait 2s between consecutive scans for 3 times
+    - after that it will wait 4s between consecutive scans until disabled
+  */
+  pnoRequest.scanTimers.ucScanTimersCount = 2;
+  pnoRequest.scanTimers.aTimerValues[0].uTimerRepeat = 7;
+  pnoRequest.scanTimers.aTimerValues[0].uTimerValue = 45;
+  pnoRequest.scanTimers.aTimerValues[1].uTimerRepeat = 0;
+  pnoRequest.scanTimers.aTimerValues[1].uTimerValue = 480;
+
   status = sme_SetPreferredNetworkList(WLAN_HDD_GET_HAL_CTX(pAdapter), &pnoRequest,
                                 pAdapter->sessionId,
                                 found_pref_network_cb, pAdapter);
@@ -9341,9 +10149,8 @@ int hdd_setBand(struct net_device *dev, u8 ui_band)
     int wait_result;
     eCsrBand currBand = eCSR_BAND_MAX;
     eCsrBand connectedBand;
-    v_U8_t ret = SEND_CHANNEL_CHANGE_EVENT;
     tpAniSirGlobal pMac;
-    int retval = 0;
+    int retval = SEND_CHANNEL_CHANGE_EVENT;
 
     ENTER();
     pAdapter = WLAN_HDD_GET_PRIV_PTR(dev);
@@ -9524,7 +10331,7 @@ int hdd_setBand(struct net_device *dev, u8 ui_band)
                            " in kernel db");
              }
 
-             ret = DO_NOT_SEND_CHANNEL_CHANGE_EVENT;
+             retval = DO_NOT_SEND_CHANNEL_CHANGE_EVENT;
         }
         else
         {
@@ -9585,7 +10392,10 @@ int hdd_setBand(struct net_device *dev, u8 ui_band)
         }
     }
     EXIT();
-    return ret;
+    if (TRUE == pHddCtx->isSetBandByNL)
+        return 0;
+    else
+        return retval;
 }
 
 int hdd_setBand_helper(struct net_device *dev, const char *command)
@@ -9606,6 +10416,13 @@ static int __iw_set_band_config(struct net_device *dev,
     int *value = (int *)extra;
 
     VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_INFO, "%s: ", __func__);
+
+    if (!capable(CAP_NET_ADMIN))
+    {
+        VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_ERROR,
+                  FL("permission check failed"));
+        return -EPERM;
+    }
 
     return hdd_setBand(dev, value[0]);
 }
@@ -9629,8 +10446,17 @@ static int __iw_set_power_params_priv(struct net_device *dev,
 {
   int ret;
   char *ptr;
+
   VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_INFO,
                 "Set power params Private");
+
+  if (!capable(CAP_NET_ADMIN))
+  {
+      VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_ERROR,
+                FL("permission check failed"));
+      return -EPERM;
+  }
+
   /* ODD number is used for set, copy data using copy_from_user */
   ptr = mem_alloc_copy_from_user_helper(wrqu->data.pointer,
                                           wrqu->data.length);
@@ -9902,12 +10728,15 @@ int iw_set_tdlsoffchannelmode(hdd_adapter_t *pAdapter, int offchanmode)
         eTDLS_SUPPORT_EXPLICIT_TRIGGER_ONLY == pHddCtx->tdls_mode)
     {
        /* Send TDLS Channel Switch Request to connected peer */
+       mutex_lock(&pHddCtx->tdls_lock);
        connPeer = wlan_hdd_tdls_get_connected_peer(pAdapter);
        if (NULL == connPeer) {
+           mutex_unlock(&pHddCtx->tdls_lock);
            VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_FATAL,
                      "%s: No TDLS Connected Peer", __func__);
            return -1;
        }
+       mutex_unlock(&pHddCtx->tdls_lock);
     }
     else
     {
@@ -10075,6 +10904,8 @@ static const iw_handler we_private[] = {
    [WLAN_PRIV_CLEAR_MCBC_FILTER         - SIOCIWFIRSTPRIV]   = iw_clear_dynamic_mcbc_filter,
    [WLAN_SET_POWER_PARAMS               - SIOCIWFIRSTPRIV]   = iw_set_power_params_priv,
    [WLAN_GET_LINK_SPEED                 - SIOCIWFIRSTPRIV]   = iw_get_linkspeed_priv,
+   [WLAN_SET_ROAM_TRIGGER               - SIOCIWFIRSTPRIV]   = iw_set_roam_trigger, //MOT IKCBS-9561
+
 };
 
 /*Maximum command length can be only 15 */
@@ -10157,6 +10988,18 @@ static const struct iw_priv_args we_private_args[] = {
         0,
         "setTmLevel" },
 
+    {   WE_SET_CHANNEL_RANGE,
+        IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1,
+        0,
+        "setChannelRange" },
+
+    // IKJB42MAIN-1244, Motorola, a19091 - BEGIN
+    {   WE_SET_IPV6_FILTER_STATE,
+        IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1,
+        0,
+        "setIPV6FilState" },
+    // IKJB42MAIN-1244, Motorola, a19091 - END
+
     {   WE_ENABLE_STRICT_FCC_REG,
         IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1,
         0,
@@ -10206,7 +11049,9 @@ static const struct iw_priv_args we_private_args[] = {
     {   WE_SET_RTS_CTS_HTVHT,
         IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1,
         0, "setRtsCtsHtVht" },
-
+    {   WE_SET_PROXIMITY_ENABLE,
+        IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1,
+        0, "setProximity" },
     /* handlers for main ioctl */
     {   WLAN_PRIV_SET_NONE_GET_INT,
         0,
@@ -10254,10 +11099,21 @@ static const struct iw_priv_args we_private_args[] = {
         IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1,
         "getconcurrency" },
 
+    /* MOTOROLA IKJB42MAIN-274 */
+    {   WE_GET_MCC_MODE,
+        0,
+        IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1,
+        "getMccMode" },
+
     {   WE_GET_SCAN_BAND_PREFERENCE,
         0,
         IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1,
         "get_scan_pref"},
+
+    {   WE_GET_ANTENA_DIVERSITY_SELECTION,
+        0,
+        IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1,
+        "getCurAnt"},
 
     /* handlers for main ioctl */
     {   WLAN_PRIV_SET_CHAR_GET_NONE,
@@ -10320,6 +11176,13 @@ static const struct iw_priv_args we_private_args[] = {
         IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 3,
         0,
         "setsapchannels" },
+
+   //Begin Motorola dcw476 4/17/13 IKJBXLINE-5577:changing wlan driver log level dynamically
+   {    WE_SET_WLAN_DBG_TILL_LEVEL,
+         IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 3,
+         0,
+         "setwlanloglevel" },
+   //END IKJBXLINE-5577
 
     /* handlers for main ioctl */
     {   WLAN_PRIV_GET_CHAR_SET_NONE,
@@ -10601,6 +11464,13 @@ static const struct iw_priv_args we_private_args[] = {
         WLAN_GET_LINK_SPEED,
         IW_PRIV_TYPE_CHAR | 18,
         IW_PRIV_TYPE_CHAR | 5, "getLinkSpeed" },
+    //BEGIN MOT a22977 IKCBS-9561 Add set Roam trigger support
+    {
+        WLAN_SET_ROAM_TRIGGER,
+        IW_PRIV_TYPE_CHAR | 4,
+        0, "setRoamTrigger" },
+    //END IKCBS-9561
+
 };
 
 

@@ -904,15 +904,14 @@ static struct mdss_mdp_pipe *mdss_mdp_pipe_init(struct mdss_mdp_mixer *mixer,
 			return pipe;
 		}
 	}
-	if (pipe_pool) {
-		for (i = off; i < npipes; i++) {
-			pipe = pipe_pool + i;
-			if (atomic_read(&pipe->kref.refcount) == 0) {
-				pipe->mixer_left = mixer;
-				break;
-			}
-			pipe = NULL;
+
+	for (i = off; i < npipes; i++) {
+		pipe = pipe_pool + i;
+		if (atomic_read(&pipe->kref.refcount) == 0) {
+			pipe->mixer_left = mixer;
+			break;
 		}
+		pipe = NULL;
 	}
 
 	if (pipe && type == MDSS_MDP_PIPE_TYPE_CURSOR) {

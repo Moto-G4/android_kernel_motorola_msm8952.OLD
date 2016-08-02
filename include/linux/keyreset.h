@@ -21,12 +21,9 @@
 
 struct keyreset_platform_data {
 	int (*reset_fn)(void);
-	uint32_t key_down_delay;
-	uint32_t *keys_up;
-	uint32_t *keys_down; 
-	
-	uint32_t *vzw_keys_up;
-	uint32_t *vzw_keys_down; 
+	int key_down_delay;
+	int *keys_up;
+	int keys_down[]; /* 0 terminated */
 };
 
-#endif 
+#endif /* _LINUX_KEYRESET_H */

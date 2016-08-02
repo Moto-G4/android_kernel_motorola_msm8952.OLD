@@ -46,10 +46,6 @@ MODULE_AUTHOR("Zhang Rui");
 MODULE_DESCRIPTION("Generic thermal management sysfs support");
 MODULE_LICENSE("GPL v2");
 
-static char *truly_shutdown[2] = { "CPU_TEMP=SHUTDOWN_TEMP", NULL };
-static char *shutdown_waring[2]    = { "CPU_TEMP=CLOSE_TO_SHUTDOWN_TEMP", NULL };
-static char *clr_shutdown_warning[2]   = { "CPU_TEMP=CLOSE_TO_SHUTDOWN_TEMP_CLR", NULL };
-
 static DEFINE_IDR(thermal_tz_idr);
 static DEFINE_IDR(thermal_cdev_idr);
 static DEFINE_MUTEX(thermal_idr_lock);
@@ -747,11 +743,9 @@ static void handle_critical_trips(struct thermal_zone_device *tz,
 	if (trip_type == THERMAL_TRIP_CRITICAL ||
 	    trip_type == THERMAL_TRIP_CRITICAL_LOW) {
 		dev_emerg(&tz->device,
-			  "critical temperature reached(%d C)\n",
+			  "critical temperature reached(%d C),shutting down\n",
 			  tz->temperature / 1000);
-	
-	
-		return;
+		orderly_poweroff(true);
 	}
 }
 
@@ -888,28 +882,6 @@ temp_show(struct device *dev, struct device_attribute *attr, char *buf)
 		return ret;
 
 	return sprintf(buf, "%ld\n", temperature);
-}
-
-static ssize_t
-temp_notify_store(struct device *dev, struct device_attribute *attr,
-          const char *buf, size_t count)
-{
-       struct thermal_zone_device *tz = to_thermal_zone(dev);
-       unsigned int status=0;
-       unsigned long  value=0;
-       if (strict_strtoul(buf, 10, &value))
-              return -EINVAL;
-
-       if (value == 1) 
-              status = kobject_uevent_env(&tz->device.kobj, KOBJ_CHANGE, clr_shutdown_warning);
-       if (value == 2)
-              status = kobject_uevent_env(&tz->device.kobj, KOBJ_CHANGE, shutdown_waring);
-       if (value == 3)
-              status = kobject_uevent_env(&tz->device.kobj, KOBJ_CHANGE, truly_shutdown);
-
-       pr_info("cpu temp uevent :temp=%s,sucess=%d\n",buf,status);
-
-       return count;
 }
 
 static ssize_t
@@ -1244,7 +1216,6 @@ static DEVICE_ATTR(temp, 0444, temp_show, NULL);
 static DEVICE_ATTR(mode, 0644, mode_show, mode_store);
 static DEVICE_ATTR(passive, S_IRUGO | S_IWUSR, passive_show, passive_store);
 static DEVICE_ATTR(policy, S_IRUGO | S_IWUSR, policy_show, policy_store);
-static DEVICE_ATTR(temp_notify, S_IWUSR, NULL, temp_notify_store);
 
 /* sys I/F for cooling device */
 #define to_cooling_device(_dev)	\
@@ -2169,10 +2140,6 @@ struct thermal_zone_device *thermal_zone_device_register(const char *type,
 		if (result)
 			goto unregister;
 	}
-
-	result = device_create_file(&tz->device, &dev_attr_temp_notify);
-	if (result)
-		goto unregister;
 
 #ifdef CONFIG_THERMAL_EMULATION
 	result = device_create_file(&tz->device, &dev_attr_emul_temp);

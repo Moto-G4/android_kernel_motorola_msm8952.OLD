@@ -3077,10 +3077,11 @@ static int tcp_clean_rtx_queue(struct sock *sk, int prior_fackets,
 			if (seq_rtt < 0) {
 				seq_rtt = ca_seq_rtt;
 			}
-			if (!(sacked & TCPCB_SACKED_ACKED))
+			if (!(sacked & TCPCB_SACKED_ACKED)) {
 				reord = min(pkts_acked, reord);
-			if (!after(scb->end_seq, tp->high_seq))
-				flag |= FLAG_ORIG_SACK_ACKED;
+				if (!after(scb->end_seq, tp->high_seq))
+					flag |= FLAG_ORIG_SACK_ACKED;
+			}
 		}
 
 		if (sacked & TCPCB_SACKED_ACKED)
@@ -4932,7 +4933,7 @@ static int tcp_copy_to_iovec(struct sock *sk, struct sk_buff *skb, int hlen)
 		err = skb_copy_datagram_iovec(skb, hlen, tp->ucopy.iov, chunk);
 	else
 		err = skb_copy_and_csum_datagram_iovec(skb, hlen,
-						       tp->ucopy.iov, chunk);
+						       tp->ucopy.iov);
 
 	if (!err) {
 		tp->ucopy.len -= chunk;

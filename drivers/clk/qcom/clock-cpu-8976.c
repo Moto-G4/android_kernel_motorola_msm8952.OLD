@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2015-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -132,19 +132,17 @@ static struct pll_clk a72ss_hf_pll = {
 		.vco_mask = BM(29, 28),
 		.pre_div_mask = BIT(12),
 		.post_div_mask = BM(9, 8),
-		.mn_en_mask = BIT(24),
 		.early_output_mask =  BIT(3),
 		.main_output_mask = BIT(0),
 	},
 	.vals = {
 		.config_ctl_val = 0x04E0405D,
-		.enable_mn = true,
 		.post_div_masked = BVAL(9, 8, (1)),
 		.vco_mode_masked = BVAL(21, 20, 1),
 	},
 	.base = &virt_bases[APCS_C1_PLL_BASE],
 	.max_rate = 1843200000,
-	.min_rate = 1190400000,
+	.min_rate = 940800000,
 	.c = {
 		.parent = &xo_a_clk.c,
 		.dbg_name = "a72ss_hf_pll",
@@ -174,13 +172,11 @@ static struct pll_clk a53ss_sr_pll = {
 		.vco_mask = BM(21, 20),
 		.pre_div_mask = BM(14, 12),
 		.post_div_mask = BM(9, 8),
-		.mn_en_mask = BIT(24),
 		.early_output_mask =  BIT(3),
 		.main_output_mask = BIT(0),
 	},
 	.vals = {
 		.config_ctl_val = 0x00341600,
-		.enable_mn = true,
 		.post_div_masked =  BVAL(9, 8, (1)),
 	},
 	.data = {
@@ -221,13 +217,11 @@ static struct pll_clk cci_sr_pll = {
 		.vco_mask = BM(21, 20),
 		.pre_div_mask = BM(14, 12),
 		.post_div_mask = BM(9, 8),
-		.mn_en_mask = BIT(24),
 		.early_output_mask =  BIT(3),
 		.main_output_mask = BIT(0),
 	},
 	.vals = {
 		.config_ctl_val = 0x00141400,
-		.enable_mn = true,
 		.post_div_masked = BVAL(9, 8, (1)),
 		.vco_mode_masked = BVAL(21, 20, 1),
 	},
@@ -338,7 +332,7 @@ struct cpu_clk_8976 {
 };
 
 static void do_nothing(void *unused) { }
-#define CPU_LATENCY_NO_L2_PC_US (500)
+#define CPU_LATENCY_NO_L2_PC_US (280)
 
 static inline struct cpu_clk_8976 *to_cpu_clk_8976(struct clk *c)
 {
@@ -577,6 +571,7 @@ static int add_opp(struct clk *c, struct device *cpudev, struct device *vregdev,
 	long ret, uv, corner;
 	bool use_voltages = false;
 	struct opp *oppl;
+	int j = 1;
 
 	rcu_read_lock();
 
@@ -588,12 +583,7 @@ static int add_opp(struct clk *c, struct device *cpudev, struct device *vregdev,
 		use_voltages = true;
 
 	do {
-		ret = clk_round_rate(c, rate + 1);
-		if (ret < 0) {
-			pr_warn("clock-cpu: round_rate failed at %lu\n", rate);
-			return ret;
-		}
-		rate = ret;
+		rate = c->fmax[j++];
 		level = find_vdd_level(c, rate);
 		if (level <= 0) {
 			pr_warn("clock-cpu: no uv for %lu.\n", rate);
@@ -867,6 +857,7 @@ static int cpu_parse_devicetree(struct platform_device *pdev)
 				"Unable to get vdd_mx_hf regulator!!!\n");
 		return PTR_ERR(vdd_hf.regulator[1]);
 	}
+	vdd_hf.use_max_uV = true;
 
 	/* SR PLLs core logic */
 	vdd_mx_sr.regulator[0] = devm_regulator_get(&pdev->dev,
@@ -877,6 +868,7 @@ static int cpu_parse_devicetree(struct platform_device *pdev)
 				"Unable to get vdd_mx_sr regulator!!!\n");
 		return PTR_ERR(vdd_mx_sr.regulator[0]);
 	}
+	vdd_mx_sr.use_max_uV = true;
 
 	vdd_cpu_a72.regulator[0] = devm_regulator_get(&pdev->dev,
 							"vdd_a72");
@@ -886,6 +878,7 @@ static int cpu_parse_devicetree(struct platform_device *pdev)
 				"Unable to get vdd_a72 regulator!!!\n");
 		return PTR_ERR(vdd_cpu_a72.regulator[0]);
 	}
+	vdd_cpu_a72.use_max_uV = true;
 
 	vdd_cpu_a53.regulator[0] = devm_regulator_get(&pdev->dev,
 							"vdd_a53");
@@ -895,6 +888,7 @@ static int cpu_parse_devicetree(struct platform_device *pdev)
 				"Unable to get vdd_a53 regulator!!!\n");
 		return PTR_ERR(vdd_cpu_a53.regulator[0]);
 	}
+	vdd_cpu_a53.use_max_uV = true;
 
 	vdd_cpu_cci.regulator[0] = devm_regulator_get(&pdev->dev,
 							"vdd_cci");
@@ -904,6 +898,7 @@ static int cpu_parse_devicetree(struct platform_device *pdev)
 				"Unable to get vdd_cci regulator!!!\n");
 		return PTR_ERR(vdd_cpu_cci.regulator[0]);
 	}
+	vdd_cpu_cci.use_max_uV = true;
 
 	for (mux_id = 0; mux_id < A53SS_MUX_NUM; mux_id++) {
 		snprintf(rcg_name, ARRAY_SIZE(rcg_name), "%s-mux",

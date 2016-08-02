@@ -300,12 +300,12 @@ struct sdhci_ops {
 	void (*platform_send_init_74_clocks)(struct sdhci_host *host,
 					     u8 power_mode);
 	unsigned int    (*get_ro)(struct sdhci_host *host);
-	int     (*get_cd)(struct sdhci_host *host);
 	void	(*platform_reset_enter)(struct sdhci_host *host, u8 mask);
 	void	(*platform_reset_exit)(struct sdhci_host *host, u8 mask);
 	int	(*crypto_engine_cfg)(struct sdhci_host *host,
 				struct mmc_request *mrq, u32 slot);
 	int	(*crypto_engine_reset)(struct sdhci_host *host);
+	void	(*crypto_cfg_reset)(struct sdhci_host *host, unsigned int slot);
 	int	(*set_uhs_signaling)(struct sdhci_host *host, unsigned int uhs);
 	void	(*hw_reset)(struct sdhci_host *host);
 	void	(*platform_suspend)(struct sdhci_host *host);
@@ -320,6 +320,7 @@ struct sdhci_ops {
 	int	(*execute_tuning)(struct sdhci_host *host, u32 opcode);
 	void	(*toggle_cdr)(struct sdhci_host *host, bool enable);
 	unsigned int	(*get_max_segments)(void);
+	int	(*enhanced_strobe)(struct sdhci_host *host);
 	void	(*platform_bus_voting)(struct sdhci_host *host, u32 enable);
 	void    (*disable_data_xfer)(struct sdhci_host *host);
 	void	(*dump_vendor_regs)(struct sdhci_host *host);
@@ -332,6 +333,7 @@ struct sdhci_ops {
 	int	(*notify_load)(struct sdhci_host *host, enum mmc_load state);
 	void	(*notify_pm_status)(struct sdhci_host *host,
 					enum dev_state state);
+	void	(*enhanced_strobe_mask)(struct sdhci_host *host, bool set);
 };
 
 #ifdef CONFIG_MMC_SDHCI_IO_ACCESSORS

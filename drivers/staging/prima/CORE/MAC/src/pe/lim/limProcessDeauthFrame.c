@@ -142,6 +142,8 @@ limProcessDeauthFrame(tpAniSirGlobal pMac, tANI_U8 *pRxPacketInfo, tpPESession p
         limMlmStateStr(psessionEntry->limMlmState), psessionEntry->limSmeState,
         psessionEntry->limSystemRole, reasonCode,
         MAC_ADDR_ARRAY(pHdr->sa));)
+
+    PELOGE(limLog(pMac, LOGE,FL(" Deauth frame rssi = %d"), (uint)abs((tANI_S8)WDA_GET_RX_RSSI_DB(pRxPacketInfo)));)
       
     if (limCheckDisassocDeauthAckPending(pMac, (tANI_U8*)pHdr->sa))
     {
@@ -470,6 +472,10 @@ limProcessDeauthFrame(tpAniSirGlobal pMac, tANI_U8 *pRxPacketInfo, tpPESession p
     } 
     pStaDs->mlmStaContext.disassocReason = (tSirMacReasonCodes)reasonCode;
     pStaDs->mlmStaContext.cleanupTrigger = eLIM_PEER_ENTITY_DEAUTH;
+
+
+    /* send the LOST_LINK_PARAMS_IND to SME*/
+    limUpdateLostLinkParams(pMac, psessionEntry, pRxPacketInfo);
 
     /// Issue Deauth Indication to SME.
     vos_mem_copy((tANI_U8 *) &mlmDeauthInd.peerMacAddr,

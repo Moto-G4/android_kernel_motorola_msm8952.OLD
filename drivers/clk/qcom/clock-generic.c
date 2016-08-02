@@ -19,9 +19,6 @@
 #include <linux/clk/msm-clk-provider.h>
 #include <linux/clk/msm-clock-generic.h>
 #include <soc/qcom/msm-clock-controller.h>
-#if defined(CONFIG_HTC_DEBUG_FOOTPRINT)
-#include <htc_mnemosyne/htc_footprint.h>
-#endif
 
 /* ==================== Mux clock ==================== */
 
@@ -774,9 +771,6 @@ static int mux_div_clk_set_rate(struct clk *c, unsigned long rate)
 		}
 	}
 
-#if defined(CONFIG_HTC_DEBUG_FOOTPRINT)
-	set_acpuclk_footprint_by_clk(c, ACPU_BEFORE_SAFE_PARENT_INIT);
-#endif
 	rc = safe_parent_init_once(c);
 	if (rc)
 		return rc;
@@ -789,9 +783,6 @@ static int mux_div_clk_set_rate(struct clk *c, unsigned long rate)
 	old_parent = c->parent;
 	old_div = md->data.div;
 
-#if defined(CONFIG_HTC_DEBUG_FOOTPRINT)
-	set_acpuclk_footprint_by_clk(c, ACPU_BEFORE_SET_SAFE_RATE);
-#endif
 	/* Refer to the description of safe_freq in clock-generic.h */
 	if (md->safe_freq) {
 		/* enable the aux clock safe parent before setting div */
@@ -813,9 +804,6 @@ static int mux_div_clk_set_rate(struct clk *c, unsigned long rate)
 	}
 	if (rc)
 		return rc;
-#if defined(CONFIG_HTC_DEBUG_FOOTPRINT)
-	set_acpuclk_footprint_by_clk(c, ACPU_BEFORE_SET_PARENT_RATE);
-#endif
 
 	new_parent_orig_rate = clk_get_rate(new_parent);
 	rc = clk_set_rate(new_parent, new_prate);
@@ -825,26 +813,15 @@ static int mux_div_clk_set_rate(struct clk *c, unsigned long rate)
 		goto err_set_rate;
 	}
 
-#if defined(CONFIG_HTC_DEBUG_FOOTPRINT)
-	set_acpuclk_footprint_by_clk(c, ACPU_BEFORE_CLK_PREPARE);
-#endif
 	rc = __clk_pre_reparent(c, new_parent, &flags);
 	if (rc)
 		goto err_pre_reparent;
 
-#if defined(CONFIG_HTC_DEBUG_FOOTPRINT)
-	set_acpuclk_footprint_by_clk(c, ACPU_BEFORE_SET_RATE);
-#endif
 	/* Set divider and mux src atomically */
 	rc = __set_src_div(md, new_parent, new_div);
 	if (rc)
 		goto err_set_src_div;
 
-#if defined(CONFIG_HTC_DEBUG_FOOTPRINT)
-	set_acpuclk_cpu_freq_footprint_by_clk(FT_CUR_RATE, c, rrate);
-	set_acpuclk_l2_freq_footprint_by_clk(FT_CUR_RATE, c, rrate);
-	set_acpuclk_footprint_by_clk(c, ACPU_BEFORE_CLK_UNPREPARE);
-#endif
 	c->parent = new_parent;
 
 	__clk_post_reparent(c, old_parent, &flags);
@@ -857,33 +834,17 @@ static int mux_div_clk_set_rate(struct clk *c, unsigned long rate)
 	if (old_safe_freq)
 		md->safe_freq = old_safe_freq;
 
-#if defined(CONFIG_HTC_DEBUG_FOOTPRINT)
-	set_acpuclk_footprint_by_clk(c, ACPU_BEFORE_RETURN);
-#endif
-
 	return 0;
 
 err_set_src_div:
-#if defined(CONFIG_HTC_DEBUG_FOOTPRINT)
-	set_acpuclk_footprint_by_clk(c, ACPU_BEFORE_ERR_CLK_UNPREPARE);
-#endif
 	/* Not switching to new_parent, so disable it */
 	__clk_post_reparent(c, new_parent, &flags);
 err_pre_reparent:
-#if defined(CONFIG_HTC_DEBUG_FOOTPRINT)
-	set_acpuclk_footprint_by_clk(c, ACPU_BEFORE_ERR_SET_PARENT_RATE);
-#endif
 	rc = clk_set_rate(new_parent, new_parent_orig_rate);
 	WARN(rc, "%s: error changing new_parent (%s) rate back to %ld\n",
 		clk_name(c), clk_name(new_parent), new_parent_orig_rate);
 err_set_rate:
-#if defined(CONFIG_HTC_DEBUG_FOOTPRINT)
-	set_acpuclk_footprint_by_clk(c, ACPU_BEFORE_ERR_SET_RATE);
-#endif
 	rc = set_src_div(md, old_parent, old_div);
-#if defined(CONFIG_HTC_DEBUG_FOOTPRINT)
-	set_acpuclk_footprint_by_clk(c, ACPU_BEFORE_ERR_RETURN);
-#endif
 	WARN(rc, "%s: error changing back to original div (%d) and parent (%s)\n",
 		clk_name(c), old_div, clk_name(old_parent));
 	if (!rc && md->safe_freq)
@@ -919,8 +880,6 @@ static enum handoff mux_div_clk_handoff(struct clk *c)
 	unsigned int numer;
 
 	parent_rate = clk_get_rate(c->parent);
-	if (!parent_rate)
-		return HANDOFF_DISABLED_CLK;
 	/*
 	 * div values are doubled for half dividers.
 	 * Adjust for that by picking a numer of 2.
@@ -934,10 +893,20 @@ static enum handoff mux_div_clk_handoff(struct clk *c)
 		return HANDOFF_DISABLED_CLK;
 	}
 
-	if (!md->ops->is_enabled)
-		return HANDOFF_DISABLED_CLK;
-	if (md->ops->is_enabled(md))
-		return HANDOFF_ENABLED_CLK;
+	if (md->en_mask && md->ops && md->ops->is_enabled)
+		return md->ops->is_enabled(md)
+			? HANDOFF_ENABLED_CLK
+			: HANDOFF_DISABLED_CLK;
+
+	/*
+	 * If this function returns 'enabled' even when the clock downstream
+	 * of this clock is disabled, then handoff code will unnecessarily
+	 * enable the current parent of this clock. If this function always
+	 * returns 'disabled' and a clock downstream is on, the clock handoff
+	 * code will bump up the ref count for this clock and its current
+	 * parent as necessary. So, clocks without an actual HW gate can
+	 * always return disabled.
+	 */
 	return HANDOFF_DISABLED_CLK;
 }
 
