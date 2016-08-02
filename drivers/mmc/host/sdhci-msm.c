@@ -2,7 +2,7 @@
  * drivers/mmc/host/sdhci-msm.c - Qualcomm MSM SDHCI Platform
  * driver source file
  *
- * Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -43,10 +43,6 @@
 
 #include "sdhci-msm.h"
 #include "sdhci-msm-ice.h"
-#include <linux/proc_fs.h>
-#include <linux/seq_file.h>
-#include <trace/events/mmc.h>
-#include "sdhci-pltfm.h"
 #include "cmdq_hci.h"
 
 enum sdc_mpm_pin_state {
@@ -150,10 +146,12 @@ enum sdc_mpm_pin_state {
 
 #define CORE_DDR_200_CFG		0x184
 #define CORE_CDC_T4_DLY_SEL		(1 << 0)
+#define CORE_CMDIN_RCLK_EN		(1 << 1)
 #define CORE_START_CDC_TRAFFIC		(1 << 6)
 
 #define CORE_VENDOR_SPEC3	0x1B0
 #define CORE_PWRSAVE_DLL	(1 << 3)
+#define CORE_CMDEN_HS400_INPUT_MASK_CNT (1 << 13)
 
 #define CORE_DLL_CONFIG_2	0x1B4
 #define CORE_DDR_CAL_EN		(1 << 0)
@@ -244,51 +242,6 @@ static int disable_slots;
 /* root can write, others read */
 module_param(disable_slots, int, S_IRUGO|S_IWUSR);
 
-#ifdef CONFIG_SMP
-enum sdhci_msm_pm_qos_rw_policy {
-	PM_QOS_READ_WRITE,
-	PM_QOS_READ,
-	PM_QOS_WRITE,
-};
-
-enum sdhci_msm_pm_qos_mngmt_type {
-	PM_QOS_MNGMT_IRQ_TYPE,
-	PM_QOS_MNGMT_THREAD_TYPE,
-};
-
-struct sdhci_msm_pm_qos_config {
-	struct list_head		list;
-	enum pm_qos_req_type		cpu_affinity_type;
-	cpumask_t			cpu_affinity_mask;
-	enum sdhci_msm_pm_qos_rw_policy	rw_policy;
-	unsigned int			cpu_dma_latency_tbl_sz;
-	s32				*cpu_dma_latency_tbl_us;
-};
-
-struct sdhci_msm_pm_qos_mngmt {
-	struct list_head			head;
-	struct sdhci_msm_pm_qos_config		*prev;
-	s32					prev_latency;
-	enum sdhci_msm_pm_qos_mngmt_type	type;
-	struct pm_qos_request			dma_req;
-};
-
-struct sdhci_msm_pm_qos {
-	struct sdhci_msm_pm_qos_mngmt	irq;
-	struct sdhci_msm_pm_qos_mngmt	thread;
-	unsigned int			default_rd_config;
-	unsigned int			default_wr_config;
-	struct sdhci_msm_pm_qos_config *qos_configs;
-	unsigned int			num_qos_configs;
-	unsigned int			pm_qos_timeout_us;
-	struct device_attribute		tout;
-	unsigned int			when_to_vote; 
-};
-#else
-struct sdhci_msm_pm_qos {
-};
-#endif
-
 enum vdd_io_level {
 	/* set vdd_io_data->low_vol_level */
 	VDD_IO_LOW,
@@ -299,97 +252,6 @@ enum vdd_io_level {
 	 * sdhci_msm_set_vdd_io_vol() function.
 	 */
 	VDD_IO_SET_LEVEL,
-};
-
-static char *mmc_type_str(unsigned int slot_type)
-{
-	switch (slot_type) {
-		case MMC_TYPE_MMC:		return "MMC";
-		case MMC_TYPE_SD:		return "SD";
-		case MMC_TYPE_SDIO:		return "SDIO";
-		case MMC_TYPE_SD_COMBO:		return "SD COMBO";
-		case MMC_TYPE_NA:
-		default:			return "Unknown type";
-	}
-}
-
-static int is_mmc_platform(struct sdhci_msm_pltfm_data *pdata)
-{
-	if (pdata && pdata->slot_type == MMC_TYPE_MMC)
-		return 1;
-
-	return 0;
-}
-
-static int is_sd_platform(struct sdhci_msm_pltfm_data *pdata)
-{
-	if (pdata && pdata->slot_type == MMC_TYPE_SD)
-		return 1;
-
-	return 0;
-}
-
-int mmc_is_sd_host(struct mmc_host *mmc)
-{
-	struct sdhci_host *host = mmc_priv(mmc);
-	struct sdhci_pltfm_host *pltfm_host;
-	struct sdhci_msm_host *msm_host;
-
-	pltfm_host = sdhci_priv(host);
-	msm_host = pltfm_host->priv;
-
-	return is_sd_platform(msm_host->pdata);
-}
-
-int mmc_is_mmc_host(struct mmc_host *mmc)
-{
-	struct sdhci_host *host = mmc_priv(mmc);
-	struct sdhci_pltfm_host *pltfm_host;
-	struct sdhci_msm_host *msm_host;
-
-	pltfm_host = sdhci_priv(host);
-	msm_host = pltfm_host->priv;
-
-	return is_mmc_platform(msm_host->pdata);
-}
-
-static int sdhci_read_speed_class(struct seq_file *m, void *v)
-{
-	struct mmc_host *host = (struct mmc_host*) m->private;
-
-	return seq_printf(m, "%d",
-		host->card ? host->card->speed_class : -1);
-}
-
-static int sdhci_proc_speed_class_open(struct inode *inode, struct file *file)
-{
-	return single_open(file, sdhci_read_speed_class, PDE_DATA(file_inode(file)));
-}
-
-static const struct file_operations sdhci_proc_speed_class_fops = {
-	.open	= sdhci_proc_speed_class_open,
-	.read		= seq_read,
-	.llseek	= seq_lseek,
-	.release	= single_release,
-};
-
-static int sdhci_read_tray_status(struct seq_file *m, void *v)
-{
-	struct mmc_host *host = (struct mmc_host*) m->private;
-
-	return seq_printf(m, "%d", mmc_gpio_get_status(host));
-}
-
-static int sdhci_proc_sd_tray_open(struct inode *inode, struct file *file)
-{
-	return single_open(file, sdhci_read_tray_status, PDE_DATA(file_inode(file)));
-}
-
-static const struct file_operations sdhci_proc_sd_tray_fops = {
-	.open	= sdhci_proc_sd_tray_open,
-	.read		= seq_read,
-	.llseek	= seq_lseek,
-	.release	= single_release,
 };
 
 /* MSM platform specific tuning */
@@ -935,6 +797,8 @@ out:
 
 static int sdhci_msm_cm_dll_sdc4_calibration(struct sdhci_host *host)
 {
+	struct sdhci_pltfm_host *pltfm_host = sdhci_priv(host);
+	struct sdhci_msm_host *msm_host = pltfm_host->priv;
 	u32 dll_status, ddr_config;
 	int ret = 0;
 
@@ -947,6 +811,11 @@ static int sdhci_msm_cm_dll_sdc4_calibration(struct sdhci_host *host)
 	ddr_config = DDR_CONFIG_POR_VAL & ~DDR_CONFIG_PRG_RCLK_DLY_MASK;
 	ddr_config |= DDR_CONFIG_PRG_RCLK_DLY;
 	writel_relaxed(ddr_config, host->ioaddr + CORE_DDR_CONFIG);
+
+	if (msm_host->enhanced_strobe && mmc_card_strobe(msm_host->mmc->card))
+		writel_relaxed((readl_relaxed(host->ioaddr + CORE_DDR_200_CFG)
+				| CORE_CMDIN_RCLK_EN),
+				host->ioaddr + CORE_DDR_200_CFG);
 
 	/* Write 1 to DDR_CAL_EN field in CORE_DLL_CONFIG_2 */
 	writel_relaxed((readl_relaxed(host->ioaddr + CORE_DLL_CONFIG_2)
@@ -969,6 +838,42 @@ static int sdhci_msm_cm_dll_sdc4_calibration(struct sdhci_host *host)
 			host->ioaddr + CORE_VENDOR_SPEC3);
 	mb();
 out:
+	pr_debug("%s: Exit %s, ret:%d\n", mmc_hostname(host->mmc),
+			__func__, ret);
+	return ret;
+}
+
+static int sdhci_msm_enhanced_strobe(struct sdhci_host *host)
+{
+	int ret = 0;
+	struct sdhci_pltfm_host *pltfm_host = sdhci_priv(host);
+	struct sdhci_msm_host *msm_host = pltfm_host->priv;
+	struct mmc_host *mmc = host->mmc;
+
+	pr_debug("%s: Enter %s\n", mmc_hostname(host->mmc), __func__);
+
+	if (!msm_host->enhanced_strobe || !mmc_card_strobe(mmc->card)) {
+		pr_debug("%s: host/card does not support hs400 enhanced strobe\n",
+				mmc_hostname(mmc));
+		return -EINVAL;
+	}
+
+	if (msm_host->calibration_done ||
+		!(mmc->ios.timing == MMC_TIMING_MMC_HS400)) {
+		return 0;
+	}
+
+	/*
+	 * Reset the tuning block.
+	 */
+	ret = msm_init_cm_dll(host);
+	if (ret)
+		goto out;
+
+	ret = sdhci_msm_cm_dll_sdc4_calibration(host);
+out:
+	if (!ret)
+		msm_host->calibration_done = true;
 	pr_debug("%s: Exit %s, ret:%d\n", mmc_hostname(host->mmc),
 			__func__, ret);
 	return ret;
@@ -1285,18 +1190,6 @@ free_gpios:
 	return ret;
 }
 
-static int sdhci_msm_setup_hifreq_pinctrl(struct sdhci_msm_pltfm_data *pdata)
-{
-	int ret = 0;
-
-	ret = pinctrl_select_state(pdata->pctrl_data->pctrl,
-		pdata->pctrl_data->pins_active_sdr104);
-
-	pr_info("Set SD SDR104 state return : %d\n", ret);
-
-	return ret;
-}
-
 static int sdhci_msm_setup_pinctrl(struct sdhci_msm_pltfm_data *pdata,
 		bool enable)
 {
@@ -1312,16 +1205,6 @@ static int sdhci_msm_setup_pinctrl(struct sdhci_msm_pltfm_data *pdata,
 	if (ret < 0)
 		pr_err("%s state for pinctrl failed with %d\n",
 			enable ? "Enabling" : "Disabling", ret);
-
-	return ret;
-}
-
-static int sdhci_msm_setup_hifreq_pins(struct sdhci_msm_pltfm_data *pdata)
-{
-	int ret = 0;
-
-	if (pdata->pctrl_data && pdata->pctrl_data->pins_active_sdr104)
-		ret = sdhci_msm_setup_hifreq_pinctrl(pdata);
 
 	return ret;
 }
@@ -1480,14 +1363,6 @@ static int sdhci_msm_parse_pinctrl_info(struct device *dev,
 		dev_err(dev, "Could not get active pinstates, err:%d\n", ret);
 		goto out;
 	}
-	pctrl_data->pins_active_sdr104 = pinctrl_lookup_state(
-			pctrl_data->pctrl, "active_sdr104");
-	if (IS_ERR(pctrl_data->pins_active_sdr104)) {
-		ret = PTR_ERR(pctrl_data->pins_active_sdr104);
-		dev_err(dev, "Could not get active SDR104 pinstates, err:%d\n", ret);
-		pctrl_data->pins_active_sdr104 = NULL;
-	} else
-		dev_info(dev, "Could get active SDR104 pinstates\n");
 	pctrl_data->pins_sleep = pinctrl_lookup_state(
 			pctrl_data->pctrl, "sleep");
 	if (IS_ERR(pctrl_data->pins_sleep)) {
@@ -1772,9 +1647,6 @@ struct sdhci_msm_pltfm_data *sdhci_msm_populate_pdata(struct device *dev,
 	if (gpio_is_valid(pdata->status_gpio) & !(flags & OF_GPIO_ACTIVE_LOW))
 		pdata->caps2 |= MMC_CAP2_CD_ACTIVE_HIGH;
 
-	if (of_property_read_u32(np, "htc,slot-type", &pdata->slot_type))
-		pdata->slot_type = MMC_TYPE_NA;
-
 	of_property_read_u32(np, "qcom,bus-width", &bus_width);
 	if (bus_width == 8)
 		pdata->mmc_bus_width = MMC_CAP_8_BIT_DATA;
@@ -1905,6 +1777,9 @@ struct sdhci_msm_pltfm_data *sdhci_msm_populate_pdata(struct device *dev,
 
 	if (of_property_read_bool(np, "qcom,wakeup-on-idle"))
 		host->mmc->wakeup_on_idle = true;
+
+	if (of_get_property(np, "qcom,core_3_0v_support", NULL))
+		pdata->core_3_0v_support = true;
 
 	return pdata;
 out:
@@ -2302,11 +2177,6 @@ static int sdhci_msm_setup_vreg(struct sdhci_msm_pltfm_data *pdata,
 
 	vreg_table[0] = curr_slot->vdd_data;
 	vreg_table[1] = curr_slot->vdd_io_data;
-
-	if(is_sd_platform(pdata) && enable ^ vreg_table[0]->is_enabled) {
-		pr_info("%s : %s slot power\n", mmc_type_str(pdata->slot_type),
-			enable ? "Enabling" : "Disabling");
-	}
 
 	for (i = 0; i < ARRAY_SIZE(vreg_table); i++) {
 		if (vreg_table[i]) {
@@ -3027,7 +2897,10 @@ static void sdhci_msm_set_clock(struct sdhci_host *host, unsigned int clock)
 		 * Select HS400 mode using the HC_SELECT_IN from VENDOR SPEC
 		 * register
 		 */
-		if (msm_host->tuning_done && !msm_host->calibration_done) {
+		if ((msm_host->tuning_done ||
+				(mmc_card_strobe(msm_host->mmc->card) &&
+				 msm_host->enhanced_strobe)) &&
+				!msm_host->calibration_done) {
 			/*
 			 * Write 0x6 to HC_SELECT_IN and 1 to HC_SELECT_IN_EN
 			 * field in VENDOR_SPEC_FUNC
@@ -3081,9 +2954,6 @@ static void sdhci_msm_set_clock(struct sdhci_host *host, unsigned int clock)
 	mb();
 
 	if (sup_clock != msm_host->clk_rate) {
-		if (is_sd_platform(msm_host->pdata) &&
-			(curr_ios.timing == MMC_TIMING_UHS_SDR104 || curr_ios.timing == MMC_TIMING_UHS_DDR50))
-			sdhci_msm_setup_hifreq_pins(msm_host->pdata);
 		pr_debug("%s: %s: setting clk rate to %u\n",
 				mmc_hostname(host->mmc), __func__, sup_clock);
 		rc = clk_set_rate(msm_host->clk, sup_clock);
@@ -3279,11 +3149,6 @@ void sdhci_msm_dump_vendor_regs(struct sdhci_host *host)
 	}
 }
 
-static int sdhci_msm_get_cd(struct sdhci_host *host)
-{
-       return mmc_gpio_get_status(host->mmc);
-}
-
 void sdhci_msm_reset_workaround(struct sdhci_host *host, u32 enable)
 {
 	u32 vendor_func2;
@@ -3371,8 +3236,41 @@ static void sdhci_msm_notify_pm_status(struct sdhci_host *host,
 		 * We assume that mmc_host layer will remove
 		 * the msm_bus vote once clk gets gated.
 		 */
+	} else if (state == DEV_ERROR) {
+		if (msm_host->msm_bus_vote.client_handle)
+			sdhci_msm_bus_cancel_work_and_set_vote(host, 0);
 	}
 	msm_host->mmc_dev_state = state;
+}
+
+/*
+ * sdhci_msm_enhanced_strobe_mask :-
+ * Before running CMDQ transfers in HS400 Enhanced Strobe mode,
+ * SW should write 3 to
+ * HC_VENDOR_SPECIFIC_FUNC3.CMDEN_HS400_INPUT_MASK_CNT register.
+ * The default reset value of this register is 2.
+ */
+static void sdhci_msm_enhanced_strobe_mask(struct sdhci_host *host, bool set)
+{
+	struct sdhci_pltfm_host *pltfm_host = sdhci_priv(host);
+	struct sdhci_msm_host *msm_host = pltfm_host->priv;
+
+	if (!msm_host->enhanced_strobe ||
+			!mmc_card_strobe(msm_host->mmc->card)) {
+		pr_debug("%s: host/card does not support hs400 enhanced strobe\n",
+				mmc_hostname(host->mmc));
+		return;
+	}
+
+	if (set) {
+		writel_relaxed((readl_relaxed(host->ioaddr + CORE_VENDOR_SPEC3)
+				| CORE_CMDEN_HS400_INPUT_MASK_CNT),
+				host->ioaddr + CORE_VENDOR_SPEC3);
+	} else {
+		writel_relaxed((readl_relaxed(host->ioaddr + CORE_VENDOR_SPEC3)
+				& ~CORE_CMDEN_HS400_INPUT_MASK_CNT),
+				host->ioaddr + CORE_VENDOR_SPEC3);
+	}
 }
 
 static void sdhci_msm_clear_set_dumpregs(struct sdhci_host *host, bool set)
@@ -3419,11 +3317,13 @@ int sdhci_msm_notify_load(struct sdhci_host *host, enum mmc_load state)
 
 static struct sdhci_ops sdhci_msm_ops = {
 	.crypto_engine_cfg = sdhci_msm_ice_cfg,
+	.crypto_cfg_reset = sdhci_msm_ice_cfg_reset,
 	.crypto_engine_reset = sdhci_msm_ice_reset,
 	.platform_reset_enter = sdhci_msm_reset_enter,
 	.set_uhs_signaling = sdhci_msm_set_uhs_signaling,
 	.check_power_status = sdhci_msm_check_power_status,
 	.execute_tuning = sdhci_msm_execute_tuning,
+	.enhanced_strobe = sdhci_msm_enhanced_strobe,
 	.toggle_cdr = sdhci_msm_toggle_cdr,
 	.get_max_segments = sdhci_msm_max_segs,
 	.set_clock = sdhci_msm_set_clock,
@@ -3434,10 +3334,10 @@ static struct sdhci_ops sdhci_msm_ops = {
 	.config_auto_tuning_cmd = sdhci_msm_config_auto_tuning_cmd,
 	.enable_controller_clock = sdhci_msm_enable_controller_clock,
 	.reset_workaround = sdhci_msm_reset_workaround,
-	.get_cd = sdhci_msm_get_cd,
 	.clear_set_dumpregs = sdhci_msm_clear_set_dumpregs,
 	.notify_load = sdhci_msm_notify_load,
 	.notify_pm_status = sdhci_msm_notify_pm_status,
+	.enhanced_strobe_mask = sdhci_msm_enhanced_strobe_mask,
 };
 
 static int sdhci_msm_cfg_mpm_pin_wakeup(struct sdhci_host *host, unsigned mode)
@@ -3526,12 +3426,23 @@ static void sdhci_set_default_hw_caps(struct sdhci_msm_host *msm_host,
 	if ((major == 1) && (minor < 0x34))
 		msm_host->use_cdclp533 = true;
 
+	/* Fake 3.0V support for SDIO devices which requires such voltage */
+	if (msm_host->pdata->core_3_0v_support) {
+		caps |= CORE_3_0V_SUPPORT;
+		writel_relaxed(
+			(readl_relaxed(host->ioaddr + SDHCI_CAPABILITIES) |
+			caps), host->ioaddr + CORE_VENDOR_SPEC_CAPABILITIES0);
+	}
+
 	/*
 	 * SDCC 5 controller with major version 1, minor version 0x42 and later
 	 * will require additional steps when resetting DLL.
+	 * It also supports HS400 enhanced strobe mode.
 	 */
-	if ((major == 1) && (minor >= 0x42))
+	if ((major == 1) && (minor >= 0x42)) {
 		msm_host->use_updated_dll_reset = true;
+		msm_host->enhanced_strobe = true;
+	}
 
 	/*
 	 * Mask 64-bit support for controller with 32-bit address bus so that
@@ -3900,14 +3811,12 @@ static int sdhci_msm_probe(struct platform_device *pdev)
 	msm_host->mmc->caps2 |= (MMC_CAP2_BOOTPART_NOACC |
 				MMC_CAP2_DETECT_ON_ERR);
 	msm_host->mmc->caps2 |= MMC_CAP2_CACHE_CTRL;
-	msm_host->mmc->caps2 |= MMC_CAP2_POWEROFF_NOTIFY;
 	msm_host->mmc->caps2 |= MMC_CAP2_CLK_SCALE;
 	msm_host->mmc->caps2 |= MMC_CAP2_STOP_REQUEST;
 	msm_host->mmc->caps2 |= MMC_CAP2_ASYNC_SDIO_IRQ_4BIT_MODE;
 	msm_host->mmc->pm_caps |= MMC_PM_KEEP_POWER | MMC_PM_WAKE_SDIO_IRQ;
 	msm_host->mmc->caps2 |= MMC_CAP2_CORE_PM;
 	msm_host->mmc->caps2 |= MMC_CAP2_SANITIZE;
-	msm_host->mmc->caps2 |= MMC_CAP2_INIT_BKOPS;
 
 	if (msm_host->pdata->nonremovable)
 		msm_host->mmc->caps |= MMC_CAP_NONREMOVABLE;
@@ -3971,7 +3880,7 @@ static int sdhci_msm_probe(struct platform_device *pdev)
 		msm_host->is_sdiowakeup_enabled = true;
 		ret = request_irq(msm_host->pdata->sdiowakeup_irq,
 				  sdhci_msm_sdiowakeup_irq,
-				  IRQF_SHARED | IRQF_TRIGGER_LOW,
+				  IRQF_SHARED | IRQF_TRIGGER_HIGH,
 				  "sdhci-msm sdiowakeup", host);
 		if (ret) {
 			dev_err(&pdev->dev, "%s: request sdiowakeup IRQ %d: failed: %d\n",
@@ -4043,18 +3952,6 @@ static int sdhci_msm_probe(struct platform_device *pdev)
 	}
 
 	device_enable_async_suspend(&pdev->dev);
-	if (is_sd_platform(msm_host->pdata)) {
-		msm_host->speed_class = proc_create_data("sd_speed_class", 0444, NULL,
-									&sdhci_proc_speed_class_fops, host->mmc);
-		if (!msm_host->speed_class)
-			pr_err("%s: Failed to create sd_speed_class entry\n",
-				mmc_hostname(host->mmc));
-		msm_host->sd_tray_state = proc_create_data("sd_tray_state", 0444, NULL,
-									&sdhci_proc_sd_tray_fops, host->mmc);
-		if (!msm_host->sd_tray_state)
-			pr_warning("%s: Failed to create sd_tray_state entry\n",
-				mmc_hostname(host->mmc));
-	}
 	/* Successful initialization */
 	goto out;
 
@@ -4133,10 +4030,6 @@ static int sdhci_msm_remove(struct platform_device *pdev)
 		sdhci_msm_bus_cancel_work_and_set_vote(host, 0);
 		sdhci_msm_bus_unregister(msm_host);
 	}
-	if (msm_host->speed_class)
-		remove_proc_entry("sd_speed_class", NULL);
-	if (msm_host->sd_tray_state)
-		remove_proc_entry("sd_tray_state", NULL);
 	return 0;
 }
 

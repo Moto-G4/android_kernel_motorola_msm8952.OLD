@@ -42,7 +42,6 @@ static void drop_slab(void)
 	int nr_objects;
 	struct shrink_control shrink = {
 		.gfp_mask = GFP_KERNEL,
-		.order = -1,
 	};
 
 	do {

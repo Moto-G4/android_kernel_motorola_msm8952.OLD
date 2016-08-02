@@ -33,23 +33,24 @@ static void *ion_page_pool_alloc_pages(struct ion_page_pool *pool)
 
 	if (!page)
 		return NULL;
+	mod_zone_page_state(page_zone(page), NR_ION_PAGES, 1 << pool->order);
 
 	if (pool->gfp_mask & __GFP_ZERO)
 		if (msm_ion_heap_high_order_page_zero(page, pool->order))
 			goto error_free_pages;
 
-	ion_alloc_inc_usage(ION_TOTAL, 1 << pool->order);
 	return page;
 error_free_pages:
 	__free_pages(page, pool->order);
+	mod_zone_page_state(page_zone(page), NR_ION_PAGES, -(1 << pool->order));
 	return NULL;
 }
 
 static void ion_page_pool_free_pages(struct ion_page_pool *pool,
 				     struct page *page)
 {
-	ion_alloc_dec_usage(ION_TOTAL, 1 << pool->order);
 	__free_pages(page, pool->order);
+	mod_zone_page_state(page_zone(page), NR_ION_PAGES, -(1 << pool->order));
 }
 
 static int ion_page_pool_add(struct ion_page_pool *pool, struct page *page)
@@ -62,6 +63,8 @@ static int ion_page_pool_add(struct ion_page_pool *pool, struct page *page)
 		list_add_tail(&page->lru, &pool->low_items);
 		pool->low_count++;
 	}
+	mod_zone_page_state(page_zone(page), NR_ION_POOL_PAGES,
+			1 << pool->order);
 	mutex_unlock(&pool->mutex);
 	return 0;
 }
@@ -81,6 +84,8 @@ static struct page *ion_page_pool_remove(struct ion_page_pool *pool, bool high)
 	}
 
 	list_del(&page->lru);
+	mod_zone_page_state(page_zone(page), NR_ION_POOL_PAGES,
+			-(1 << pool->order));
 	return page;
 }
 

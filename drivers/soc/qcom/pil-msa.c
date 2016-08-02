@@ -73,6 +73,9 @@
 #define MSS_RESTART_ID			0xA
 
 #define MSS_MAGIC			0XAABADEAD
+enum scm_cmd {
+	PAS_MEM_SETUP_CMD = 2,
+};
 
 static int pbl_mba_boot_timeout_ms = 1000;
 module_param(pbl_mba_boot_timeout_ms, int, S_IRUGO | S_IWUSR);
@@ -373,6 +376,44 @@ void pil_mss_remove_proxy_votes(struct pil_desc *pil)
 	regulator_set_voltage(drv->vreg_mx, 0, INT_MAX);
 }
 
+static int pil_mss_mem_setup(struct pil_desc *pil,
+					phys_addr_t addr, size_t size)
+{
+	struct modem_data *md = dev_get_drvdata(pil->dev);
+
+	struct pas_init_image_req {
+		u32	proc;
+		u32	start_addr;
+		u32	len;
+	} request;
+	u32 scm_ret = 0;
+	int ret;
+	struct scm_desc desc = {0};
+
+	if (!md->subsys_desc.pil_mss_memsetup)
+		return 0;
+
+	request.proc = md->pas_id;
+	request.start_addr = addr;
+	request.len = size;
+
+	if (!is_scm_armv8()) {
+		ret = scm_call(SCM_SVC_PIL, PAS_MEM_SETUP_CMD, &request,
+				sizeof(request), &scm_ret, sizeof(scm_ret));
+	} else {
+		desc.args[0] = md->pas_id;
+		desc.args[1] = addr;
+		desc.args[2] = size;
+		desc.arginfo = SCM_ARGS(3);
+		ret = scm_call2(SCM_SIP_FNID(SCM_SVC_PIL, PAS_MEM_SETUP_CMD),
+				&desc);
+		scm_ret = desc.ret[0];
+	}
+	if (ret)
+		return ret;
+	return scm_ret;
+}
+
 static int pil_mss_reset(struct pil_desc *pil)
 {
 	struct q6v5_data *drv = container_of(pil, struct q6v5_data, desc);
@@ -464,9 +505,7 @@ int pil_mss_reset_load_mba(struct pil_desc *pil)
 	const struct firmware *fw, *dp_fw;
 	char fw_name_legacy[10] = "mba.b00";
 	char fw_name[10] = "mba.mbn";
-#if 0 
 	char *dp_name = "msadp";
-#endif 
 	char *fw_name_p;
 	void *mba_virt;
 	dma_addr_t mba_phys, mba_phys_end;
@@ -490,9 +529,8 @@ int pil_mss_reset_load_mba(struct pil_desc *pil)
 	mba_virt = dma_alloc_attrs(&md->mba_mem_dev, drv->mba_size,
 			&mba_phys, GFP_KERNEL, &md->attrs_dma);
 	if (!mba_virt) {
-		dev_err(pil->dev, "%s: MBA metadata buffer allocation failed\n", __func__);
+		dev_err(pil->dev, "MBA metadata buffer allocation failed\n");
 		ret = -ENOMEM;
-		BUG_ON(1);
 		goto err_dma_alloc;
 	}
 
@@ -513,9 +551,6 @@ int pil_mss_reset_load_mba(struct pil_desc *pil)
 	memcpy(mba_virt, data, count);
 	wmb();
 
-#if 1 
-        drv->dp_virt = NULL;
-#else
 	/* Load modem debug policy */
 	ret = request_firmware(&dp_fw, dp_name, pil->dev);
 	if (ret) {
@@ -546,7 +581,6 @@ int pil_mss_reset_load_mba(struct pil_desc *pil)
 		/* Ensure memcpy is done before powering up modem */
 		wmb();
 	}
-#endif 
 
 	ret = pil_mss_reset(pil);
 	if (ret) {
@@ -564,13 +598,9 @@ err_mss_reset:
 	if (drv->dp_virt)
 		dma_free_attrs(&md->mba_mem_dev,  dp_fw->size, drv->dp_virt,
 				drv->dp_phys, &md->attrs_dma);
-
-#if 0 
 err_invalid_fw:
 	if (dp_fw)
 		release_firmware(dp_fw);
-#endif 
-
 err_mba_data:
 	dma_free_attrs(&md->mba_mem_dev, drv->mba_size, drv->mba_virt,
 				drv->mba_phys, &md->attrs_dma);
@@ -598,9 +628,8 @@ static int pil_msa_auth_modem_mdt(struct pil_desc *pil, const u8 *metadata,
 	mdata_virt = dma_alloc_attrs(&drv->mba_mem_dev, size, &mdata_phys,
 					GFP_KERNEL, &attrs);
 	if (!mdata_virt) {
-		dev_err(pil->dev, "%s: MBA metadata buffer allocation failed\n", __func__);
+		dev_err(pil->dev, "MBA metadata buffer allocation failed\n");
 		ret = -ENOMEM;
-		BUG_ON(1);
 		goto fail;
 	}
 	memcpy(mdata_virt, metadata, size);
@@ -748,6 +777,7 @@ struct pil_reset_ops pil_msa_mss_ops_selfauth = {
 	.init_image = pil_msa_mss_reset_mba_load_auth_mdt,
 	.proxy_vote = pil_mss_make_proxy_votes,
 	.proxy_unvote = pil_mss_remove_proxy_votes,
+	.mem_setup = pil_mss_mem_setup,
 	.verify_blob = pil_msa_mba_verify_blob,
 	.auth_and_reset = pil_msa_mba_auth,
 	.deinit_image = pil_mss_deinit_image,

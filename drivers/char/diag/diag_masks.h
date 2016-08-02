@@ -15,11 +15,6 @@
 
 #include "diagfwd.h"
 
-#define DQ_FILTER_MASK      0x1
-#define UNUSED_FILTER_MASK  0x2
-#define WCNSS_FILTER_MASK   0x4
-
-
 struct diag_log_mask_t {
 	uint8_t equip_id;
 	uint32_t num_items;
@@ -36,7 +31,9 @@ struct diag_ssid_range_t {
 struct diag_msg_mask_t {
 	uint32_t ssid_first;
 	uint32_t ssid_last;
+	uint32_t ssid_last_tools;
 	uint32_t range;
+	uint32_t range_tools;
 	struct mutex lock;
 	uint32_t *ptr;
 };

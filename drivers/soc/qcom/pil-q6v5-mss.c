@@ -27,9 +27,6 @@
 #include <linux/dma-mapping.h>
 #include <linux/of_gpio.h>
 #include <linux/clk/msm-clk.h>
-#if defined(CONFIG_HTC_FEATURES_SSR)
-#include <linux/htc_flags.h>
-#endif
 #include <soc/qcom/subsystem_restart.h>
 #include <soc/qcom/ramdump.h>
 #include <soc/qcom/smem.h>
@@ -38,29 +35,8 @@
 #include "peripheral-loader.h"
 #include "pil-q6v5.h"
 #include "pil-msa.h"
-
-#if defined(CONFIG_HTC_DEBUG_SSR)
-#include <linux/rtc.h>
-extern struct timezone sys_tz;
-static void PIL_Show_Time(void)
-{
-	struct timespec ts_rtc;
-	struct rtc_time tm;
-
-	
-	getnstimeofday(&ts_rtc);
-	rtc_time_to_tm(ts_rtc.tv_sec - (sys_tz.tz_minuteswest * 60), &tm);
-
-	pr_err("%s[%d]: %d-%02d-%02d %02d:%02d:%02d\n", __func__, __LINE__,
-        tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
-}
-#endif
-
-#ifdef CONFIG_HTC_DEBUG_RIL_PCN0005_HTC_DUMP_SMSM_LOG
-extern void msm_smd_dumplog(void);
-extern void msm_smsm_dumplog(void);
-extern void msm_smd_xprt_dumplog(void);
-#endif
+#include "mmi-unit-info.h"
+#include <soc/qcom/bootinfo.h>
 
 #define MAX_VDD_MSS_UV		1150000
 #define PROXY_TIMEOUT_MS	10000
@@ -69,68 +45,16 @@ extern void msm_smd_xprt_dumplog(void);
 
 #define subsys_to_drv(d) container_of(d, struct modem_data, subsys_desc)
 
-#ifdef CONFIG_HTC_DEBUG_RIL_PCN0010_HTC_DUMP_IPCROUTER_LOG
-extern void print_ipc_router_local_ports(void);
-extern void print_ipc_router_modem_log(void);
-struct workqueue_struct *dump_ipc_router_log_wq;
-static void dump_ipc_router_log_process(struct work_struct *work);
-static DECLARE_WORK(dump_ipc_router_log_work, dump_ipc_router_log_process);
+static char pil_ssr_reason[MAX_SSR_REASON_LEN];
+static char *ssr_reason = pil_ssr_reason;
+module_param(ssr_reason, charp, S_IRUGO);
 
-static void dump_ipc_router_log_process(struct work_struct *work)
-{
-	
-	
-	print_ipc_router_modem_log();
-}
-#endif
-
-#if defined(CONFIG_HTC_FEATURES_SSR)
-static int htc_skip_ramdump=false;
-static void htc_set_ramdump_mode (struct subsys_device *dev)
-{
-#if defined(CONFIG_HTC_FEATURES_SSR_MODEM_ENABLE)
-	if (get_kernel_flag() & (KERNEL_FLAG_ENABLE_SSR_MODEM)) {
-		pr_info("%s: CONFIG_HTC_FEATURES_SSR_MODEM_ENABLE, KERNEL_FLAG_ENABLE_SSR_MODEM, RESET_SOC.\n", __func__);
-		subsys_set_restart_level(dev, RESET_SOC);
-		subsys_set_enable_ramdump(dev, DISABLE_RAMDUMP);
-	} else {
-		pr_info("%s: CONFIG_HTC_FEATURES_SSR_MODEM_ENABLE, RESET_SUBSYS_COUPLED.\n", __func__);
-		subsys_set_restart_level(dev, RESET_SUBSYS_COUPLED);
-		if (get_radio_flag() & BIT(3))
-			subsys_set_enable_ramdump(dev, ENABLE_RAMDUMP);
-		else
-			subsys_set_enable_ramdump(dev, DISABLE_RAMDUMP);
-	}
-#else
-	if (get_kernel_flag() & (KERNEL_FLAG_ENABLE_SSR_MODEM)) {
-		pr_info("%s: KERNEL_FLAG_ENABLE_SSR_MODEM, RESET_SUBSYS_COUPLED.\n", __func__);
-		subsys_set_restart_level(dev, RESET_SUBSYS_COUPLED);
-		if (get_radio_flag() & BIT(3))
-			subsys_set_enable_ramdump(dev, ENABLE_RAMDUMP);
-		else
-			subsys_set_enable_ramdump(dev, DISABLE_RAMDUMP);
-	} else {
-		pr_info("%s: RESET_SOC.\n", __func__);
-		subsys_set_restart_level(dev, RESET_SOC);
-		subsys_set_enable_ramdump(dev, DISABLE_RAMDUMP);
-	}
-#endif
-	pr_info("%s: htc_get_bootmode()=%s, RESET_SOC.\n", __func__, htc_get_bootmode());
-	if(!strcmp(htc_get_bootmode(),"ftm")) {
-		subsys_set_restart_level(dev, RESET_SOC);
-		subsys_set_enable_ramdump(dev, DISABLE_RAMDUMP);
-	}
-}
-#endif
-
-#if defined(CONFIG_HTC_DEBUG_SSR)
-static void log_modem_sfr(struct subsys_device *dev)
-#else
 static void log_modem_sfr(void)
-#endif
 {
 	u32 size;
-	char *smem_reason, reason[MAX_SSR_REASON_LEN];
+	char *smem_reason;
+
+	mmi_set_pureason(PU_REASON_MODEM_RESET);
 
 	smem_reason = smem_get_entry_no_rlock(SMEM_SSR_REASON_MSS0, &size, 0,
 							SMEM_ANY_HOST_FLAG);
@@ -143,37 +67,8 @@ static void log_modem_sfr(void)
 		return;
 	}
 
-	strlcpy(reason, smem_reason, min(size, MAX_SSR_REASON_LEN));
-
-	pr_err("modem subsystem failure reason: %s.\n", reason);
-
-#if defined(CONFIG_HTC_DEBUG_SSR)
-
-       
-	PIL_Show_Time();
-       
-	   
-#if defined(CONFIG_HTC_FEATURES_SSR) 	
-       if (get_radio_flag() & BIT(3)) 
-       {
-         if (strstr(reason, "[htc_disable_ssr]"))
-         {
-           subsys_set_restart_level(dev, RESET_SOC);
-           subsys_set_enable_ramdump(dev, DISABLE_RAMDUMP);
-           pr_info("%s: [pil] Modem request full dump.\n", __func__);
-         }
-         else if (strstr(reason, "[htc_skip_ramdump]"))
-         {
-           htc_skip_ramdump=true;
-           subsys_set_restart_level(dev, RESET_SUBSYS_COUPLED);
-           subsys_set_enable_ramdump(dev, DISABLE_RAMDUMP);
-           pr_info("%s: [pil] Modem request skip ramdump.\n", __func__);
-         }
-	}
-#endif 
-
-	subsys_set_restart_reason(dev, reason);
-#endif
+	strlcpy(pil_ssr_reason, smem_reason, min((size_t)size, sizeof(pil_ssr_reason)));
+	pr_err("modem subsystem failure reason: %s.\n", pil_ssr_reason);
 
 	smem_reason[0] = '\0';
 	wmb();
@@ -181,11 +76,7 @@ static void log_modem_sfr(void)
 
 static void restart_modem(struct modem_data *drv)
 {
-#if defined(CONFIG_HTC_DEBUG_SSR)
-	log_modem_sfr(drv->subsys);
-#else
 	log_modem_sfr();
-#endif
 	subsystem_restart_dev(drv->subsys);
 }
 
@@ -196,16 +87,6 @@ static irqreturn_t modem_err_fatal_intr_handler(int irq, void *dev_id)
 	/* Ignore if we're the one that set the force stop GPIO */
 	if (drv->crash_shutdown || subsys_get_crash_status(drv->subsys))
 		return IRQ_HANDLED;
-
-#ifdef CONFIG_HTC_DEBUG_RIL_PCN0005_HTC_DUMP_SMSM_LOG
-	msm_smd_dumplog();
-	msm_smd_xprt_dumplog();
-	msm_smsm_dumplog();
-#endif
-
-#ifdef CONFIG_HTC_DEBUG_RIL_PCN0010_HTC_DUMP_IPCROUTER_LOG
-	queue_work(dump_ipc_router_log_wq, &dump_ipc_router_log_work);
-#endif
 
 	pr_err("Fatal error on the modem.\n");
 	subsys_set_crash_status(drv->subsys, true);
@@ -265,16 +146,6 @@ static int modem_powerup(const struct subsys_desc *subsys)
 	INIT_COMPLETION(drv->stop_ack);
 	drv->subsys_desc.ramdump_disable = 0;
 	drv->q6->desc.fw_name = subsys->fw_name;
-
-#if defined(CONFIG_HTC_FEATURES_SSR) 
-        if (htc_skip_ramdump==true)
-        {
-          htc_skip_ramdump=false;
-          htc_set_ramdump_mode(drv->subsys);		  
-          pr_info("%s: [pil] restore htc ramdump mode!!\n",__func__);
-        }
-#endif 
-
 	return pil_boot(&drv->q6->desc);
 }
 
@@ -287,13 +158,6 @@ static void modem_crash_shutdown(const struct subsys_desc *subsys)
 		gpio_set_value(subsys->force_stop_gpio, 1);
 		mdelay(STOP_ACK_TIMEOUT_MS);
 	}
-}
-
-static void modem_free_memory(const struct subsys_desc *subsys)
-{
-	struct modem_data *drv = subsys_to_drv(subsys);
-
-	pil_free_memory(&drv->q6->desc);
 }
 
 static int modem_ramdump(int enable, const struct subsys_desc *subsys)
@@ -332,9 +196,6 @@ static irqreturn_t modem_wdog_bite_intr_handler(int irq, void *dev_id)
 		return IRQ_HANDLED;
 
 	pr_err("Watchdog bite received from modem software!\n");
-#if defined(CONFIG_HTC_DEBUG_SSR)
-	subsys_set_restart_reason(drv->subsys, "Watchdog bite received from modem software!");
-#endif
 	if (drv->subsys_desc.system_debug &&
 			!gpio_get_value(drv->subsys_desc.err_fatal_gpio))
 		panic("%s: System ramdump requested. Triggering device restart!\n",
@@ -355,7 +216,6 @@ static int pil_subsys_init(struct modem_data *drv,
 	drv->subsys_desc.shutdown = modem_shutdown;
 	drv->subsys_desc.powerup = modem_powerup;
 	drv->subsys_desc.ramdump = modem_ramdump;
-	drv->subsys_desc.free_memory = modem_free_memory;
 	drv->subsys_desc.crash_shutdown = modem_crash_shutdown;
 	drv->subsys_desc.err_fatal_handler = modem_err_fatal_intr_handler;
 	drv->subsys_desc.stop_ack_handler = modem_stop_ack_intr_handler;
@@ -366,10 +226,6 @@ static int pil_subsys_init(struct modem_data *drv,
 		ret = PTR_ERR(drv->subsys);
 		goto err_subsys;
 	}
-
-#if defined(CONFIG_HTC_FEATURES_SSR)
-        htc_set_ramdump_mode(drv->subsys);
-#endif
 
 	drv->ramdump_dev = create_ramdump_device("modem", &pdev->dev);
 	if (!drv->ramdump_dev) {
@@ -478,6 +334,14 @@ static int pil_mss_loadable_init(struct modem_data *drv,
 	if (IS_ERR(q6->rom_clk))
 		return PTR_ERR(q6->rom_clk);
 
+	ret = of_property_read_u32(pdev->dev.of_node,
+					"qcom,pas-id", &drv->pas_id);
+	if (ret)
+		dev_warn(&pdev->dev, "Failed to find the pas_id.\n");
+
+	drv->subsys_desc.pil_mss_memsetup =
+	of_property_read_bool(pdev->dev.of_node, "qcom,pil-mss-memsetup");
+
 	/* Optional. */
 	if (of_property_match_string(pdev->dev.of_node,
 			"qcom,active-clock-names", "gpll0_mss_clk") >= 0)
@@ -507,12 +371,6 @@ static int pil_mss_driver_probe(struct platform_device *pdev)
 		if (ret)
 			return ret;
 	}
-
-#ifdef CONFIG_HTC_DEBUG_RIL_PCN0010_HTC_DUMP_IPCROUTER_LOG
-	
-	dump_ipc_router_log_wq = create_singlethread_workqueue("dump_ipc_router_log_work");
-#endif
-
 	init_completion(&drv->stop_ack);
 
 	return pil_subsys_init(drv, pdev);
@@ -525,9 +383,6 @@ static int pil_mss_driver_exit(struct platform_device *pdev)
 	subsys_unregister(drv->subsys);
 	destroy_ramdump_device(drv->ramdump_dev);
 	pil_desc_release(&drv->q6->desc);
-#ifdef CONFIG_HTC_DEBUG_RIL_PCN0010_HTC_DUMP_IPCROUTER_LOG
-	destroy_workqueue(dump_ipc_router_log_wq);
-#endif
 	return 0;
 }
 

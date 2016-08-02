@@ -437,8 +437,6 @@ struct mdss_pp_res_type {
 	struct pp_sts_type pp_disp_sts[MDSS_MAX_MIXER_DISP_NUM];
 	/* physical info */
 	struct pp_hist_col_info *dspp_hist;
-	struct mdp_pcc_cfg_data raw_pcc_disp_cfg[MDSS_BLOCK_DISP_NUM];
-	struct mdp_pcc_cfg_data user_pcc_disp_cfg[MDSS_BLOCK_DISP_NUM];
 };
 
 static DEFINE_MUTEX(mdss_pp_mutex);
@@ -548,6 +546,7 @@ static int pp_ad_calc_bl(struct msm_fb_data_type *mfd, int bl_in, int *bl_out,
 		bool *bl_out_notify);
 static int pp_ad_work_setup(struct msm_fb_data_type *mfd);
 static int pp_ad_shutdown_cleanup(struct msm_fb_data_type *mfd);
+static bool pp_ad_is_valid_display(struct msm_fb_data_type *mfd);
 static int pp_num_to_side(struct mdss_mdp_ctl *ctl, u32 num);
 static inline bool pp_sts_is_enabled(u32 sts, int side);
 static inline void pp_sts_set_split_bits(u32 *sts, u32 bits);
@@ -2069,10 +2068,7 @@ int mdss_mdp_pp_setup_locked(struct mdss_mdp_ctl *ctl)
 		if (mixer_id[i] >= mdata->nad_cfgs)
 			valid_mixers = false;
 	}
-	valid_ad_panel = (ctl->mfd->panel_info->type != DTV_PANEL) &&
-		(((mdata->mdp_rev < MDSS_MDP_HW_REV_103) &&
-			(ctl->mfd->panel_info->type == WRITEBACK_PANEL)) ||
-		(ctl->mfd->panel_info->type != WRITEBACK_PANEL));
+	valid_ad_panel = pp_ad_is_valid_display(ctl->mfd);
 
 	if (valid_mixers && (mixer_cnt <= mdata->nmax_concurrent_ad_hw) &&
 		valid_ad_panel) {
@@ -2149,6 +2145,11 @@ int mdss_mdp_pp_resume(struct mdss_mdp_ctl *ctl, u32 dspp_num)
 		pr_err("invalid input: ctl = 0x%p, mdata = 0x%p, mfd = 0x%p\n",
 			ctl, (!ctl) ? NULL : ctl->mdata,
 			(!ctl) ? NULL : ctl->mfd);
+		return -EPERM;
+	}
+
+	if (!pp_ad_is_valid_display(ctl->mfd)) {
+		pr_info("skipping postproc for wb or hdmi panel\n");
 		return -EPERM;
 	}
 
@@ -2356,7 +2357,7 @@ int mdss_mdp_pp_overlay_init(struct msm_fb_data_type *mfd)
 		return -EPERM;
 	}
 
-	if (mdata->nad_cfgs) {
+	if ((mdata->nad_cfgs) && pp_ad_is_valid_display(mfd)) {
 		mfd->mdp.ad_calc_bl = pp_ad_calc_bl;
 		mfd->mdp.ad_work_setup = pp_ad_work_setup;
 		mfd->mdp.ad_shutdown_cleanup = pp_ad_shutdown_cleanup;
@@ -2385,16 +2386,16 @@ static int pp_ad_calc_bl(struct msm_fb_data_type *mfd, int bl_in, int *bl_out,
 	mutex_lock(&ad->lock);
 	if (!mfd->ad_bl_level)
 		mfd->ad_bl_level = bl_in;
-	if (!(ad->state & PP_AD_STATE_RUN)) {
-		pr_debug("AD is not running.\n");
+	/* return if AD is not running or turned OFF */
+	if (!(ad->state & PP_AD_STATE_RUN) || !(ad->bl_mfd)) {
+		pr_debug("AD is not running/turned off.\n");
 		mutex_unlock(&ad->lock);
 		return -EPERM;
 	}
 
-	if (!ad->bl_mfd || !ad->bl_mfd->panel_info) {
-		pr_err("Invalid ad info: bl_mfd = 0x%p, ad->bl_mfd->panel_info = 0x%p\n",
-			ad->bl_mfd,
-			(!ad->bl_mfd) ? NULL : ad->bl_mfd->panel_info);
+	if (!ad->bl_mfd->panel_info) {
+		pr_err("Invalid ad panel info: ad->bl_mfd->panel_info = 0x%p\n",
+			ad->bl_mfd->panel_info);
 		mutex_unlock(&ad->lock);
 		return -EINVAL;
 	}
@@ -2508,6 +2509,27 @@ static int pp_ad_shutdown_cleanup(struct msm_fb_data_type *mfd)
 	}
 
 	return 0;
+}
+
+static bool pp_ad_is_valid_display(struct msm_fb_data_type *mfd)
+{
+	struct mdss_panel_info *pinfo = mfd->panel_info;
+	struct mdss_data_type *mdata = mdss_mdp_get_mdata();
+
+	if ((!pinfo) || (!mdata))
+		return false;
+
+	if ((mdata->mdp_rev < MDSS_MDP_HW_REV_103) &&
+			(pinfo->type == WRITEBACK_PANEL))
+		return true;
+
+	if (pinfo->is_dba_panel)
+		return false;
+
+	if (!pinfo->is_pluggable && (pinfo->type != WRITEBACK_PANEL))
+		return true;
+
+	return false;
 }
 
 static int pp_get_dspp_num(u32 disp_num, u32 *dspp_num)
@@ -2974,101 +2996,6 @@ static void pp_update_pcc_regs(char __iomem *addr,
 	writel_relaxed(cfg_ptr->b.rgb_1, addr + 8);
 }
 
-static u32 pcc_rescale(u32 raw, u32 user)
-{
-	int val = 0;
-
-	if (raw > 32768)
-		raw = 32768;
-	if (user > 32768)
-		user = 32768;
-	val = 32768 - ((32768 - raw) + (32768 - user));
-	return val < 100 ? 100 : val;
-}
-
-static void pcc_combine(struct mdp_pcc_cfg_data *raw,
-		struct mdp_pcc_cfg_data *user,
-		struct mdp_pcc_cfg_data *real)
-{
-	uint32_t r_ops, u_ops, r_en, u_en;
-
-	if (real == NULL) {
-		real = kzalloc(sizeof(struct mdp_pcc_cfg_data), GFP_KERNEL);
-		if (!real) {
-			pr_err("%s: alloc failed!", __func__);
-			return;
-		}
-	}
-
-	r_ops = raw ? raw->ops : MDP_PP_OPS_DISABLE;
-	u_ops = user ? user->ops : MDP_PP_OPS_DISABLE;
-	r_en = raw && !(raw->ops & MDP_PP_OPS_DISABLE);
-	u_en = user && !(user->ops & MDP_PP_OPS_DISABLE);
-
-	// user configuration may change often, but the raw configuration
-	// will correspond to calibration data which should only change if
-	// there is a mode switch. we only care about the base
-	// coefficients from the user config.
-
-	if (!r_en || (raw->r.r == 0 && raw->g.g == 0 && raw->b.b == 0))
-		raw->r.r = raw->g.g = raw->b.b = 32768;
-	if (!u_en || (user->r.r == 0 && user->g.g == 0 && user->b.b ==0))
-		user->r.r = user->g.g = user->b.b = 32768;
-
-	memcpy(real, raw, sizeof(struct mdp_pcc_cfg_data));
-	real->r.r = pcc_rescale(raw->r.r, user->r.r);
-	real->g.g = pcc_rescale(raw->g.g, user->g.g);
-	real->b.b = pcc_rescale(raw->b.b, user->b.b);
-	if (r_en && u_en)
-		real->ops = r_ops | u_ops;
-	else if (r_en)
-		real->ops = r_ops;
-	else if (u_en)
-		real->ops = u_ops;
-	else
-		real->ops = MDP_PP_OPS_DISABLE;
-
-	pr_debug("%s: raw:\n", __func__);
-	pp_print_pcc_cfg_data(raw, 0);
-	pr_debug("%s: user:\n", __func__);
-	pp_print_pcc_cfg_data(user, 0);
-	pr_debug("%s: real:\n", __func__);
-	pp_print_pcc_cfg_data(real, 0);
-}
-
-int mdss_mdp_user_pcc_config(struct mdp_pcc_cfg_data *config)
-{
-	int ret = 0;
-	u32 disp_num = 0;
-
-	if ((config->block < MDP_LOGICAL_BLOCK_DISP_0) ||
-		(config->block >= MDP_BLOCK_MAX))
-		return -EINVAL;
-
-	if ((config->ops & MDSS_PP_SPLIT_MASK) == MDSS_PP_SPLIT_MASK) {
-		pr_warn("Can't set both split bits\n");
-		return -EINVAL;
-	}
-
-	if (config->ops & MDP_PP_OPS_READ) {
-		pr_warn("Only write is supported for user PCC\n");
-		return -EINVAL;
-	}
-
-	mutex_lock(&mdss_pp_mutex);
-	disp_num = config->block - MDP_LOGICAL_BLOCK_DISP_0;
-
-	mdss_pp_res->user_pcc_disp_cfg[disp_num] = *config;
-	pcc_combine(&mdss_pp_res->raw_pcc_disp_cfg[disp_num],
-				&mdss_pp_res->user_pcc_disp_cfg[disp_num],
-				&mdss_pp_res->pcc_disp_cfg[disp_num]);
-	mdss_pp_res->pp_disp_flags[disp_num] |= PP_FLAGS_DIRTY_PCC;
-
-	mutex_unlock(&mdss_pp_mutex);
-	return ret;
-}
-
-
 int mdss_mdp_pcc_config(struct mdp_pcc_cfg_data *config,
 					u32 *copyback)
 {
@@ -3104,10 +3031,7 @@ int mdss_mdp_pcc_config(struct mdp_pcc_cfg_data *config,
 		*copyback = 1;
 		mdss_mdp_clk_ctrl(MDP_BLOCK_POWER_OFF);
 	} else {
-		mdss_pp_res->raw_pcc_disp_cfg[disp_num] = *config;
-		pcc_combine(&mdss_pp_res->raw_pcc_disp_cfg[disp_num],
-					&mdss_pp_res->user_pcc_disp_cfg[disp_num],
-					&mdss_pp_res->pcc_disp_cfg[disp_num]);
+		mdss_pp_res->pcc_disp_cfg[disp_num] = *config;
 		mdss_pp_res->pp_disp_flags[disp_num] |= PP_FLAGS_DIRTY_PCC;
 		if(config->ops & MDP_PP_OPS_DEFER_ENABLE)
 			mdss_pp_res->pp_disp_flags[disp_num] &= ~PP_FLAGS_DIRTY_PCC;
@@ -4852,8 +4776,8 @@ static int mdss_ad_init_checks(struct msm_fb_data_type *mfd)
 		return -ENODEV;
 	}
 
-	if (ad_mfd->panel_info->type == DTV_PANEL) {
-		pr_debug("AD not supported on external display\n");
+	if (!pp_ad_is_valid_display(ad_mfd)) {
+		pr_debug("AD not supported on wb or hdmi panel\n");
 		return ret;
 	}
 
@@ -5130,14 +5054,14 @@ error:
 			INIT_COMPLETION(ad->comp);
 			mutex_unlock(&ad->lock);
 		}
-		if (wait) {
+		if ((wait) && (ad->last_bl)) {
 			ret = wait_for_completion_timeout(
 					&ad->comp, HIST_WAIT_TIMEOUT(1));
 			if (ret == 0)
 				ret = -ETIMEDOUT;
-			else if (ret > 0)
-				input->output = ad->last_str;
 		}
+		if (ret >= 0)
+			input->output = ad->last_str;
 	}
 	return ret;
 }
@@ -5408,16 +5332,20 @@ static int mdss_mdp_ad_setup(struct msm_fb_data_type *mfd)
 		 * Assertive Display is up and running as long as there are
 		 * no updates to AD init or cfg
 		 */
-		ad->sts &= ~PP_AD_STS_DIRTY_DATA;
-		ad->state |= PP_AD_STATE_DATA;
 		pr_debug("dirty data, last_bl = %d\n", ad->last_bl);
 		bl = bl_mfd->ad_bl_level;
+		if (bl) {
+			ad->sts &= ~PP_AD_STS_DIRTY_DATA;
+			ad->state |= PP_AD_STATE_DATA;
+		}
 
 		if ((ad->cfg.mode == MDSS_AD_MODE_AUTO_STR) &&
 							(ad->last_bl != bl)) {
 			ad->last_bl = bl;
-			ad->calc_itr = ad->cfg.stab_itr;
-			ad->sts |= PP_AD_STS_DIRTY_VSYNC;
+			if (bl) {
+				ad->calc_itr = ad->cfg.stab_itr;
+				ad->sts |= PP_AD_STS_DIRTY_VSYNC;
+			}
 			linear_map(bl, &ad->bl_data,
 				bl_mfd->panel_info->bl_max,
 				MDSS_MDP_AD_BL_SCALE);
@@ -5792,54 +5720,23 @@ End:
 static int is_valid_calib_dspp_addr(char __iomem *ptr)
 {
 	char __iomem *base;
+	char __iomem *dspp0_base;
+	char __iomem *wb0_base;
 	int ret = 0, counter = 0;
-	struct mdss_mdp_mixer *mixer;
+	struct mdss_mdp_ctl *ctl;
+	struct mdss_data_type *mdata = mdss_mdp_get_mdata();
 
-	for (counter = 0; counter < mdss_res->nmixers_intf; counter++) {
-		mixer = mdss_res->mixer_intf + counter;
-		base = mixer->dspp_base;
+	dspp0_base = mdata->mixer_intf->dspp_base;
+	wb0_base = mdata->ctl_off->wb_base;
 
-		if (ptr == base) {
-			ret = MDP_PP_OPS_READ | MDP_PP_OPS_WRITE;
-			break;
-		/* PA range */
-		} else if ((ptr >= base + MDSS_MDP_REG_DSPP_PA_BASE) &&
-				(ptr <= base + MDSS_MDP_REG_DSPP_PA_BASE +
-						MDSS_MDP_PA_SIZE)) {
-			ret = MDP_PP_OPS_READ | MDP_PP_OPS_WRITE;
-			break;
-		/* PCC range */
-		} else if ((ptr >= base + MDSS_MDP_REG_DSPP_PCC_BASE) &&
-				(ptr <= base + MDSS_MDP_REG_DSPP_PCC_BASE +
-						MDSS_MDP_PCC_SIZE)) {
-			ret = MDP_PP_OPS_READ | MDP_PP_OPS_WRITE;
-			break;
-		/* Gamut range */
-		} else if ((ptr >= base + MDSS_MDP_REG_DSPP_GAMUT_BASE) &&
-				(ptr <= base + MDSS_MDP_REG_DSPP_GAMUT_BASE +
-						MDSS_MDP_GAMUT_SIZE)) {
-			ret = MDP_PP_OPS_READ | MDP_PP_OPS_WRITE;
-			break;
-		/* GC range */
-		} else if ((ptr >= base + MDSS_MDP_REG_DSPP_GC_BASE) &&
-				(ptr <= base + MDSS_MDP_REG_DSPP_GC_BASE +
-						MDSS_MDP_GC_SIZE)) {
-			ret = MDP_PP_OPS_READ | MDP_PP_OPS_WRITE;
-			break;
-		/* Dither enable/disable */
-		} else if ((ptr == base + MDSS_MDP_REG_DSPP_DITHER_DEPTH)) {
-			ret = MDP_PP_OPS_READ | MDP_PP_OPS_WRITE;
-			break;
-		/* Six zone and mem color */
-		} else if (mdss_res->mdp_rev >= MDSS_MDP_HW_REV_103 &&
-			(ptr >= base + MDSS_MDP_REG_DSPP_SIX_ZONE_BASE) &&
-			(ptr <= base + MDSS_MDP_REG_DSPP_SIX_ZONE_BASE +
-					MDSS_MDP_SIX_ZONE_SIZE +
-					MDSS_MDP_MEM_COL_SIZE)) {
-			ret = MDP_PP_OPS_READ | MDP_PP_OPS_WRITE;
-			break;
-		}
+	for (counter = 0; counter < mdata->nctl; counter++) {
+		ctl = mdata->ctl_off + counter;
+		base = ctl->wb_base;
+		wb0_base = base < wb0_base ? base : wb0_base;
 	}
+
+	if ((ptr >= dspp0_base) && (ptr < wb0_base))
+		ret = MDP_PP_OPS_READ | MDP_PP_OPS_WRITE;
 
 	return ret;
 }

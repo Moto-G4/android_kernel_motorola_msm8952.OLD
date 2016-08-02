@@ -1,4 +1,4 @@
-/* Copyright (c) 2008-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2008-2014, 2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -22,6 +22,7 @@
 #include <linux/slab.h>
 #include <linux/of.h>
 #include <linux/kmemleak.h>
+
 #include "diagchar.h"
 #include "diagmem.h"
 
@@ -152,7 +153,7 @@ void diagmem_setsize(int pool_idx, int itemsize, int poolsize)
 
 	diag_mempools[pool_idx].itemsize = itemsize;
 	diag_mempools[pool_idx].poolsize = poolsize;
-	DIAG_DBUG("diag: Mempool %s sizes: itemsize %d poolsize %d\n",
+	pr_debug("diag: Mempool %s sizes: itemsize %d poolsize %d\n",
 		 diag_mempools[pool_idx].name, diag_mempools[pool_idx].itemsize,
 		 diag_mempools[pool_idx].poolsize);
 }
@@ -189,7 +190,7 @@ void *diagmem_alloc(struct diagchar_dev *driver, int size, int pool_type)
 		}
 		spin_unlock_irqrestore(&mempool->lock, flags);
 		if (!buf) {
-			DIAG_DBUG("diag: Unable to allocate buffer from memory pool %s, size: %d/%d count: %d/%d\n",
+			pr_debug_ratelimited("diag: Unable to allocate buffer from memory pool %s, size: %d/%d count: %d/%d\n",
 					     mempool->name,
 					     size, mempool->itemsize,
 					     mempool->count,
@@ -245,7 +246,7 @@ void diagmem_init(struct diagchar_dev *driver, int index)
 
 	mempool = &diag_mempools[index];
 	if (mempool->pool) {
-		DIAG_DBUG("diag: mempool %s is already initialized\n",
+		pr_debug("diag: mempool %s is already initialized\n",
 			 mempool->name);
 		return;
 	}
@@ -281,7 +282,7 @@ void diagmem_exit(struct diagchar_dev *driver, int index)
 
 	mempool = &diag_mempools[index];
 	spin_lock_irqsave(&mempool->lock, flags);
-	if (mempool->count == 0) {
+	if (mempool->count == 0 && mempool->pool != NULL) {
 		mempool_destroy(mempool->pool);
 		mempool->pool = NULL;
 	} else {

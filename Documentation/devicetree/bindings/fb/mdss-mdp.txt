@@ -577,8 +577,6 @@ Subnode properties:
 			- "rgba8888"
 			- "rgb888"
 			- "rgb565"
-- qcom,mdss_wb_panel: Specifies writeback block properties for Wireless
-		      display and rotation.
 
 Subnode properties:
 Required properties:
@@ -749,3 +747,4 @@ Example:
 			qcom,mdss-fb-map = <&mdss_fb1>;
 		};
 	};
+

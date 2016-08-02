@@ -65,6 +65,8 @@ dtb-$(CONFIG_ARCH_MSM8909) += msm8909-sim.dtb \
 	msm8208-1gb-rcm.dtb \
 	msm8208-qhd-cdp.dtb \
 	msm8208-qhd-rcm.dtb
+# Do not include QC default DTBs if not needed
+ifneq ($(CONFIG_MMI_DEVICE_DTBS),y)
 dtb-$(CONFIG_ARCH_MSM8916) += msm8916-sim.dtb \
 	msm8916-rumi.dtb \
 	msm8916-cdp.dtb \
@@ -121,28 +123,40 @@ dtb-$(CONFIG_ARCH_MSM8916) += msm8916-sim.dtb \
 	msm8952-cdp.dtb \
 	msm8952-ext-codec-cdp.dtb \
 	msm8952-mtp.dtb \
-	msm8952-htc_hiae-xa.dtb \
-	msm8952-htc_hiae-xb.dtb \
-	msm8952-htc_hiae-xc.dtb \
-	msm8952-htc_hiae-xd.dtb \
-	msm8952-htc_hiae-pvt.dtb \
+	msm8952-polaris.dtb \
 	apq8052-cdp.dtb \
 	apq8052-mtp.dtb \
 	msm8976-sim.dtb \
 	msm8976-rumi.dtb \
 	msm8976-qrd-skun.dtb \
 	msm8976-qrd-skun-evt2.dtb \
+	msm8976-v1.1-qrd-skun-dvt.dtb \
 	msm8976-cdp.dtb \
 	msm8976-mtp.dtb \
 	msm8976-rcm.dtb \
+	msm8976-internal-codec-cdp.dtb \
+	msm8976-polaris.dtb \
 	apq8076-cdp.dtb \
 	apq8076-mtp.dtb \
 	msm8956-sim.dtb \
 	msm8956-rumi.dtb \
 	msm8956-cdp.dtb \
 	msm8956-mtp.dtb \
+	msm8956-internal-codec-cdp.dtb \
 	apq8056-cdp.dtb \
 	apq8056-mtp.dtb \
+	msm8956-v1.1-mtp.dtb \
+	msm8956-v1.1-cdp.dtb \
+	msm8956-v1.1-qrd-skun.dtb \
+	apq8056-v1.1-mtp.dtb \
+	apq8056-v1.1-cdp.dtb \
+	msm8976-v1.1-mtp.dtb \
+	msm8976-v1.1-mtp-rome.dtb \
+	msm8976-v1.1-cdp.dtb \
+	msm8976-v1.1-rcm.dtb \
+	apq8076-v1.1-mtp.dtb \
+	apq8076-v1.1-cdp.dtb \
+	apq8076-v1.1-mtp-rome.dtb \
 	msm8929-cdp.dtb \
 	msm8929-mtp.dtb \
 	msm8929-mtp-smb1360.dtb \
@@ -151,6 +165,14 @@ dtb-$(CONFIG_ARCH_MSM8916) += msm8916-sim.dtb \
 	msm8929-qrd-skul.dtb \
 	msm8929-qrd-skulb.dtb \
 	msm8929-cdp-jdi.dtb
+endif # CONFIG_MMI_DEVICE_DTBS
+
+dtb-$(CONFIG_ARCH_MSM8916) += msm8952-athene-p0.dtb \
+	msm8952-athene_16mp-p1.dtb \
+	msm8952-athene_13mp-p1.dtb \
+	msm8952-athene_power-p1.dtb \
+	msm8952-addison-p0.dtb
+
 dtb-$(CONFIG_ARCH_MSM8226) += msm8226-sim.dtb \
 	msm8226-fluid.dtb \
 	msm8226-v1-cdp.dtb \
@@ -302,6 +324,12 @@ dtb-$(CONFIG_ARCH_MSM8992) += msm8992-sim.dtb \
 	msm8992-pmi8994-pm8004-cdp.dtb \
 	msm8992-pmi8994-pm8004-mtp.dtb
 dtb-$(CONFIG_ARCH_MDMFERMIUM) += mdmfermium-rumi.dtb
+
+ifeq ($(CONFIG_MMI_DEVICE_DTBS),y)
+# Add 1k of padding to the DTBs to allow for environment variables
+# to be runtime added by the bootloader (i.e. /chosen properties)
+DTC_FLAGS := -p 1024
+endif
 
 DTB_NAMES := $(subst $\",,$(CONFIG_BUILD_ARM_APPENDED_DTB_IMAGE_NAMES))
 ifneq ($(DTB_NAMES),)

@@ -211,23 +211,6 @@ config LEDS_LP5521
 	  Driver provides direct control via LED class and interface for
 	  programming the engines.
 
-config LEDS_LP5521_HTC
-	tristate "LED Support for N.S. LP5521 LED driver chip"
-	depends on LEDS_CLASS && I2C
-	select LEDS_LP55XX_COMMON
-	help
-		If you say yes here you get support for the National Semiconductor
-		LP5521 LED driver. It is 3 channel chip with programmable engines.
-		Driver provides direct control via LED class and interface for
-		programming the engines.
-
-config LED_CHECK_PANEL_CONNECTED
-	tristate "LED check panel connected for MFG test"
-	depends on LEDS_LP5521_HTC
-	select LEDS_LP55XX_COMMON
-	help
-		Say Y here if need to check panel connected for MFG test.
-
 config LEDS_LP5523
 	tristate "LED Support for TI/National LP5523/55231 LED driver chip"
 	depends on LEDS_CLASS && I2C
@@ -303,6 +286,16 @@ config LEDS_PCA9633
 	help
 	  This option enables support for LEDs connected to the PCA9633
 	  LED driver chip accessed via the I2C bus.
+
+config LEDS_ATC
+	tristate "Support for PMIC ATC LED"
+	depends on LEDS_CLASS
+	depends on SPMI && OF_SPMI
+	help
+	  This driver supports the ATC led functionality of Qualcomm PNP PMIC.
+	  Creates standard LED interface for the auto trickle charge indication
+	  LED. SPMI register write is used to access PMIC control register.
+	  Device tree can be used to adjust control register address used.
 
 config LEDS_QPNP
 	tristate "Support for QPNP LEDs"

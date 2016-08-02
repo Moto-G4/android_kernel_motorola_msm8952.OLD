@@ -166,7 +166,8 @@ static ssize_t avail_level_get(struct file *fp, char __user *user_buffer,
 		if (count <= 0) {
 			pr_err("Error getting freq value idx:%d. err:%d\n",
 				       idx, count);
-			return count;
+			count = 0;
+			break;
 		}
 		buf_start += count;
 	}
@@ -364,7 +365,7 @@ interrupt_exit:
 	return;
 }
 
-static int lmh_sensor_read(struct thermal_zone_device *dev, long *val)
+static int lmh_sensor_read(struct thermal_zone_device *dev, unsigned long *val)
 {
 	int ret = 0;
 	struct lmh_mon_sensor_data *lmh_sensor;
@@ -449,7 +450,7 @@ static int lmh_activate_trip(struct thermal_zone_device *dev,
 }
 
 static int lmh_get_trip_value(struct thermal_zone_device *dev,
-		int trip, long *value)
+		int trip, unsigned long *value)
 {
 	struct lmh_mon_sensor_data *lmh_sensor;
 

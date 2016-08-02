@@ -44,7 +44,6 @@
 #include <linux/irqchip/arm-gic.h>
 #include <linux/syscore_ops.h>
 #include <linux/msm_rtb.h>
-#include <linux/htc_debug_tools.h>
 
 #include <asm/cputype.h>
 #include <asm/irq.h>
@@ -52,15 +51,6 @@
 #include <asm/smp_plat.h>
 
 #include "irqchip.h"
-#ifdef CONFIG_HTC_POWER_DEBUG
-#define GIC_SPI_START 32
-#define EE0_KRAIT_HLOS_SPMI_PERIPH_IRQ (GIC_SPI_START + 190)
-#define TLMM_MSM_SUMMARY_IRQ (GIC_SPI_START + 208)
-#endif
-
-#ifdef CONFIG_HTC_DEBUG_WATCHDOG
-#include <linux/htc_debug_tools.h>
-#endif
 
 union gic_base {
 	void __iomem *common_base;
@@ -88,6 +78,7 @@ struct gic_chip_data {
 	unsigned int wakeup_irqs[32];
 	unsigned int enabled_irqs[32];
 #endif
+	u32 saved_regs[0x400];
 };
 
 static DEFINE_RAW_SPINLOCK(irq_controller_lock);
@@ -228,6 +219,22 @@ static void gic_disable_irq(struct irq_data *d)
 		gic_arch_extn.irq_disable(d);
 }
 
+static int gic_panic_handler(struct notifier_block *this,
+			unsigned long event, void *ptr)
+{
+	int i;
+	void __iomem *base;
+
+	base = gic_data_dist_base(&gic_data[0]);
+	for (i = 0; i < 0x400; i += 1)
+		gic_data[0].saved_regs[i] = readl_relaxed(base + 4 * i);
+	return NOTIFY_DONE;
+}
+
+static struct notifier_block gic_panic_blk = {
+	.notifier_call = gic_panic_handler,
+};
+
 #ifdef CONFIG_PM
 static int gic_suspend_one(struct gic_chip_data *gic)
 {
@@ -282,20 +289,16 @@ void gic_show_pending_irq(void)
 	}
 }
 
-bool gic_is_any_irq_pending(void)
+uint32_t gic_return_irq_pending(void)
 {
 	struct gic_chip_data *gic = &gic_data[0];
 	void __iomem *cpu_base = gic_data_cpu_base(gic);
 	int val;
 
 	val = readl_relaxed_no_log(cpu_base + GIC_CPU_HIGHPRI);
-	val &= GIC_INVL_INTERRUPT_MASK;
-	if (val == GIC_INVL_INTERRUPT_MASK)
-		return 0;
-	else
-		return 1;
+	return val;
 }
-EXPORT_SYMBOL(gic_is_any_irq_pending);
+EXPORT_SYMBOL(gic_return_irq_pending);
 
 static void gic_show_resume_irq(struct gic_chip_data *gic)
 {
@@ -328,11 +331,6 @@ static void gic_show_resume_irq(struct gic_chip_data *gic)
 
 		pr_warning("%s: %d triggered %s\n", __func__,
 					i + gic->irq_offset, name);
-#ifdef CONFIG_HTC_POWER_DEBUG
-                if (EE0_KRAIT_HLOS_SPMI_PERIPH_IRQ != i + gic->irq_offset)
-                        if (TLMM_MSM_SUMMARY_IRQ != i + gic->irq_offset)
-                                pr_info("[WAKEUP] Resume caused by gic-%d\n", i + gic->irq_offset);
-#endif
 	}
 }
 
@@ -508,29 +506,14 @@ static asmlinkage void __exception_irq_entry gic_handle_irq(struct pt_regs *regs
 		irqnr = irqstat & ~0x1c00;
 
 		if (likely(irqnr > 15 && irqnr < 1021)) {
-#if defined(CONFIG_HTC_DEBUG_WATCHDOG)
-			
-			if (irqnr == 20 && smp_processor_id() == 4) {
-				unsigned long long timestamp = sched_clock();
-				htc_debug_watchdog_check_pet(timestamp);
-			}
-#endif 
 			irqnr = irq_find_mapping(gic->domain, irqnr);
-#if defined(CONFIG_HTC_DEBUG_RTB)
-			uncached_logk_pc(LOGK_IRQ, (void *)(uintptr_t)htc_debug_get_sched_clock_ms(), (void *)(uintptr_t)irqnr);
-#else
 			uncached_logk(LOGK_IRQ, (void *)(uintptr_t)irqnr);
-#endif 
 			handle_IRQ(irqnr, regs);
 			continue;
 		}
 		if (irqnr < 16) {
 			writel_relaxed_no_log(irqstat, cpu_base + GIC_CPU_EOI);
-#if defined(CONFIG_HTC_DEBUG_RTB)
-			uncached_logk_pc(LOGK_IRQ, (void *)(uintptr_t)htc_debug_get_sched_clock_ms(), (void *)(uintptr_t)irqnr);
-#else
 			uncached_logk(LOGK_IRQ, (void *)(uintptr_t)irqnr);
-#endif 
 #ifdef CONFIG_SMP
 			handle_IPI(irqnr, regs);
 #endif
@@ -1171,6 +1154,7 @@ int __init gic_of_init(struct device_node *node, struct device_node *parent)
 		gic_cascade_irq(gic_cnt, irq);
 	}
 	gic_cnt++;
+	atomic_notifier_chain_register(&panic_notifier_list, &gic_panic_blk);
 	return 0;
 }
 
@@ -1187,22 +1171,3 @@ IRQCHIP_DECLARE(msm_8660_qgic, "qcom,msm-8660-qgic", gic_of_init);
 IRQCHIP_DECLARE(msm_qgic2, "qcom,msm-qgic2", msm_gic_of_init);
 
 #endif
-
-bool gic_is_irq_pending(unsigned int irq)
-{
-    struct irq_data *d = irq_get_irq_data(irq);
-    struct gic_chip_data *gic_data = &gic_data[0];
-    u32 mask, val;
-
-    WARN_ON(!irqs_disabled());
-    raw_spin_lock(&irq_controller_lock);
-    mask = 1 << (gic_irq(d) % 32);
-    val = readl(gic_dist_base(d) +
-            GIC_DIST_ENABLE_SET + (gic_irq(d) / 32) * 4);
-    
-    WARN_ON(val & mask);
-    val = readl(gic_dist_base(d) +
-            GIC_DIST_PENDING_SET + (gic_irq(d) / 32) * 4);
-    raw_spin_unlock(&irq_controller_lock);
-    return (bool) (val & mask);
-}

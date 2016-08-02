@@ -18,6 +18,7 @@
 #include <linux/stringify.h>
 #include <linux/types.h>
 #include <linux/debugfs.h>
+#include <linux/hrtimer.h>
 
 /* panel id type */
 struct panel_id {
@@ -31,6 +32,41 @@ struct panel_id {
 #define MDSS_DSI_RST_SEQ_LEN	10
 /* worst case prefill lines for all chipsets including all vertical blank */
 #define MDSS_MDP_MAX_PREFILL_FETCH 25
+
+enum hbm_state {
+	HBM_OFF_STATE = 0,
+	HBM_ON_STATE,
+	HBM_STATE_NUM
+};
+
+enum cabc_mode {
+	CABC_UI_MODE = 0,
+	CABC_ST_MODE,
+	CABC_MV_MODE,
+	CABC_DIS_MODE,
+	CABC_OFF_MODE,
+	CABC_MODE_NUM
+};
+
+enum panel_param_id {
+	PARAM_HBM_ID = 0,
+	PARAM_CABC_ID,
+	PARAM_ID_NUM
+};
+
+struct panel_param_val_map {
+	char *name;
+	char *prop;
+};
+
+struct panel_param {
+	const char *param_name;
+	const struct panel_param_val_map *val_map;
+	const u16 val_max;
+	const u16 default_value;
+	u16 value;
+	bool is_supported;
+};
 
 /* panel type list */
 #define NO_PANEL		0xffff	/* No Panel */
@@ -198,6 +234,7 @@ struct mdss_intf_recovery {
  *				- MIPI_CMD_PANEL: switch to command mode
  * @MDSS_EVENT_DSI_RESET_WRITE_PTR: Reset the write pointer coordinates on
  *				the panel.
+ * @MDSS_EVENT_ENABLE_TE: Change TE state, used for factory testing only
  */
 enum mdss_intf_events {
 	MDSS_EVENT_RESET = 1,
@@ -225,6 +262,7 @@ enum mdss_intf_events {
 	MDSS_EVENT_DSI_DYNAMIC_SWITCH,
 	MDSS_EVENT_DSI_RECONFIG_CMD,
 	MDSS_EVENT_DSI_RESET_WRITE_PTR,
+	MDSS_EVENT_ENABLE_TE,
 };
 
 struct lcd_panel_info {
@@ -453,8 +491,6 @@ struct mdss_mdp_pp_tear_check {
 	u32 refx100;
 };
 
-struct mdss_livedisplay_ctx;
-
 struct mdss_panel_info {
 	u32 xres;
 	u32 yres;
@@ -517,6 +553,8 @@ struct mdss_panel_info {
 	bool dynamic_switch_pending;
 	bool is_lpm_mode;
 	bool is_split_display;
+	u32 bl_on_defer_delay;
+	struct hrtimer bl_on_defer_hrtimer;
 
 	bool is_prim_panel;
 	bool is_pluggable;
@@ -527,6 +565,9 @@ struct mdss_panel_info {
 	void *cec_data;
 
 	char panel_name[MDSS_MAX_PANEL_LEN];
+	char panel_family_name[MDSS_MAX_PANEL_LEN];
+	u32 panel_ver;
+	char panel_supplier[8];
 	struct mdss_mdp_pp_tear_check te;
 
 	struct dsc_desc dsc;
@@ -540,23 +581,15 @@ struct mdss_panel_info {
 	/* debugfs structure for the panel */
 	struct mdss_panel_debugfs_info *debugfs_info;
 
-	int first_power_on;
-	int panel_id;
-	int camera_blk;
-	u32 mdss_pp_hue;
-	
-	u32 skip_frame;
-	u32 pcc_r;
-	u32 pcc_g;
-	u32 pcc_b;
-	bool blk_pending_display_on;
-
-	struct mdss_livedisplay_ctx *livedisplay;
+	u32 disp_on_check_val;
+	bool blank_progress_notify_enabled;
+	struct panel_param *param[PARAM_ID_NUM];
 };
 
 struct mdss_panel_data {
 	struct mdss_panel_info panel_info;
 	void (*set_backlight) (struct mdss_panel_data *pdata, u32 bl_level);
+	int (*set_param)(struct mdss_panel_data *pdata, u16 id, u16 value);
 	unsigned char *mmss_cc_base;
 
 	/**
@@ -573,9 +606,8 @@ struct mdss_panel_data {
 	 */
 	int (*event_handler) (struct mdss_panel_data *pdata, int e, void *arg);
 
-	void (*display_on) (struct mdss_panel_data *pdata);
-
 	struct mdss_panel_data *next;
+	struct msm_fb_data_type *mfd;
 };
 
 struct mdss_panel_debugfs_info {
@@ -806,4 +838,15 @@ static inline void mdss_panel_debugfs_cleanup(
 static inline void mdss_panel_debugfsinfo_to_panelinfo(
 			struct mdss_panel_info *panel_info) { };
 #endif
+
+static inline bool mdss_panel_param_is_supported(struct mdss_panel_info *p,
+	u16 id)
+{
+	if (id < PARAM_ID_NUM && p && p->param[id] &&
+		p->param[id]->is_supported)
+		return true;
+
+	return false;
+};
+
 #endif /* MDSS_PANEL_H */

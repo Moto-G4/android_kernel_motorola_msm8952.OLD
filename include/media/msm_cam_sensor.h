@@ -40,15 +40,15 @@
 #define MAX_AF_ITERATIONS 3
 #define MAX_NUMBER_OF_STEPS 47
 
-#define MSM_V4L2_PIX_FMT_META v4l2_fourcc('M', 'E', 'T', 'A') 
+#define MSM_V4L2_PIX_FMT_META v4l2_fourcc('M', 'E', 'T', 'A') /* META */
 #define MSM_V4L2_PIX_FMT_SBGGR14 v4l2_fourcc('B', 'G', '1', '4')
-	
+	/* 14  BGBG.. GRGR.. */
 #define MSM_V4L2_PIX_FMT_SGBRG14 v4l2_fourcc('G', 'B', '1', '4')
-	
+	/* 14  GBGB.. RGRG.. */
 #define MSM_V4L2_PIX_FMT_SGRBG14 v4l2_fourcc('B', 'A', '1', '4')
-	
+	/* 14  GRGR.. BGBG.. */
 #define MSM_V4L2_PIX_FMT_SRGGB14 v4l2_fourcc('R', 'G', '1', '4')
-	
+	/* 14  RGRG.. GBGB.. */
 
 enum flash_type {
 	LED_FLASH = 1,
@@ -163,9 +163,6 @@ enum csiphy_cfg_type_t {
 enum camera_vreg_type {
 	VREG_TYPE_DEFAULT,
 	VREG_TYPE_CUSTOM,
-	
-	VREG_TYPE_GPIO,
-	
 };
 
 enum sensor_af_t {
@@ -229,51 +226,15 @@ struct camera_vreg_t {
 	uint32_t delay;
 	const char *custom_vreg_name;
 	enum camera_vreg_type type;
-	
-	int32_t gpios_index;
-	
 };
-
-struct fuse_id{
-	uint32_t fuse_id_word1;
-	uint32_t fuse_id_word2;
-	uint32_t fuse_id_word3;
-	uint32_t fuse_id_word4;
-};
-
-typedef struct{
-	char    ACT_NAME[MAX_ACT_NAME_SIZE];
-	uint8_t VCM_START_MSB;
-	uint8_t VCM_START_LSB;
-	uint8_t AF_INF_MSB;
-	uint8_t AF_INF_LSB;
-	uint8_t AF_MACRO_MSB;
-	uint8_t AF_MACRO_LSB;
-	uint8_t VCM_BIAS;
-	uint8_t VCM_OFFSET;
-	uint8_t VCM_BOTTOM_MECH_MSB;
-	uint8_t VCM_BOTTOM_MECH_LSB;
-	uint8_t VCM_TOP_MECH_MSB;
-	uint8_t VCM_TOP_MECH_LSB;
-	uint8_t VCM_VENDOR_ID_VERSION;
-	uint8_t VCM_VENDOR;
-	uint8_t ACT_ID;
-	uint32_t MODULE_ID_AB;
-}af_value_t;
 
 struct sensorb_cfg_data {
 	int cfgtype;
-	
-	af_value_t af_value;
-	
 	union {
 		struct msm_sensor_info_t      sensor_info;
 		struct msm_sensor_init_params sensor_init_params;
 		void                         *setting;
 		struct msm_sensor_i2c_sync_params sensor_i2c_sync_params;
-		
-		struct fuse_id fuse;
-		
 	} cfg;
 };
 
@@ -300,6 +261,7 @@ enum eeprom_cfg_type_t {
 	CFG_EEPROM_READ_CAL_DATA,
 	CFG_EEPROM_WRITE_DATA,
 	CFG_EEPROM_GET_MM_INFO,
+	CFG_EEPROM_INIT,
 };
 
 struct eeprom_get_t {
@@ -322,6 +284,12 @@ struct eeprom_get_cmm_t {
 	uint32_t cmm_size;
 };
 
+struct msm_eeprom_info_t {
+	struct msm_sensor_power_setting_array *power_setting_array;
+	enum i2c_freq_mode_t i2c_freq_mode;
+	struct msm_eeprom_memory_map_array *mem_map_array;
+};
+
 struct msm_eeprom_cfg_data {
 	enum eeprom_cfg_type_t cfgtype;
 	uint8_t is_supported;
@@ -331,6 +299,7 @@ struct msm_eeprom_cfg_data {
 		struct eeprom_read_t read_data;
 		struct eeprom_write_t write_data;
 		struct eeprom_get_cmm_t get_cmm_data;
+		struct msm_eeprom_info_t eeprom_info;
 	} cfg;
 };
 
@@ -409,6 +378,12 @@ struct eeprom_write_t32 {
 	uint32_t num_bytes;
 };
 
+struct msm_eeprom_info_t32 {
+	compat_uptr_t power_setting_array;
+	enum i2c_freq_mode_t i2c_freq_mode;
+	compat_uptr_t mem_map_array;
+};
+
 struct msm_eeprom_cfg_data32 {
 	enum eeprom_cfg_type_t cfgtype;
 	uint8_t is_supported;
@@ -417,6 +392,7 @@ struct msm_eeprom_cfg_data32 {
 		struct eeprom_get_t get_data;
 		struct eeprom_read_t32 read_data;
 		struct eeprom_write_t32 write_data;
+		struct msm_eeprom_info_t32 eeprom_info;
 	} cfg;
 };
 
@@ -459,9 +435,6 @@ enum msm_sensor_cfg_type_t {
 	CFG_WRITE_I2C_ARRAY_ASYNC,
 	CFG_WRITE_I2C_ARRAY_SYNC,
 	CFG_WRITE_I2C_ARRAY_SYNC_BLOCK,
-	
-	CFG_I2C_IOCTL_R_OTP,
-	
 };
 
 enum msm_actuator_cfg_type_t {
@@ -520,6 +493,11 @@ struct msm_actuator_move_params_t {
 	struct damping_params_t *ringing_params;
 };
 
+struct msm_mot_actuator_tuning_params_t {
+	int16_t infinity_dac;
+	int16_t macro_dac;
+};
+
 struct msm_actuator_tuning_params_t {
 	int16_t initial_code;
 	uint16_t pwd_step;
@@ -541,6 +519,7 @@ struct msm_actuator_params_t {
 	uint16_t data_size;
 	uint16_t init_setting_size;
 	uint16_t deinit_setting_size;
+	uint16_t power_off_setting_size;
 	uint32_t i2c_addr;
 	enum i2c_freq_mode_t i2c_freq_mode;
 	enum msm_actuator_addr_type i2c_addr_type;
@@ -548,12 +527,14 @@ struct msm_actuator_params_t {
 	struct msm_actuator_reg_params_t *reg_tbl_params;
 	struct reg_settings_t *init_settings;
 	struct reg_settings_t *deinit_settings;
+	struct reg_settings_t *power_off_settings;
 	struct park_lens_data_t park_lens;
 };
 
 struct msm_actuator_set_info_t {
 	struct msm_actuator_params_t actuator_params;
 	struct msm_actuator_tuning_params_t af_tuning_params;
+	struct msm_mot_actuator_tuning_params_t mot_af_tuning_params;
 };
 
 struct msm_actuator_get_info_t {
@@ -607,9 +588,6 @@ struct msm_actuator_cfg_data {
 		struct msm_actuator_get_info_t get_info;
 		struct msm_actuator_set_position_t setpos;
 		enum af_camera_name cam_name;
-		
-		af_value_t af_value;
-		
 	} cfg;
 };
 
@@ -646,6 +624,7 @@ struct msm_flash_cfg_data_t {
 	} cfg;
 };
 
+/* sensor init structures and enums */
 enum msm_sensor_init_cfg_type_t {
 	CFG_SINIT_PROBE,
 	CFG_SINIT_PROBE_DONE,
@@ -707,6 +686,11 @@ struct msm_camera_i2c_reg_setting32 {
 	enum msm_camera_qup_i2c_write_batch_t qup_i2c_batch;
 };
 
+struct msm_mot_actuator_tuning_params_t32 {
+	int16_t infinity_dac;
+	int16_t macro_dac;
+};
+
 struct msm_actuator_tuning_params_t32 {
 	int16_t initial_code;
 	uint16_t pwd_step;
@@ -721,6 +705,7 @@ struct msm_actuator_params_t32 {
 	uint16_t data_size;
 	uint16_t init_setting_size;
 	uint16_t deinit_setting_size;
+	uint16_t power_off_setting_size;
 	uint32_t i2c_addr;
 	enum i2c_freq_mode_t i2c_freq_mode;
 	enum msm_actuator_addr_type i2c_addr_type;
@@ -728,12 +713,14 @@ struct msm_actuator_params_t32 {
 	compat_uptr_t reg_tbl_params;
 	compat_uptr_t init_settings;
 	compat_uptr_t deinit_settings;
+	compat_uptr_t power_off_settings;
 	struct park_lens_data_t park_lens;
 };
 
 struct msm_actuator_set_info_t32 {
 	struct msm_actuator_params_t32 actuator_params;
 	struct msm_actuator_tuning_params_t32 af_tuning_params;
+	struct msm_mot_actuator_tuning_params_t32 mot_af_tuning_params;
 };
 
 struct sensor_init_cfg_data32 {
@@ -763,9 +750,6 @@ struct msm_actuator_cfg_data32 {
 		struct msm_actuator_get_info_t get_info;
 		struct msm_actuator_set_position_t setpos;
 		enum af_camera_name cam_name;
-		
-		af_value_t af_value;
-		
 	} cfg;
 };
 
@@ -779,17 +763,11 @@ struct csiphy_cfg_data32 {
 
 struct sensorb_cfg_data32 {
 	int cfgtype;
-	
-	af_value_t af_value;
-	
 	union {
 		struct msm_sensor_info_t      sensor_info;
 		struct msm_sensor_init_params sensor_init_params;
 		compat_uptr_t                 setting;
 		struct msm_sensor_i2c_sync_params sensor_i2c_sync_params;
-		
-		struct fuse_id fuse;
-		
 	} cfg;
 };
 
@@ -858,4 +836,4 @@ struct msm_flash_cfg_data_t32 {
 	_IOWR('V', BASE_VIDIOC_PRIVATE + 13, struct msm_flash_cfg_data_t32)
 #endif
 
-#endif 
+#endif /* __LINUX_MSM_CAM_SENSOR_H */

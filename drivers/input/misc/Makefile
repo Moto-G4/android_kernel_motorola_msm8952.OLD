@@ -34,7 +34,6 @@ obj-$(CONFIG_HP_SDC_RTC)		+= hp_sdc_rtc.o
 obj-$(CONFIG_INPUT_IMS_PCU)		+= ims-pcu.o
 obj-$(CONFIG_INPUT_IXP4XX_BEEPER)	+= ixp4xx-beeper.o
 obj-$(CONFIG_INPUT_KEYCHORD)		+= keychord.o
-obj-$(CONFIG_INPUT_DUMMY_KEYPAD)	+= dummy_keypad.o
 obj-$(CONFIG_INPUT_KEYSPAN_REMOTE)	+= keyspan_remote.o
 obj-$(CONFIG_INPUT_KXTJ9)		+= kxtj9.o
 obj-$(CONFIG_INPUT_M68K_BEEP)		+= m68kspkr.o
@@ -90,4 +89,6 @@ endif
 
 obj-$(CONFIG_SENSORS_MC3430)	+= mc3xxx.o
 obj-$(CONFIG_SENSORS_ISL29044A)	+= isl29044a.o
-obj-$(CONFIG_AK8789_HALLSENSOR)		+= hall_sensor.o hall_sensor_notify.o
+obj-$(CONFIG_STMVL53L0)	+= vl53L0/
+obj-$(CONFIG_EPL8802)  += epl8802.o
+obj-$(CONFIG_SENSORS_FPC_1020)  += fpc1020_tee.o

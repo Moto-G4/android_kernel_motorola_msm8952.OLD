@@ -44,7 +44,6 @@
 #include <linux/oom.h>
 #include <linux/prefetch.h>
 #include <linux/debugfs.h>
-#include <linux/jiffies.h>
 
 #include <asm/tlbflush.h>
 #include <asm/div64.h>
@@ -169,7 +168,7 @@ static unsigned long zone_reclaimable_pages(struct zone *zone)
 	nr = zone_page_state(zone, NR_ACTIVE_FILE) +
 	     zone_page_state(zone, NR_INACTIVE_FILE);
 
-	if (get_nr_swap_pages() > 0)
+	if (get_nr_swap_pages() > 0 && total_swap_pages >= totalram_pages)
 		nr += zone_page_state(zone, NR_ACTIVE_ANON) +
 		      zone_page_state(zone, NR_INACTIVE_ANON);
 
@@ -1123,7 +1122,7 @@ cull_mlocked:
 		if (PageSwapCache(page))
 			try_to_free_swap(page);
 		unlock_page(page);
-		putback_lru_page(page);
+		list_add(&page->lru, &ret_pages);
 		continue;
 
 activate_locked:
@@ -1179,7 +1178,7 @@ unsigned long reclaim_clean_pages_from_list(struct zone *zone,
 			TTU_UNMAP|TTU_IGNORE_ACCESS,
 			&dummy1, &dummy2, &dummy3, &dummy4, &dummy5, true);
 	list_splice(&clean_pages, page_list);
-	mod_zone_page_state(zone, NR_ISOLATED_FILE, -ret);
+	__mod_zone_page_state(zone, NR_ISOLATED_FILE, -ret);
 	return ret;
 }
 
@@ -2518,12 +2517,7 @@ static unsigned long do_try_to_free_pages(struct zonelist *zonelist,
 	struct zone *zone;
 	unsigned long writeback_threshold;
 	bool aborted_reclaim;
-	unsigned long start_jiffies = jiffies;
-	unsigned int msecs_age;
-	unsigned long lru = 0xFFFFFF;
 
-	if (reclaim_state)
-		reclaim_state->trigger_lmk = 0;
 	delayacct_freepages_start();
 
 	if (global_reclaim(sc))
@@ -2551,7 +2545,6 @@ static unsigned long do_try_to_free_pages(struct zonelist *zonelist,
 				lru_pages += zone_reclaimable_pages(zone);
 			}
 
-			lru = lru_pages;
 			shrink_slab(shrink, sc->nr_scanned, lru_pages);
 			if (reclaim_state) {
 				sc->nr_reclaimed += reclaim_state->reclaimed_slab;
@@ -2586,17 +2579,6 @@ static unsigned long do_try_to_free_pages(struct zonelist *zonelist,
 
 out:
 	delayacct_freepages_end();
-
-	msecs_age = jiffies_to_msecs(jiffies - start_jiffies);
-	if (reclaim_state ) {
-		if ((reclaim_state->trigger_lmk && sc->order >= 2) || msecs_age / 1000 > 10) {
-			pr_warn("%s(%d:%d): alloc order:%d mode:0x%x, reclaim %lu in %d.%03ds pri %d, scan %lu, lru %lu, trigger lmk %d times\n",
-				current->comm, current->tgid, current->pid,
-				sc->order, sc->gfp_mask, sc->nr_reclaimed, msecs_age / 1000, msecs_age % 1000, sc->priority, total_scanned, lru,
-				reclaim_state->trigger_lmk);
-			dump_stack();
-		}
-	}
 
 	if (sc->nr_reclaimed)
 		return sc->nr_reclaimed;
@@ -2763,7 +2745,6 @@ unsigned long try_to_free_pages(struct zonelist *zonelist, int order,
 	};
 	struct shrink_control shrink = {
 		.gfp_mask = sc.gfp_mask,
-		.order = order,
 	};
 
 	/*
@@ -2847,7 +2828,6 @@ unsigned long try_to_free_mem_cgroup_pages(struct mem_cgroup *memcg,
 	};
 	struct shrink_control shrink = {
 		.gfp_mask = sc.gfp_mask,
-		.order = 0,
 	};
 
 	/*
@@ -2893,8 +2873,12 @@ static void age_active_anon(struct zone *zone, struct scan_control *sc)
 static bool zone_balanced(struct zone *zone, int order,
 			  unsigned long balance_gap, int classzone_idx)
 {
+	int alloc_flags = 0;
+
+	if (zone_idx(zone) == ZONE_MOVABLE)
+		alloc_flags |= ALLOC_CMA;
 	if (!zone_watermark_ok_safe(zone, order, high_wmark_pages(zone) +
-				    balance_gap, classzone_idx, 0))
+				    balance_gap, classzone_idx, alloc_flags))
 		return false;
 
 	if (IS_ENABLED(CONFIG_COMPACTION) && order &&
@@ -3015,7 +2999,6 @@ static bool kswapd_shrink_zone(struct zone *zone,
 	struct reclaim_state *reclaim_state = current->reclaim_state;
 	struct shrink_control shrink = {
 		.gfp_mask = sc->gfp_mask,
-		.order = sc->order,
 	};
 	bool lowmem_pressure;
 
@@ -3174,6 +3157,7 @@ static unsigned long balance_pgdat(pg_data_t *pgdat, int order,
 
 		for (i = 0; i <= end_zone; i++) {
 			struct zone *zone = pgdat->node_zones + i;
+			int alloc_flags = 0;
 
 			if (!populated_zone(zone))
 				continue;
@@ -3185,10 +3169,12 @@ static unsigned long balance_pgdat(pg_data_t *pgdat, int order,
 			 * not call compaction as it is expected that the
 			 * necessary pages are already available.
 			 */
+			if (i == ZONE_MOVABLE)
+				alloc_flags |= ALLOC_CMA;
 			if (pgdat_needs_compaction &&
 					zone_watermark_ok(zone, order,
 						low_wmark_pages(zone),
-						*classzone_idx, 0))
+						*classzone_idx, alloc_flags))
 				pgdat_needs_compaction = false;
 		}
 
@@ -3461,6 +3447,7 @@ static int kswapd(void *p)
 void wakeup_kswapd(struct zone *zone, int order, enum zone_type classzone_idx)
 {
 	pg_data_t *pgdat;
+	int alloc_flags = 0;
 
 	if (!populated_zone(zone))
 		return;
@@ -3474,7 +3461,10 @@ void wakeup_kswapd(struct zone *zone, int order, enum zone_type classzone_idx)
 	}
 	if (!waitqueue_active(&pgdat->kswapd_wait))
 		return;
-	if (zone_watermark_ok_safe(zone, order, low_wmark_pages(zone), 0, 0))
+	if (zone_idx(zone) == ZONE_MOVABLE)
+		alloc_flags |= ALLOC_CMA;
+	if (zone_watermark_ok_safe(zone, order, low_wmark_pages(zone), 0,
+				alloc_flags))
 		return;
 
 	trace_mm_vmscan_wakeup_kswapd(pgdat->node_id, zone_idx(zone), order);
@@ -3505,7 +3495,6 @@ unsigned long shrink_all_memory(unsigned long nr_to_reclaim)
 	};
 	struct shrink_control shrink = {
 		.gfp_mask = sc.gfp_mask,
-		.order = 0,
 	};
 	struct zonelist *zonelist = node_zonelist(numa_node_id(), sc.gfp_mask);
 	struct task_struct *p = current;
@@ -3715,7 +3704,6 @@ static int __zone_reclaim(struct zone *zone, gfp_t gfp_mask, unsigned int order)
 	};
 	struct shrink_control shrink = {
 		.gfp_mask = sc.gfp_mask,
-		.order = order,
 	};
 	unsigned long nr_slab_pages0, nr_slab_pages1;
 

@@ -25,10 +25,15 @@
 #include <linux/mutex.h>
 #include <linux/input.h>
 #include <linux/log2.h>
+#include <linux/regulator/driver.h>
+#include <linux/regulator/machine.h>
+#include <linux/regulator/of_regulator.h>
 #include <linux/qpnp/power-on.h>
-
-#ifdef CONFIG_HTC_POWER_DEBUG
-#include <soc/qcom/htc_util.h>
+#include <linux/time.h>
+#ifdef CONFIG_QPNP_USER_RESET
+#include <linux/power_supply.h>
+#include <soc/qcom/watchdog.h>
+#include <soc/qcom/bootinfo.h>
 #endif
 
 #define CREATE_MASK(NUM_BITS, POS) \
@@ -81,6 +86,10 @@
 #define QPNP_PON_SEC_ACCESS(base)		(base + 0xD0)
 
 #define QPNP_PON_SEC_UNLOCK			0xA5
+
+/* spared registers for storing extra reset information */
+#define QPNP_PON_EXTRA_RESET_INFO_1(base)	(base + 0x8D)
+#define QPNP_PON_EXTRA_RESET_INFO_2(base)	(base + 0x8E)
 
 #define QPNP_PON_WARM_RESET_TFT			BIT(4)
 
@@ -155,23 +164,35 @@ struct qpnp_pon_config {
 	bool config_reset;
 };
 
+struct pon_regulator {
+	struct qpnp_pon		*pon;
+	struct regulator_dev	*rdev;
+	struct regulator_desc	rdesc;
+	u32			addr;
+	u32			bit;
+	bool			enabled;
+};
+
 struct qpnp_pon {
-	struct spmi_device *spmi;
-	struct input_dev *pon_input;
-	struct qpnp_pon_config *pon_cfg;
-	struct list_head list;
-	int num_pon_config;
-	u16 base;
-	struct delayed_work bark_work;
-	u32 dbc;
-	int pon_trigger_reason;
-	int pon_power_off_reason;
-	u32 uvlo;
-	struct dentry *debugfs;
-	u8 warm_reset_reason1;
-	u8 warm_reset_reason2;
-	bool is_spon;
-	bool store_hard_reset_reason;
+	struct spmi_device	*spmi;
+	struct input_dev	*pon_input;
+	struct qpnp_pon_config	*pon_cfg;
+	struct pon_regulator	*pon_reg_cfg;
+	struct list_head	list;
+	struct delayed_work	bark_work;
+	struct dentry		*debugfs;
+	int			pon_trigger_reason;
+	int			pon_power_off_reason;
+	int			num_pon_reg;
+	int			num_pon_config;
+	int			reg_count;
+	u32			dbc;
+	u32			uvlo;
+	u16			base;
+	u8			warm_reset_reason1;
+	u8			warm_reset_reason2;
+	bool			is_spon;
+	bool			store_hard_reset_reason;
 };
 
 static struct qpnp_pon *sys_reset_dev;
@@ -222,6 +243,41 @@ static const char * const qpnp_poff_reason[] = {
 static int warm_boot;
 module_param(warm_boot, int, 0);
 
+#ifdef CONFIG_QPNP_USER_RESET
+static void qpnp_user_wdt_handler(unsigned long data);
+static DEFINE_TIMER(wdt_timer, qpnp_user_wdt_handler, 0, 0);
+static void qpnp_user_wdt_handler(unsigned long data)
+{
+	pr_warn("User triggered watchdog reset(Pwr + VolDn)\n");
+	msm_trigger_wdog_bite();
+}
+
+static void qpnp_user_wdt_set(void)
+{
+	struct power_supply *psy;
+	union power_supply_propval data;
+
+	if (bi_secure_hardware())
+		return;
+
+	psy = power_supply_get_by_name("usb");
+	if (!psy || !psy->get_property)
+		return;
+
+	if (psy->get_property(psy, POWER_SUPPLY_PROP_PRESENT, &data))
+		return;
+
+	/* usb charger present*/
+	if (data.intval)
+		mod_timer(&wdt_timer, jiffies + HZ * 6);
+}
+
+static void qpnp_user_wdt_clear(void)
+{
+	del_timer(&wdt_timer);
+}
+#endif
+
 static int
 qpnp_pon_masked_write(struct qpnp_pon *pon, u16 addr, u8 mask, u8 val)
 {
@@ -246,127 +302,6 @@ qpnp_pon_masked_write(struct qpnp_pon *pon, u16 addr, u8 mask, u8 val)
 			"Unable to write to addr=%hx, rc(%d)\n", addr, rc);
 	return rc;
 }
-
-#define SID_PMI 2
-static int
-qpnp_pon_masked_write_for_pmi(struct qpnp_pon *pon, u16 addr, u8 mask, u8 val)
-{
-    int rc;
-    u8 reg;
-
-    rc = spmi_ext_register_readl(pon->spmi->ctrl, SID_PMI,
-                            addr, &reg, 1);
-    if (rc) {
-        dev_err(&pon->spmi->dev,
-            "Unable to read from addr=%hx, rc(%d)\n",
-            addr, rc);
-        return rc;
-    }
-
-    reg &= ~mask;
-    reg |= val & mask;
-    rc = spmi_ext_register_writel(pon->spmi->ctrl, SID_PMI,
-                            addr, &reg, 1);
-    if (rc)
-        dev_err(&pon->spmi->dev,
-            "Unable to write to addr=%hx, rc(%d)\n", addr, rc);
-    return rc;
-}
-
-#ifdef CONFIG_HTC_POWER_DEBUG
-static int qpnp_pon_readl(struct qpnp_pon *pon, u16 addr, u8 *reg)
-{
-	int rc = 0;
-
-	rc = spmi_ext_register_readl(pon->spmi->ctrl, pon->spmi->sid,
-			addr, reg, 1);
-	if (rc) {
-		dev_err(&pon->spmi->dev,
-			"Unable to read addr=%x, rc(%d)\n",
-			QPNP_PON_REVISION2(pon->base), rc);
-		return rc;
-	}
-
-	return rc;
-}
-
-static int qpnp_pon_readl_for_pmi(struct qpnp_pon *pon, u16 addr, u8 *reg)
-{
-	int rc = 0;
-
-	rc = spmi_ext_register_readl(pon->spmi->ctrl, SID_PMI,
-			addr, reg, 1);
-	if (rc) {
-		dev_err(&pon->spmi->dev,
-			"Unable to read addr=%x, rc(%d)\n",
-			QPNP_PON_REVISION2(pon->base), rc);
-		return rc;
-	}
-
-	return rc;
-}
-
-static u8 htc_dump_pon_reg[] =
-{
-	0x40,	
-	0x41,	
-	0x42,	
-	0x43,	
-	0x44,	
-	0x45,	
-	0x46,	
-	0x47,	
-	0x48,	
-	0x49,	
-	0x4A,	
-	0x4B,	
-	0x4C,	
-	0x4D,	
-	0x4E,	
-	0x4F,	
-	0x50,	
-	0x51,	
-	0x52,	
-	0x53,	
-	0x54,	
-	0x55,	
-	0x56,	
-	0x57,	
-	0x58,	
-	0x5A,	
-	0x5B,	
-	0x62,	
-	0x63,	
-	0x64,	
-	0x66,	
-	0x67,	
-	0x70,	
-	0x71,	
-	0x74,	
-	0x75,	
-	0x80,	
-	0x83,	
-	0x88,	
-	0xff
-};
-
-void debug_htc_dump_pon_reg(void)
-{
-	struct qpnp_pon *pon = sys_reset_dev;
-	int i = 0;
-	u8 offset = 0;
-	u8 pm_reg = 0, pmi_reg = 0;
-
-	for( i = 0; htc_dump_pon_reg[i] != 0xff; i++)
-	{
-		offset = htc_dump_pon_reg[i];
-		qpnp_pon_readl(pon, pon->base + (u16)offset, &pm_reg);
-		qpnp_pon_readl_for_pmi(pon, pon->base + (u16)offset, &pmi_reg);
-		pr_info("PON 0x%X: 0x%X 0x%X\n", pon->base + offset, pm_reg, pmi_reg);
-	}
-	pr_info("End of dump PMIC PON.\n");
-}
-#endif
 
 /**
  * qpnp_pon_set_restart_reason - Store device restart reason in PMIC register.
@@ -483,6 +418,41 @@ static ssize_t qpnp_pon_dbc_store(struct device *dev,
 
 static DEVICE_ATTR(debounce_us, 0664, qpnp_pon_dbc_show, qpnp_pon_dbc_store);
 
+int qpnp_pon_store_extra_reset_info(u16 mask, u16 val)
+{
+	int rc = 0;
+	u16 extra_reset_info_reg;
+	struct qpnp_pon *pon = sys_reset_dev;
+
+	if (!pon)
+		return -ENODEV;
+
+	if (mask & 0xFF) {
+		extra_reset_info_reg = QPNP_PON_EXTRA_RESET_INFO_1(pon->base);
+		rc = qpnp_pon_masked_write(pon, extra_reset_info_reg,
+		    mask & 0xFF, val & 0xFF);
+		if (rc) {
+			pr_err("Failed to store extra reset info to 0x%x\n",
+			    extra_reset_info_reg);
+			return rc;
+		}
+	}
+
+	if (mask & 0xFF00) {
+		extra_reset_info_reg = QPNP_PON_EXTRA_RESET_INFO_2(pon->base);
+		rc = qpnp_pon_masked_write(pon, extra_reset_info_reg,
+		    (mask & 0xFF00) >> 8, (val & 0xFF00) >> 8);
+		if (rc) {
+			pr_err("Failed to store extra reset info to 0x%x\n",
+			    extra_reset_info_reg);
+			return rc;
+		}
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL(qpnp_pon_store_extra_reset_info);
+
 static int qpnp_pon_reset_config(struct qpnp_pon *pon,
 		enum pon_power_off_type type)
 {
@@ -558,7 +528,6 @@ int qpnp_pon_system_pwr_off(enum pon_power_off_type type)
 	int rc = 0;
 	struct qpnp_pon *pon = sys_reset_dev;
 	struct qpnp_pon *tmp;
-	u8 reg, sid;
 
 	if (!pon)
 		return -ENODEV;
@@ -569,31 +538,6 @@ int qpnp_pon_system_pwr_off(enum pon_power_off_type type)
 			rc);
 		return rc;
 	}
-
-	sid = 2; 
-	spmi_ext_register_readl(pon->spmi->ctrl, sid,
-			0x13F4, &reg, 1);
-	dev_info(&pon->spmi->dev, "SID: %d, before write, "
-			"0x13F4 value is 0x%02hhx\n", sid, reg);
-
-	
-	rc = qpnp_pon_masked_write_for_pmi(pon, 0x13D0, 0xFF, 0xA5);
-	if (rc) {
-		dev_err(&pon->spmi->dev, "Error configuring 0x13D0 rc: %d\n",
-			rc);
-		return rc;
-	}
-	rc = qpnp_pon_masked_write_for_pmi(pon, 0x13F4, 0x30, 0);
-	if (rc) {
-		dev_err(&pon->spmi->dev, "Error configuring 0x13F4 rc: %d\n",
-			rc);
-		return rc;
-	}
-	sid = 2; 
-	spmi_ext_register_readl(pon->spmi->ctrl, sid,
-			0x13F4, &reg, 1);
-	dev_info(&pon->spmi->dev, "SID: %d, after write, "
-			"0x13F4 value is 0x%02hhx\n", sid, reg);
 
 	/*
 	 * Check if a secondary PON device needs to be configured. If it
@@ -763,6 +707,9 @@ qpnp_pon_input_dispatch(struct qpnp_pon *pon, u32 pon_type)
 	struct qpnp_pon_config *cfg = NULL;
 	u8 pon_rt_sts = 0, pon_rt_bit = 0;
 	u32 key_status;
+	struct timeval timestamp;
+	struct tm tm;
+	char buff[255];
 
 	cfg = qpnp_get_cfg(pon, pon_type);
 	if (!cfg)
@@ -783,6 +730,16 @@ qpnp_pon_input_dispatch(struct qpnp_pon *pon, u32 pon_type)
 	switch (cfg->pon_type) {
 	case PON_KPDPWR:
 		pon_rt_bit = QPNP_PON_KPDPWR_N_SET;
+		/* get the time stamp in readable format to print*/
+		do_gettimeofday(&timestamp);
+		time_to_tm((time_t)(timestamp.tv_sec), 0, &tm);
+		snprintf(buff, sizeof(buff),
+			"%u-%02d-%02d %02d:%02d:%02d UTC",
+			(int) tm.tm_year + 1900, tm.tm_mon + 1,
+			tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
+
+		pr_info("Report pwrkey %s event at: %s\n", pon_rt_bit &
+			pon_rt_sts ? "press" : "release", buff);
 		break;
 	case PON_RESIN:
 		pon_rt_bit = QPNP_PON_RESIN_N_SET;
@@ -801,7 +758,14 @@ qpnp_pon_input_dispatch(struct qpnp_pon *pon, u32 pon_type)
 					cfg->key_code, pon_rt_sts);
 	key_status = pon_rt_sts & pon_rt_bit;
 
-#ifdef CONFIG_QPNP_KEY_INPUT
+#ifdef CONFIG_QPNP_USER_RESET
+	if (pon_rt_sts & QPNP_PON_KPDPWR_N_SET &&
+	    pon_rt_sts & QPNP_PON_RESIN_N_SET) {
+		qpnp_user_wdt_set();
+	} else
+		qpnp_user_wdt_clear();
+#endif
+
 	/* simulate press event in case release event occured
 	 * without a press event
 	 */
@@ -812,7 +776,6 @@ qpnp_pon_input_dispatch(struct qpnp_pon *pon, u32 pon_type)
 
 	input_report_key(pon->pon_input, cfg->key_code, key_status);
 	input_sync(pon->pon_input);
-#endif
 
 	cfg->old_state = !!key_status;
 
@@ -944,11 +907,9 @@ static void bark_work_func(struct work_struct *work)
 	}
 
 	if (!(pon_rt_sts & QPNP_PON_RESIN_BARK_N_SET)) {
-#ifdef CONFIG_QPNP_KEY_INPUT
 		/* report the key event and enable the bark IRQ */
 		input_report_key(pon->pon_input, cfg->key_code, 0);
 		input_sync(pon->pon_input);
-#endif
 		enable_irq(cfg->bark_irq);
 	} else {
 		/* disable reset */
@@ -990,11 +951,9 @@ static irqreturn_t qpnp_resin_bark_irq(int irq, void *_pon)
 		goto err_exit;
 	}
 
-#ifdef CONFIG_QPNP_KEY_INPUT
 	/* report the key event */
 	input_report_key(pon->pon_input, cfg->key_code, 1);
 	input_sync(pon->pon_input);
-#endif
 	/* schedule work to check the bark status for key-release */
 	schedule_delayed_work(&pon->bark_work, QPNP_KEY_STATUS_DELAY);
 err_exit:
@@ -1247,7 +1206,9 @@ static int qpnp_pon_config_init(struct qpnp_pon *pon)
 	}
 
 	/* iterate through the list of pon configs */
-	while ((pp = of_get_next_child(pon->spmi->dev.of_node, pp))) {
+	for_each_available_child_of_node(pon->spmi->dev.of_node, pp) {
+		if (!of_find_property(pp, "qcom,pon-type", NULL))
+			continue;
 
 		cfg = &pon->pon_cfg[i++];
 
@@ -1590,6 +1551,137 @@ free_input_dev:
 	return rc;
 }
 
+static int pon_spare_regulator_enable(struct regulator_dev *rdev)
+{
+	int rc = 0;
+	u8 value;
+	struct pon_regulator *pon_reg = rdev_get_drvdata(rdev);
+
+	pr_debug("reg %s enable addr: %x bit: %d\n", rdev->desc->name,
+		pon_reg->addr, pon_reg->bit);
+
+	value = BIT(pon_reg->bit) & 0xFF;
+	rc = qpnp_pon_masked_write(pon_reg->pon, pon_reg->pon->base +
+				pon_reg->addr, value, value);
+	if (rc)
+		dev_err(&pon_reg->pon->spmi->dev, "Unable to write to %x\n",
+			pon_reg->pon->base + pon_reg->addr);
+	else
+		pon_reg->enabled = true;
+	return rc;
+}
+
+static int pon_spare_regulator_disable(struct regulator_dev *rdev)
+{
+	int rc = 0;
+	u8 mask;
+	struct pon_regulator *pon_reg = rdev_get_drvdata(rdev);
+
+	pr_debug("reg %s disable addr: %x bit: %d\n", rdev->desc->name,
+		pon_reg->addr, pon_reg->bit);
+
+	mask = BIT(pon_reg->bit) & 0xFF;
+	rc = qpnp_pon_masked_write(pon_reg->pon, pon_reg->pon->base +
+				pon_reg->addr, mask, 0);
+	if (rc)
+		dev_err(&pon_reg->pon->spmi->dev, "Unable to write to %x\n",
+			pon_reg->pon->base + pon_reg->addr);
+	else
+		pon_reg->enabled = false;
+	return rc;
+}
+
+static int pon_spare_regulator_is_enable(struct regulator_dev *rdev)
+{
+	struct pon_regulator *pon_reg = rdev_get_drvdata(rdev);
+
+	return pon_reg->enabled;
+}
+
+struct regulator_ops pon_spare_reg_ops = {
+	.enable		= pon_spare_regulator_enable,
+	.disable	= pon_spare_regulator_disable,
+	.is_enabled	= pon_spare_regulator_is_enable,
+};
+
+static int pon_regulator_init(struct qpnp_pon *pon)
+{
+	int rc = 0, i = 0;
+	struct regulator_init_data *init_data;
+	struct regulator_config reg_cfg = {};
+	struct device_node *node = NULL;
+	struct device *dev = &pon->spmi->dev;
+	struct pon_regulator *pon_reg;
+
+	if (!pon->num_pon_reg)
+		return 0;
+
+	pon->pon_reg_cfg = devm_kcalloc(dev, pon->num_pon_reg,
+					sizeof(*(pon->pon_reg_cfg)),
+					GFP_KERNEL);
+
+	if (!pon->pon_reg_cfg)
+		return -ENOMEM;
+
+	for_each_available_child_of_node(dev->of_node, node) {
+		if (!of_find_property(node, "regulator-name", NULL))
+			continue;
+
+		pon_reg = &pon->pon_reg_cfg[i++];
+		pon_reg->pon = pon;
+
+		rc = of_property_read_u32(node, "qcom,pon-spare-reg-addr",
+			&pon_reg->addr);
+		if (rc) {
+			dev_err(dev, "Unable to read address for regulator, rc=%d\n",
+				rc);
+			return rc;
+		}
+
+		rc = of_property_read_u32(node, "qcom,pon-spare-reg-bit",
+			&pon_reg->bit);
+		if (rc) {
+			dev_err(dev, "Unable to read bit for regulator, rc=%d\n",
+				rc);
+			return rc;
+		}
+
+		init_data = of_get_regulator_init_data(dev, node);
+		if (!init_data) {
+			dev_err(dev, "regulator init data is missing\n");
+			return -EINVAL;
+		}
+		init_data->constraints.valid_ops_mask
+			|= REGULATOR_CHANGE_STATUS;
+
+		if (!init_data->constraints.name) {
+			dev_err(dev, "regulator-name is missing\n");
+			return -EINVAL;
+		}
+
+		pon_reg->rdesc.owner = THIS_MODULE;
+		pon_reg->rdesc.type = REGULATOR_VOLTAGE;
+		pon_reg->rdesc.ops = &pon_spare_reg_ops;
+		pon_reg->rdesc.name = init_data->constraints.name;
+
+		reg_cfg.dev = dev;
+		reg_cfg.init_data = init_data;
+		reg_cfg.driver_data = pon_reg;
+		reg_cfg.of_node = node;
+
+		pon_reg->rdev = regulator_register(&pon_reg->rdesc, &reg_cfg);
+		if (IS_ERR(pon_reg->rdev)) {
+			rc = PTR_ERR(pon_reg->rdev);
+			pon_reg->rdev = NULL;
+			if (rc != -EPROBE_DEFER)
+				dev_err(dev, "regulator_register failed, rc=%d\n",
+					rc);
+			return rc;
+		}
+	}
+	return rc;
+}
+
 static bool dload_on_uvlo;
 
 static int qpnp_pon_debugfs_uvlo_dload_get(char *buf,
@@ -1722,70 +1814,17 @@ static void qpnp_pon_debugfs_remove(struct spmi_device *spmi)
 {}
 #endif
 
-int qpnp_pon_set_s3_timer(u32 s3_debounce)
-{
-	int rc = 0;
-	struct qpnp_pon *pon = sys_reset_dev;
-
-	
-	rc = qpnp_pon_masked_write(pon, QPNP_PON_SEC_ACCESS(pon->base),
-			0xFF, QPNP_PON_SEC_UNLOCK);
-	if (rc) {
-		dev_err(&pon->spmi->dev, "PM:Unable to do SEC_ACCESS rc:%d\n",
-				rc);
-		return rc;
-	}
-
-	
-	rc = qpnp_pon_masked_write(pon, QPNP_PON_S3_DBC_CTL(pon->base),
-			QPNP_PON_S3_DBC_DELAY_MASK, s3_debounce);
-	if (rc) {
-		dev_err(&pon->spmi->dev, "PM:Unable to set S3 debounce rc:%d\n",
-				rc);
-		return rc;
-	}
-
-	
-	udelay(200);
-
-	
-	rc = qpnp_pon_masked_write_for_pmi(pon, QPNP_PON_SEC_ACCESS(pon->base),
-			0xFF, QPNP_PON_SEC_UNLOCK);
-	if (rc) {
-		dev_err(&pon->spmi->dev, "PMI:Unable to do SEC_ACCESS rc:%d\n",
-				rc);
-		return rc;
-	}
-
-	
-	rc = qpnp_pon_masked_write_for_pmi(pon, QPNP_PON_S3_DBC_CTL(pon->base),
-			QPNP_PON_S3_DBC_DELAY_MASK, s3_debounce);
-	if (rc) {
-		dev_err(&pon->spmi->dev, "PMI:Unable to set S3 debounce rc:%d\n",
-				rc);
-		return rc;
-	}
-
-	
-	udelay(200);
-
-	return rc;
-}
-
 static int qpnp_pon_probe(struct spmi_device *spmi)
 {
 	struct qpnp_pon *pon;
 	struct resource *pon_resource;
-	struct device_node *itr = NULL;
+	struct device_node *node = NULL;
 	u32 delay = 0, s3_debounce = 0;
 	int rc, sys_reset, index;
 	u8 pon_sts = 0, buf[2];
 	u16 poff_sts = 0;
 	const char *s3_src;
 	u8 s3_src_reg;
-#ifdef CONFIG_HTC_POWER_DEBUG
-	u8 warm_reset_stat = 0;
-#endif
 
 	pon = devm_kzalloc(&spmi->dev, sizeof(struct qpnp_pon),
 							GFP_KERNEL);
@@ -1813,8 +1852,26 @@ static int qpnp_pon_probe(struct spmi_device *spmi)
 	pon->base = pon_resource->start;
 
 	/* get the total number of pon configurations */
-	while ((itr = of_get_next_child(spmi->dev.of_node, itr)))
-		pon->num_pon_config++;
+	for_each_available_child_of_node(spmi->dev.of_node, node) {
+		if (of_find_property(node, "regulator-name", NULL)) {
+			pon->num_pon_reg++;
+		} else if (of_find_property(node, "qcom,pon-type", NULL)) {
+			pon->num_pon_config++;
+		} else {
+			pr_err("Unknown sub-node\n");
+			return -EINVAL;
+		}
+	}
+
+	pr_debug("PON@SID %d: num_pon_config: %d num_pon_reg: %d\n",
+		pon->spmi->sid, pon->num_pon_config, pon->num_pon_reg);
+
+	rc = pon_regulator_init(pon);
+	if (rc) {
+		dev_err(&pon->spmi->dev, "Error in pon_regulator_init rc: %d\n",
+			rc);
+		return rc;
+	}
 
 	if (!pon->num_pon_config)
 		/* No PON config., do not register the driver */
@@ -1886,15 +1943,7 @@ static int qpnp_pon_probe(struct spmi_device *spmi)
 			panic("An UVLO was occurred.");
 	}
 
-#ifdef CONFIG_HTC_POWER_DEBUG
 	/* program s3 debounce */
-	rc = spmi_ext_register_readl(pon->spmi->ctrl, pon->spmi->sid,
-				QPNP_PON_WARM_RESET_REASON1(pon->base),
-				&warm_reset_stat, 1);
-	htc_set_pon_reason(cold_boot, ffs(pon_sts) - 1, ffs(warm_reset_stat) - 1, ffs(poff_sts) - 1);
-#endif
-
-	
 	rc = of_property_read_u32(pon->spmi->dev.of_node,
 				"qcom,s3-debounce", &s3_debounce);
 	if (rc) {
