@@ -347,7 +347,7 @@ CHECK		= sparse
 
 # Try to always use GNU ld
 ifneq ($(wildcard $(CROSS_COMPILE)ld.bfd),)
-LD		= $(CROSS_COMPILE)ld.bfd
+  LD		= $(CROSS_COMPILE)ld.bfd
 endif
 
 # Use the wrapper for the compiler.  This wrapper scans for new
